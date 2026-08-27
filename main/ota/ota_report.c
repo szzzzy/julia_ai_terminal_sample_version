@@ -9,7 +9,7 @@
  * 4. 通过非阻塞 transport 将消息交给通信模块，并把 PUBACK 交给独立任务处理。
  *
  * 模块关系：
- * - native_ota_example.c 在下载和启动验收阶段提交事件；
+ * - ota_engine.c 与 ota_boot_flow.c 在下载和启动验收阶段提交事件；
  * - mqtt_comm.c 注册 transport，负责 MQTT 队列、msg_id 与 event_id 的关联；
  * - ota_state_store.c 提供共享的 NVS 容量与写入失败诊断；
  * - 本文件不调用 ESP-MQTT，不执行 HTTP/Flash 操作。
@@ -36,6 +36,8 @@
 #include "nvs.h"
 
 #include "ota_state_store.h"
+#include "ota_control_plane.h"
+#include "ota_stability.h"
 
 /** 本模块统一使用的日志标签。 */
 static const char *TAG = "ota_report";

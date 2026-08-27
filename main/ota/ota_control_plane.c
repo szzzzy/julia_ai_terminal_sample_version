@@ -9,7 +9,7 @@
  * - 从 mqtt_comm.c 接收一条已经完成 MQTT 分片重组的 JSON 响应；
  * - 使用 native_ota_get_device_id() 和 Kconfig 身份配置校验响应归属；
  * - 查询 ota_state_store.c，拒绝已经被隔离的 artifact；
- * - 向 native_ota_example.c 输出固定大小的 native_ota_manifest_t。
+ * - 向 ota_engine.c 输出固定大小的 native_ota_manifest_t。
  *
  * 线程安全与限制：
  * - 最近 request_id 由短临界区保护，避免检查任务写入时被响应事件读取到半个 ID；

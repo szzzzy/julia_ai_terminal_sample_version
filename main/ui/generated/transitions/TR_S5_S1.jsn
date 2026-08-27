@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "name": "TR_S5_S1",
+  "fps": 6,
+  "loop": "once-hold",
+  "contains_blink": false,
+  "frame_count": 7,
+  "crop": [
+    0,
+    0,
+    360,
+    360
+  ],
+  "container_crc32": "fc824c35",
+  "file_crc32": "c66e4d62",
+  "frames": [
+    {
+      "offset": 116,
+      "size": 27408,
+      "crc32": "a08c635f"
+    },
+    {
+      "offset": 27524,
+      "size": 33240,
+      "crc32": "3b2b5fda"
+    },
+    {
+      "offset": 60764,
+      "size": 32156,
+      "crc32": "b2ecd4e2"
+    },
+    {
+      "offset": 92920,
+      "size": 36512,
+      "crc32": "2afc5eeb"
+    },
+    {
+      "offset": 129432,
+      "size": 36600,
+      "crc32": "5c4cca9f"
+    },
+    {
+      "offset": 166032,
+      "size": 35728,
+      "crc32": "8288c096"
+    },
+    {
+      "offset": 201760,
+      "size": 27008,
+      "crc32": "ce928a0f"
+    }
+  ]
+}

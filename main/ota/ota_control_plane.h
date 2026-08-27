@@ -13,11 +13,17 @@
 
 #include "esp_err.h"
 
-#include "native_ota_example.h"
+#include "ota_types.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/** 获取由芯片基础 MAC 地址生成的稳定设备标识。 */
+esp_err_t native_ota_get_device_id(char *device_id, size_t device_id_size);
+
+/** 生成设备主动发送的 OTA 版本检查请求。 */
+esp_err_t native_ota_build_check_request(char *json, size_t json_size, size_t *json_len);
 
 /**
  * @brief 解析并校验一条 OTA 服务器响应。

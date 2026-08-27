@@ -1,3 +1,161 @@
 {
-  "source": "../julia_reference_ui.png",
+  "source": "D:\\Julia_Bot\\esp_proj\\main\\ui\\generated\\julia_reference_ui.png",
   "layers": [
+    {
+      "name": "eye_left_open",
+      "width": 55,
+      "height": 58,
+      "alpha": false,
+      "bytes": 6380,
+      "rect": [
+        112,
+        108,
+        55,
+        58
+      ]
+    },
+    {
+      "name": "eye_left_half",
+      "width": 55,
+      "height": 58,
+      "alpha": false,
+      "bytes": 6380,
+      "rect": [
+        112,
+        108,
+        55,
+        58
+      ]
+    },
+    {
+      "name": "eye_left_closed",
+      "width": 55,
+      "height": 58,
+      "alpha": false,
+      "bytes": 6380,
+      "rect": [
+        112,
+        108,
+        55,
+        58
+      ]
+    },
+    {
+      "name": "avatar_pupil_left",
+      "width": 27,
+      "height": 32,
+      "alpha": true,
+      "bytes": 2592,
+      "rect": [
+        132,
+        119,
+        27,
+        32
+      ]
+    },
+    {
+      "name": "eye_right_open",
+      "width": 55,
+      "height": 58,
+      "alpha": false,
+      "bytes": 6380,
+      "rect": [
+        194,
+        108,
+        55,
+        58
+      ]
+    },
+    {
+      "name": "eye_right_half",
+      "width": 55,
+      "height": 58,
+      "alpha": false,
+      "bytes": 6380,
+      "rect": [
+        194,
+        108,
+        55,
+        58
+      ]
+    },
+    {
+      "name": "eye_right_closed",
+      "width": 55,
+      "height": 58,
+      "alpha": false,
+      "bytes": 6380,
+      "rect": [
+        194,
+        108,
+        55,
+        58
+      ]
+    },
+    {
+      "name": "avatar_pupil_right",
+      "width": 27,
+      "height": 32,
+      "alpha": true,
+      "bytes": 2592,
+      "rect": [
+        204,
+        119,
+        27,
+        32
+      ]
+    },
+    {
+      "name": "mouth_closed",
+      "width": 54,
+      "height": 34,
+      "alpha": false,
+      "bytes": 3672,
+      "rect": [
+        153,
+        177,
+        54,
+        34
+      ]
+    },
+    {
+      "name": "mouth_half",
+      "width": 54,
+      "height": 34,
+      "alpha": false,
+      "bytes": 3672,
+      "rect": [
+        153,
+        177,
+        54,
+        34
+      ]
+    },
+    {
+      "name": "mouth_open",
+      "width": 54,
+      "height": 34,
+      "alpha": false,
+      "bytes": 3672,
+      "rect": [
+        153,
+        177,
+        54,
+        34
+      ]
+    },
+    {
+      "name": "hair_tip",
+      "width": 34,
+      "height": 52,
+      "alpha": true,
+      "bytes": 5304,
+      "rect": [
+        73,
+        184,
+        34,
+        52
+      ]
+    }
+  ]
+}

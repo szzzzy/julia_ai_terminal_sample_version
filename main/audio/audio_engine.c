@@ -34,6 +34,7 @@
 
 #include "http_downloader.h"
 #include "mqtt_comm.h"
+#include "ota_control_plane.h"
 #include "ota_stability.h"
 
 /** 本模块统一使用的日志标签。 */

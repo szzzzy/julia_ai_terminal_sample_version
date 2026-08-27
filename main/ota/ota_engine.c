@@ -1,97 +1,36 @@
-/* OTA example
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
-
 /**
- * @file    native_ota_example.c
- * @brief   基于 ESP-IDF 原生 OTA 接口的固件在线升级示例主程序。
+ * @file    ota_engine.c
+ * @brief   固件 OTA 下载、断点续传、校验、Flash 写入与分区切换引擎。
  *
- * 主要职责：
- * 1. 初始化 NVS、网络协议栈，并通过示例连接辅助函数建立 Wi-Fi 或以太网连接；
- * 2. 通过 HTTP(S) 从配置的服务器下载新固件，并按数据块写入下一个 OTA 分区；
- * 3. 在写入前检查固件描述信息，避免重复安装当前版本或上一次启动失败的版本；
- * 4. 完成镜像校验后设置新的启动分区，并重启设备；
- * 5. 设备重启后执行诊断，决定确认新固件或触发回滚。
- *
- * 模块关系：
- * - 依赖 `app_update` 提供的 OTA 分区、镜像状态和写入接口；
- * - 依赖 `esp_http_client` 从固件服务器接收镜像数据；
- * - MQTT 模块主动上报设备版本，并把服务器决策交给本文件解析；
- * - 通过 `ota_control_plane` 校验 type、version、url、sha256，并关联检查请求；
- * - 通过 `ota_stability` 完成断点、Range、镜像头、摘要和提交前条件校验；
- * - 通过 `ota_boot_health` 完成启动验收前的本地健康检查与安全模式处理；
- * - 依赖 `protocol_examples_common` 根据 menuconfig 配置建立网络连接；
- * - 依赖 `server_certs/ca_cert.pem`，该证书由组件构建脚本嵌入最终固件；
- * - 通过 GPIO 诊断输入判断新固件是否满足最基本的启动条件。
- *
- * 运行模型：
- * - `app_main` 完成一次性初始化后，启动 MQTT 客户端；
- * - 通信客户端连接就绪后立即检查版本，此后按带随机抖动的配置周期重复检查；
- * - 服务器返回 `update=true` 且元数据有效时才创建唯一的 `ota_example_task`；
- * - OTA 任务在网络读取、Flash 写入和错误处理过程中运行；
- * - OTA 成功后立即重启，重启后的 `app_main` 负责确认或回滚待验证镜像；
- * - OTA 写缓冲区和写入句柄仅由 OTA 任务使用；任务占用状态由临界区保护；
- * - `diagnostic` 会阻塞约 5 s，因此不能在中断上下文中调用。
- *
- * 注意事项：
- * - 固件 URL、目标版本和 SHA-256 来自服务器响应；设备身份、检查周期、接收超时、诊断 GPIO 和网络类型由项目配置项决定；
- * - 证书内容必须与固件服务器的证书链匹配，不能仅依赖跳过证书名称检查来规避校验；
- * - 本文件只描述 OTA 示例的运行逻辑，不改变分区表、网络参数或硬件配置。
+ * 本模块接收控制面已经校验的服务器响应，保证同一时间只有一个 OTA 任务，
+ * 并负责从 HTTPS 下载镜像、恢复断点、写入目标分区、校验摘要、切换启动分区
+ * 以及成功后的重启。应用启动和 PENDING_VERIFY 验收不属于本模块。
  */
-#include <stdio.h>
-#include <stdint.h>
+#include <errno.h>
+#include <inttypes.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <inttypes.h>
-#include <errno.h>
 #include <sys/param.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "esp_system.h"
 #include "esp_app_desc.h"
-#include "esp_event.h"
-#include "esp_log.h"
-#include "esp_netif.h"
-#include "breathing_led.h"
-#include "julia_led.h"
-
-#include "esp_ota_ops.h"
 #include "esp_http_client.h"
+#include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "esp_system.h"
 #include "esp_tls_errors.h"
 
-#include "nvs_flash.h"
-
-#include "driver/gpio.h"
-
-#include "native_ota_example.h"
-#include "network_lifecycle.h"
-#include "ota_boot_health.h"
 #include "ota_control_plane.h"
 #include "ota_engine.h"
 #include "ota_report.h"
 #include "ota_state_store.h"
 #include "ota_stability.h"
-
-#include "mqtt_comm.h"
-#include "audio_service.h"
-#include "sd_card.h"
-#include "voice_service.h"
-#include "board_audio.h"
-#include "wake_detector.h"
-#include "julia_display.h"
-#include "julia_avatar.h"
-#if CONFIG_VOICE_PUSH_DEMO_ENABLE
-#include "voice_push_demo.h"
-#endif
 
 #define BUFFSIZE 1024 /**< OTA 下载和 Flash 写入缓冲区大小，单位为字节。 */
 #define HASH_LEN 32   /**< SHA-256 摘要长度，单位为字节。 */
@@ -100,7 +39,7 @@
 #define OTA_IMAGE_HEADER_SIZE OTA_STABILITY_IMAGE_HEADER_SIZE
 
 /** 本文件统一使用的日志标签。 */
-static const char *TAG = "native_ota_example";
+static const char *TAG = "ota_engine";
 
 /** 连续空读的上限；每次空读间隔 10 ms，达到后视为网络无响应。 */
 #define OTA_MAX_EMPTY_READS 600U
@@ -149,7 +88,7 @@ static bool s_ota_in_progress;
 static portMUX_TYPE s_ota_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
 /** OTA 任务入口；任务参数为一次服务器响应的堆上深拷贝。 */
-static void ota_example_task(void *pvParameter);
+static void ota_engine_task(void *pvParameter);
 
 /**
  * OTA 数据接收缓冲区。
@@ -219,7 +158,7 @@ bool ota_engine_is_running(void)
  * @note 函数只解析元数据并调度任务，不阻塞等待 HTTPS 下载；任务参数在创建成功后由 OTA
  *       任务取得所有权并释放。
  */
-esp_err_t native_ota_handle_server_json(const char *json, size_t json_len)
+esp_err_t ota_engine_handle_server_json(const char *json, size_t json_len)
 {
     ota_request_t manifest;
     bool download_requested = false;
@@ -246,7 +185,7 @@ esp_err_t native_ota_handle_server_json(const char *json, size_t json_len)
 
     ESP_LOGI(TAG, "Creating OTA task: artifact=%s, version=%s, size=%" PRIu32 ", force_update=%d",
              request->artifact_id, request->version, request->image_size, (int)request->force_update);
-    if (xTaskCreate(ota_example_task, "ota_example_task", 12288, request, 5, NULL) != pdPASS) {
+    if (xTaskCreate(ota_engine_task, "ota_engine_task", 12288, request, 5, NULL) != pdPASS) {
         ota_clear_in_progress();
         free(request);
         return ESP_ERR_NO_MEM;
@@ -258,19 +197,19 @@ esp_err_t native_ota_handle_server_json(const char *json, size_t json_len)
 /**
  * @brief 兼容原有调用方的 OTA JSON 入口。
  *
- * 新通信模块使用 native_ota_handle_server_json()；保留本包装函数可避免现有测试
+ * 新通信模块使用 ota_engine_handle_server_json()；保留本包装函数可避免现有测试
  * 或外部模块在协议升级后立即失效。
  *
  * @param[in] json      原有 OTA JSON 首地址，不允许为 NULL。
  * @param[in] json_len  JSON 有效字节数，范围为 1～NATIVE_OTA_JSON_MAX_LEN。
  * @return ESP_OK 响应有效或 OTA 任务创建成功。
- * @return 其他 esp_err_t 由 native_ota_handle_server_json() 原样返回。
+ * @return 其他 esp_err_t 由 ota_engine_handle_server_json() 原样返回。
  *
  * @note 本函数不执行下载，只转发到统一解析入口，不允许在中断上下文调用。
  */
-esp_err_t native_ota_trigger_json(const char *json, size_t json_len)
+esp_err_t ota_engine_trigger_json(const char *json, size_t json_len)
 {
-    return native_ota_handle_server_json(json, json_len);
+    return ota_engine_handle_server_json(json, json_len);
 }
 
 /**
@@ -482,7 +421,7 @@ static native_ota_report_state_t ota_report_state_for_failure(
  * @note 所有退出路径汇聚到 cleanup，确保 HTTP 客户端、OTA 句柄、恢复记录和任务占用状态
  *       按当前资源是否已建立分别清理；成功切换启动分区后通过 esp_restart() 重启。
  */
-static void ota_example_task(void *pvParameter)
+static void ota_engine_task(void *pvParameter)
 {
     ota_request_t request = *(ota_request_t *)pvParameter;
     free(pvParameter);
@@ -522,7 +461,7 @@ static void ota_example_task(void *pvParameter)
         report_context_valid = true;
     }
 
-    ESP_LOGI(TAG, "Starting OTA example task: artifact=%s, version=%s",
+    ESP_LOGI(TAG, "Starting OTA task: artifact=%s, version=%s",
              request.artifact_id, request.version);
 
     if (report_context_valid) {
@@ -1116,316 +1055,3 @@ cleanup:
     }
 }
 
-/**
- * @brief 对升级后首次启动的固件执行最小 GPIO 诊断。
- *
- * @return true 诊断 GPIO 等待 5 s 后为高电平，当前实现视为诊断通过。
- * @return false 诊断 GPIO 为低电平，当前实现视为诊断失败。
- *
- * 函数将配置的 GPIO 设置为输入并开启内部上拉，等待外部电路稳定后读取电平，最后恢复
- * GPIO 默认状态。它用于 OTA 的 PENDING_VERIFY 流程，执行期间阻塞约 5 s；外部硬件必须
- * 遵循“高电平表示通过”的约定。
- *
- * @note 只能在普通 FreeRTOS 任务上下文调用，不能在中断上下文调用。
- */
-static bool diagnostic(void)
-{
-    /* 诊断输入使用上拉，避免外部信号悬空时读到不确定电平。 */
-    gpio_config_t io_conf;
-    io_conf.intr_type    = GPIO_INTR_DISABLE;
-    io_conf.mode         = GPIO_MODE_INPUT;
-    io_conf.pin_bit_mask = (1ULL << CONFIG_EXAMPLE_GPIO_DIAGNOSTIC);
-    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    io_conf.pull_up_en   = GPIO_PULLUP_ENABLE;
-    gpio_config(&io_conf);
-
-    ESP_LOGI(TAG, "Diagnostics (5 sec)...");
-    /* 给外部诊断电路留出稳定时间，避免刚重启时的瞬态导致误回滚。 */
-    vTaskDelay(5000 / portTICK_PERIOD_MS);
-
-    /* 当前实现把高电平作为诊断成功条件。 */
-    bool diagnostic_is_ok = gpio_get_level(CONFIG_EXAMPLE_GPIO_DIAGNOSTIC);
-
-    /* 诊断结束后释放 GPIO 配置，避免长期占用该引脚的输入/上拉设置。 */
-    gpio_reset_pin(CONFIG_EXAMPLE_GPIO_DIAGNOSTIC);
-    return diagnostic_is_ok;
-}
-
-/**
- * @brief 执行不依赖网络连接的本地基础设施和资源健康检查。
- *
- * @param[in] include_gpio_diagnostic true 时额外执行配置的 GPIO 诊断；通常仅在
- *                                    PENDING_VERIFY 启动阶段传入 true。
- * @return true 当前运行分区、物理 Flash、应用描述、堆空间和基础队列检查均通过。
- * @return false 任一必要检查失败，调用者不得继续确认 pending 镜像或启动通信。
- *
- * 检查顺序先确认运行/目标分区和物理 Flash 容量，再检查应用描述、产品配置、堆空间和
- * FreeRTOS 队列收发；最后按参数选择 GPIO 诊断。函数不连接 Wi-Fi 或 MQTT，
- * 从而不会把网络暂时不可用误判为镜像健康。
- *
- * @note 创建的测试队列会在函数返回前删除；GPIO 诊断可能阻塞约 5 s，不能在中断调用。
- */
-static bool ota_local_health_check(bool include_gpio_diagnostic)
-{
-    return ota_boot_health_check(include_gpio_diagnostic, diagnostic);
-}
-
-/**
- * @brief 进入不启动通信客户端的 OTA 安全模式。
- *
- * @param[in] reason 进入安全模式的诊断原因，可为 NULL。
- *
- * @note 本函数不返回、不重启，也不擦除 NVS；通过每秒延时保持任务可调度，等待人工处理
- *       或外部复位。只能在普通任务上下文调用。
- */
-static void __attribute__((noreturn)) ota_enter_safe_mode(const char *reason)
-{
-    ota_boot_health_enter_safe_mode(reason);
-}
-
-/**
- * @brief 读取最近一次被 bootloader 判定无效的镜像版本，用于回滚结果关联。
- *
- * @param[out] version 接收版本字符串的缓冲区；函数失败时写入空串。
- * @param[in] version_size 缓冲区容量，单位为字节，必须大于 0。
- * @return true 找到无效分区且成功读取非空版本。
- * @return false 参数无效、没有无效分区或分区描述读取失败。
- *
- * @note 只读 bootloader/分区描述信息，不修改 OTA 状态；调用方负责与持久化报告上下文
- *       比较版本后再决定是否上报 rolled_back。
- */
-static bool ota_get_last_invalid_version(char *version, size_t version_size)
-{
-    if (version == NULL || version_size == 0) {
-        return false;
-    }
-    version[0] = '\0';
-    const esp_partition_t *invalid = esp_ota_get_last_invalid_partition();
-    if (invalid == NULL) {
-        return false;
-    }
-    esp_app_desc_t invalid_desc;
-    if (esp_ota_get_partition_description(invalid, &invalid_desc) != ESP_OK ||
-        invalid_desc.version[0] == '\0') {
-        return false;
-    }
-    strncpy(version, invalid_desc.version, version_size - 1U);
-    version[version_size - 1U] = '\0';
-    return true;
-}
-
-/**
- * @brief ESP-IDF 应用入口，按 rollback 安全顺序初始化本地基础设施和通信。
- *
- * 顺序固定为：读取 PENDING_VERIFY、初始化 NVS/netif/event loop、本地自检、确认或回滚、
- * 清理已确认版本的恢复记录、连接网络、启动 MQTT。网络连通性不参与镜像验收，
- * 只有本地检查和 pending 镜像确认完成后才允许启动通信客户端。
- *
- * @note 该函数由 ESP-IDF 启动框架调用，不接收参数且不返回；失败路径进入安全模式或由
- *       ESP_ERROR_CHECK 触发异常处理。函数会初始化 NVS、网络接口和默认事件循环。
- */
-void app_main(void)
-{
-    ESP_LOGI(TAG, "OTA example app_main start");
-
-    bool pending_verify = false;
-    esp_err_t err = ota_boot_health_begin(&pending_verify);
-    if (err != ESP_OK) {
-        ota_enter_safe_mode("cannot read OTA boot state");
-    }
-
-    err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        if (pending_verify) {
-            ESP_LOGE(TAG, "NVS format is incompatible during PENDING_VERIFY; refusing to erase NVS");
-            err = ota_boot_health_reject("NVS format incompatible");
-            ota_enter_safe_mode(err == ESP_ERR_OTA_ROLLBACK_FAILED ?
-                                "rollback unavailable after NVS failure" :
-                                "rollback failed after NVS failure");
-        }
-        ESP_LOGW(TAG, "Erasing NVS because no image is pending verification");
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
-    if (err != ESP_OK) {
-        ota_enter_safe_mode("NVS initialization failed");
-    }
-    ota_state_store_log_nvs_usage(TAG, "startup", ESP_OK);
-
-    err = native_ota_report_init();
-    if (err != ESP_OK) {
-        /* 状态上报不可用不能阻断已有 OTA/回滚主流程。 */
-        ESP_LOGW(TAG, "OTA report initialization failed: %s", esp_err_to_name(err));
-    }
-
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-    if (pending_verify) {
-        err = native_ota_report_boot_pending_verify();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Could not report booted_pending_verify: %s", esp_err_to_name(err));
-        }
-    }
-
-    if (!ota_local_health_check(pending_verify)) {
-        if (pending_verify) {
-            native_ota_failure_reason_t rollback_reason =
-                esp_ota_check_rollback_is_possible() ?
-                NATIVE_OTA_FAILURE_BOOT_SELF_TEST_FAILED :
-                NATIVE_OTA_FAILURE_ROLLBACK_UNAVAILABLE;
-            err = native_ota_report_boot_rolled_back(rollback_reason);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Could not report rolled_back: %s", esp_err_to_name(err));
-            }
-            err = ota_boot_health_reject("boot self-test failed");
-            ota_enter_safe_mode(err == ESP_ERR_OTA_ROLLBACK_FAILED ?
-                                "rollback unavailable after self-test" :
-                                "rollback failed after self-test");
-        }
-        ota_enter_safe_mode("local health check failed");
-    }
-
-    /* A product override must finish critical local business initialization before a
-     * PENDING_VERIFY image can become VALID. Remote connectivity is intentionally not
-     * an acceptance condition. */
-    if (pending_verify && !ota_boot_health_product_check()) {
-        native_ota_failure_reason_t rollback_reason =
-            esp_ota_check_rollback_is_possible() ?
-            NATIVE_OTA_FAILURE_BOOT_SELF_TEST_FAILED :
-            NATIVE_OTA_FAILURE_ROLLBACK_UNAVAILABLE;
-        err = native_ota_report_boot_rolled_back(rollback_reason);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Could not report rolled_back after product health failure: %s",
-                     esp_err_to_name(err));
-        }
-        err = ota_boot_health_reject("product boot health check failed");
-        ota_enter_safe_mode(err == ESP_ERR_OTA_ROLLBACK_FAILED ?
-                            "rollback unavailable after product health check" :
-                            "rollback failed after product health check");
-    }
-
-    if (pending_verify) {
-        err = ota_boot_health_confirm();
-        if (err != ESP_OK) {
-            native_ota_failure_reason_t rollback_reason =
-                esp_ota_check_rollback_is_possible() ?
-                NATIVE_OTA_FAILURE_BOOT_SELF_TEST_FAILED :
-                NATIVE_OTA_FAILURE_ROLLBACK_UNAVAILABLE;
-            (void)native_ota_report_boot_rolled_back(rollback_reason);
-            err = ota_boot_health_reject("cannot confirm healthy image");
-            ota_enter_safe_mode("cannot confirm or rollback image");
-        }
-        err = native_ota_report_boot_succeeded();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Could not report succeeded: %s", esp_err_to_name(err));
-        }
-    }
-
-    const esp_partition_t *running = esp_ota_get_running_partition();
-    if (running != NULL) {
-        esp_app_desc_t running_desc;
-        if (esp_ota_get_partition_description(running, &running_desc) == ESP_OK) {
-            ESP_LOGI(TAG, "Running firmware version: %s", running_desc.version);
-            char last_invalid_version[sizeof(running_desc.version)] = { 0 };
-            const char *invalid_version =
-                ota_get_last_invalid_version(last_invalid_version, sizeof(last_invalid_version)) ?
-                last_invalid_version : NULL;
-            if (!pending_verify && invalid_version != NULL) {
-                err = native_ota_report_reconcile_rollback(running_desc.version,
-                                                           invalid_version);
-                if (err != ESP_OK) {
-                    ESP_LOGW(TAG, "Could not reconcile OTA rollback report: %s",
-                             esp_err_to_name(err));
-                }
-            }
-            err = ota_state_store_reconcile_running_version(running_desc.version);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to reconcile OTA resume record: %s", esp_err_to_name(err));
-            }
-        }
-    }
-
-    /* 语音服务装配：注册 MQTT 语音命令 topic（非 critical，不影响 OTA 就绪）。
-     * WSS 客户端不在此启动：取得 IPv4 后由下方注册的 ip_ready 回调启动。 */
-    err = voice_service_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Voice service init failed: %s", esp_err_to_name(err));
-    }
-    /* 板级音频（最小包 mic_test.c 抽取）：MIC 走 WSS 上行、SPKS/SPKE 下行控制。 */
-    err = board_audio_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Board audio init failed: %s", esp_err_to_name(err));
-    } else {
-        err = voice_service_init_board_audio();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Voice-board audio wiring failed: %s", esp_err_to_name(err));
-        }
-    }
-    /* L0/L1 UI is local and non-critical: display failure must not regress
-     * voice, OTA, MQTT, or Wi-Fi startup.  The backlight is enabled only after
-     * the first complete portrait has been rendered. */
-    err = julia_display_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Julia display init failed: %s", esp_err_to_name(err));
-    } else {
-        err = julia_avatar_init();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Julia avatar init failed: %s", esp_err_to_name(err));
-        } else {
-            err = julia_display_set_backlight(true);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Julia backlight enable failed: %s", esp_err_to_name(err));
-            }
-        }
-    }
-    /* 本地唤醒词（WakeNet "你好小智"）：检测到后自动 MIC_START 推流。
-     * 依赖 "model" 分区（构建时 esp-sr 自动打包 srmodels.bin）。 */
-    err = wake_detector_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Wake detector init failed: %s", esp_err_to_name(err));
-    }
-    /* 音频服务装配点（当前无自有状态，与 OTA 服务层保持一致的初始化顺序）。 */
-    err = audio_service_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Audio service init failed: %s", esp_err_to_name(err));
-    }
-
-    /* SD 卡（SPI，FAT 挂载到 /sdcard）：供 voice_service 的 "SD:/<name>" 文件
-     * 推送与显式传输演示使用；不依赖网络，挂载失败会自动重试。 */
-    err = sd_card_start();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SD card monitor not started: %s", esp_err_to_name(err));
-    }
-
-    /* 取得 IPv4 后按注册顺序启动 MQTT 与 WSS 语音服务；任一启动失败都由网络
-     * 生命周期任务按独立的有界退避重试，服务之间互不干扰。 */
-    err = network_lifecycle_register_ip_ready(mqtt_comm_ip_ready, NULL);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "MQTT IP-ready callback registration failed: %s",
-                 esp_err_to_name(err));
-    }
-    err = network_lifecycle_register_ip_ready(voice_service_ip_ready, NULL);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Voice IP-ready callback registration failed: %s",
-                 esp_err_to_name(err));
-    }
-
-    /* 网络不可用绝不能阻断本地应用或影响 pending 镜像验收。Wi-Fi 管理器在后台
-     * 永久重连；只有取得 IPv4 后才会调用已注册的服务启动回调。 */
-    ESP_LOGI(TAG, "Starting background Wi-Fi lifecycle");
-    err = network_lifecycle_start();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Background Wi-Fi lifecycle is unavailable: %s; local application remains active",
-                 esp_err_to_name(err));
-    }
-
-    /* 设备主动推送演示（默认关闭）：WSS 会话默认由云端驱动（服务端发
-     * FILE_SEND，设备推送）；启用演示后设备才会主动推测试音频列表。 */
-#if CONFIG_VOICE_PUSH_DEMO_ENABLE
-    err = voice_push_demo_start();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Voice push demo not started: %s", esp_err_to_name(err));
-    }
-#endif
-}

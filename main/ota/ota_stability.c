@@ -5,7 +5,7 @@
  * 基于 ESP-IDF 官方 native OTA 流程，提供检查点、镜像预检和提交前校验。
  *
  * 模块关系：
- * - 由 native_ota_example.c 调用，决定是否能够安全恢复、校验和提交 OTA 镜像；
+ * - 由 ota_engine.c 调用，决定是否能够安全恢复、校验和提交 OTA 镜像；
  * - 通过 ota_state_store.c 保存断点和 artifact 隔离状态；
  * - 使用 ESP-IDF 分区/镜像 API、Flash Encryption eFuse 和 PSA Crypto 读取与校验数据；
  * - 通过两个弱符号钩子向板级代码提供电源和关键业务状态检查入口。

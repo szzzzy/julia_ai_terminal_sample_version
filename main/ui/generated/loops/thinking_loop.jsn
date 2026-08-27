@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "name": "thinking_loop",
+  "fps": 10,
+  "loop": "ping-pong",
+  "contains_blink": false,
+  "frame_count": 8,
+  "crop": [
+    0,
+    0,
+    360,
+    360
+  ],
+  "container_crc32": "ed27c90b",
+  "file_crc32": "1807d3ef",
+  "frames": [
+    {
+      "offset": 128,
+      "size": 40954,
+      "crc32": "7e943cd4"
+    },
+    {
+      "offset": 41082,
+      "size": 40570,
+      "crc32": "16ab11bc"
+    },
+    {
+      "offset": 81652,
+      "size": 40472,
+      "crc32": "42a3cf21"
+    },
+    {
+      "offset": 122124,
+      "size": 40570,
+      "crc32": "16ab11bc"
+    },
+    {
+      "offset": 162694,
+      "size": 40954,
+      "crc32": "7e943cd4"
+    },
+    {
+      "offset": 203648,
+      "size": 40190,
+      "crc32": "d6037b2f"
+    },
+    {
+      "offset": 243838,
+      "size": 40790,
+      "crc32": "4eadee40"
+    },
+    {
+      "offset": 284628,
+      "size": 40190,
+      "crc32": "d6037b2f"
+    }
+  ]
+}

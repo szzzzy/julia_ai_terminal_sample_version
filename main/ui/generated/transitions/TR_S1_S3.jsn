@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "name": "TR_S1_S3",
+  "fps": 6,
+  "loop": "once-hold",
+  "contains_blink": false,
+  "frame_count": 7,
+  "crop": [
+    0,
+    0,
+    360,
+    360
+  ],
+  "container_crc32": "0d9549c8",
+  "file_crc32": "4f86a1bc",
+  "frames": [
+    {
+      "offset": 116,
+      "size": 27008,
+      "crc32": "ce928a0f"
+    },
+    {
+      "offset": 27124,
+      "size": 36744,
+      "crc32": "24467b79"
+    },
+    {
+      "offset": 63868,
+      "size": 37316,
+      "crc32": "c5427ec9"
+    },
+    {
+      "offset": 101184,
+      "size": 36484,
+      "crc32": "38d2623b"
+    },
+    {
+      "offset": 137668,
+      "size": 41252,
+      "crc32": "fe908f37"
+    },
+    {
+      "offset": 178920,
+      "size": 37144,
+      "crc32": "60d0033e"
+    },
+    {
+      "offset": 216064,
+      "size": 29888,
+      "crc32": "2f1587af"
+    }
+  ]
+}

@@ -21,7 +21,6 @@
 #define LCD_DATA2_GPIO            GPIO_NUM_42
 #define LCD_DATA3_GPIO            GPIO_NUM_41
 #define LCD_CS_GPIO               GPIO_NUM_21
-#define LCD_BACKLIGHT_GPIO        GPIO_NUM_5
 #define LCD_PIXEL_CLOCK_HZ        (40U * 1000U * 1000U)
 #define LCD_WIDTH                 360
 #define LCD_HEIGHT                360
@@ -217,25 +216,6 @@ static const st77916_lcd_init_cmd_t vendor_specific_init_new[] = {
     {0x29, (uint8_t[]){0x00}, 1, 0},
 };
 
-esp_err_t julia_display_set_backlight(bool enabled)
-{
-    ESP_RETURN_ON_ERROR(gpio_set_level(LCD_BACKLIGHT_GPIO, enabled ? 1 : 0),
-                        TAG, "set backlight failed");
-    return ESP_OK;
-}
-
-static esp_err_t init_backlight(void)
-{
-    gpio_config_t config = {
-        .pin_bit_mask = 1ULL << LCD_BACKLIGHT_GPIO,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_RETURN_ON_ERROR(gpio_config(&config), TAG, "configure backlight failed");
-    return julia_display_set_backlight(false);
-}
 
 static esp_err_t reset_panel_via_existing_tca9554(void)
 {
@@ -258,7 +238,7 @@ esp_err_t julia_display_init(void)
         return ESP_OK;
     }
 
-    ESP_RETURN_ON_ERROR(init_backlight(), TAG, "backlight init failed");
+
     ESP_RETURN_ON_ERROR(reset_panel_via_existing_tca9554(), TAG, "panel reset failed");
 
     const spi_bus_config_t bus_config = {

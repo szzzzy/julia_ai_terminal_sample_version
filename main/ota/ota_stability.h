@@ -16,12 +16,21 @@
 #include "esp_err.h"
 #include "esp_partition.h"
 
-#include "native_ota_example.h"
 #include "ota_state_store.h"
+#include "ota_types.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/** 将统一失败原因转换为稳定日志字符串。 */
+const char *native_ota_failure_reason_name(native_ota_failure_reason_t reason);
+
+/** 产品可用同名强符号覆盖的电源提交前检查钩子。 */
+esp_err_t native_ota_check_power(void);
+
+/** 产品可用同名强符号覆盖的关键业务状态检查钩子。 */
+esp_err_t native_ota_check_business_state(void);
 
 /**
  * 单次完整镜像头预检所需的最小字节数：镜像头、首个 segment 头和应用描述符的总和。

@@ -15,7 +15,7 @@ endif()
 
 set(srcs
     # 应用入口与顶层编排。
-    "app/native_ota_example.c"
+    "app/main.c"
 
     # 网络生命周期、MQTT 通信与公共 HTTPS 下载。
     "network/network_lifecycle.c"
@@ -43,13 +43,16 @@ set(srcs
     "ui/avatar_parts/avatar_mouth.c"
     "ui/generated/avatar_layers/avatar_face_base.c"
     "ui/generated/avatar_layers/avatar_chroma_assets.c"
+    "ui/julia_backlight.c"
 
     # 本地唤醒词（WakeNet "你好小智"）：检测到后自动开麦推流。
     "voice/wake_detector.c"
 
     # 固件 OTA 模块。
+    "ota/ota_boot_flow.c"
     "ota/ota_boot_health.c"
     "ota/ota_control_plane.c"
+    "ota/ota_engine.c"
     "ota/ota_report.c"
     "ota/ota_state_store.c"
     "ota/ota_stability.c"
@@ -58,6 +61,9 @@ set(srcs
     "audio/audio_control_plane.c"
     "audio/audio_engine.c"
     "audio/audio_service.c"
+
+    "fsm/julia_fsm.c"
+
 )
 set(priv_requires
     esp_http_client
@@ -73,7 +79,9 @@ set(priv_requires
     esp_wifi
     esp_timer
     esp_driver_rmt 
-    esp_pm 
+    esp_driver_ledc
+    esp_pm
+     
     json
     mbedtls
     mqtt
@@ -104,10 +112,16 @@ idf_component_register(
         "network"
         "ota"
         "storage"
+        "memory"
+        "fsm"
         "ui"
         "ui/avatar_parts"
         "ui/generated/avatar_layers"
         "voice"
     PRIV_REQUIRES ${priv_requires}
     EMBED_TXTFILES ${embed_files}
+)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    JULIA_BACKLIGHT_GPIO=5
+    JULIA_LED_GPIO=4
 )

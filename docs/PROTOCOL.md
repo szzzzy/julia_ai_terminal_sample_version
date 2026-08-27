@@ -1,6 +1,6 @@
 # Julia Fused-Base 通信协议（设备侧实际实现，服务器对接用）
 
-> 适用固件：`julia-fused-base`（native_ota_example + 最小包音频 + 本地唤醒词）。
+> 适用固件：`julia-fused-base`（模块化 OTA + 最小包音频 + 本地唤醒词）。
 > 本文件逐条对应设备代码实现，服务器按此收发即可联调。
 > 与旧版 GitHub 文档的差异（融合后）：**本地唤醒词触发 MIC_START**、WSS 下行 binary PCM 现已接通、AUTH 用 token。
 
@@ -72,13 +72,13 @@
 | 命令 | 作用 | 设备行为 |
 |---|---|---|
 | `FILE_SEND <uri>` | 让设备把 `<uri>` 的 wav 推回服务器 | 见 1.2-② |
-| `MIC_START` | 开 MIC 流式上传 | `mic_started` 回执（MQTT vstatus）；PCM1 帧开始 |
-| `MIC_STOP` | 关 MIC 流式上传 | `mic_stopped` 回执；停止 PCM1 |
+| `MIC_START` | 开 MIC 流式上传 | WSS 会话任务直接执行与 MQTT 作业共用的状态转换，不与 PCM1 队列竞争；实际启用后 UI → `LISTENING`（重复命令幂等） |
+| `MIC_STOP` | 关 MIC 流式上传 | WSS 会话任务直接执行与 MQTT 作业共用的状态转换，不与 PCM1 队列竞争；实际关闭后 UI → `THINKING`（重复命令幂等） |
 | `MICS <bg>` | 休眠触发上传（bg=-10000~0，dBFS×100） | 仅电平>背景+5dB 才发帧（带预录缓冲） |
 | `MICW` | 恢复持续上传 | 退出休眠模式 |
-| `SPKS <rate>` | 扬声器开始播放（rate 采样率，如 16000/24000） | **必须最先发**，否则下行 PCM 被丢弃 |
+| `SPKS <rate>` | 扬声器开始播放（rate 采样率，如 16000/24000） | **必须最先发**，否则下行 PCM 被丢弃；成功后 UI → `SPEAKING` |
 | `SPKV <0-100>` | 音量 | 即时生效，越界钳位 |
-| `SPKE` | 停止播放 | 写静音+清标志 |
+| `SPKE` | 停止播放 | 写静音+清标志+闭合嘴型；MIC 仍开启则 UI → `LISTENING`，否则 → `IDLE` |
 | `SPKT` | 扬声器本地自检（440/660/880Hz） | 纯本地测试用 |
 
 **二进制 PCM（0x2）**：mono PCM16，长度偶数、**≤1200B/帧**、采样率 16k/24k（与 SPKS rate 一致）。

@@ -28,7 +28,7 @@
 
 #include "cJSON.h"
 
-#include "native_ota_example.h"
+#include "ota_control_plane.h"
 
 /** 本模块日志标签。 */
 static const char *TAG = "audio_control_plane";

@@ -76,7 +76,7 @@ Copy-Item 'D:\Espressif\projects\julia-esp32s3-ai-terminal-fused\waveshare_demo\
 
 ## 3. 接线（base 侧）
 
-### 3.1 `main/main.c`（native_ota_example.c 里的 app_main）
+### 3.1 `main/app/main.c`（应用入口与顶层初始化）
 在初始化序列（`board_audio_init()` 后、网络前）加入：
 ```c
 /* L0/L1：LCD + LVGL + 立绘 */

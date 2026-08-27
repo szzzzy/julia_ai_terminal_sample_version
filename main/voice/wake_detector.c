@@ -22,6 +22,7 @@
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_wn_iface.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -36,6 +37,7 @@
 #define WAKE_WORD_MODEL_NAME "wn9_nihaoxiaozhi_tts"
 #define WAKE_WORD_DISPLAY_TEXT "你好小智"
 #define MODEL_PARTITION "model"
+#define WAKE_COOLDOWN_US 2000000LL
 
 static const esp_afe_sr_iface_t *s_afe;
 static esp_afe_sr_data_t *s_afe_data;
@@ -45,6 +47,7 @@ static size_t s_feed_chunk_samples;
 static size_t s_feed_samples;
 static int16_t *s_feed_buffer;
 static volatile bool s_ready;
+static int64_t s_wake_cooldown_until_us;
 
 /* AFE feed 回调（board_audio mic_task 上下文，20 ms 一帧）。 */
 static void wake_afe_feed(const int16_t *pcm, size_t samples, void *ctx)
@@ -78,7 +81,10 @@ static void wake_detect_task(void *arg)
         if (result == NULL || result->ret_value == ESP_FAIL) {
             continue;
         }
-        if (result->wakeup_state == WAKENET_DETECTED) {
+        int64_t now_us = esp_timer_get_time();
+        if (result->wakeup_state == WAKENET_DETECTED &&
+            now_us >= s_wake_cooldown_until_us) {
+            s_wake_cooldown_until_us = now_us + WAKE_COOLDOWN_US;
             ESP_LOGI(TAG, "Wake word detected [%s]", WAKE_WORD_DISPLAY_TEXT);
             /* 形态 1：本地唤醒 → 自动开麦推流，服务器负责 ASR/LLM/TTS。 */
             esp_err_t err = voice_service_mic_start();
@@ -87,8 +93,6 @@ static void wake_detect_task(void *arg)
             }
             /* 清除识别窗口，防止同一次唤醒的残留结果再次触发。 */
             (void)s_afe->reset_buffer(s_afe_data);
-            /* 防抖：短暂静音窗口，避免同一句话连续触发。 */
-            vTaskDelay(pdMS_TO_TICKS(2000));
         }
     }
 }

@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "name": "sleep_loop",
+  "fps": 5,
+  "loop": "ping-pong",
+  "contains_blink": false,
+  "frame_count": 16,
+  "crop": [
+    0,
+    0,
+    360,
+    360
+  ],
+  "container_crc32": "feed9f8f",
+  "file_crc32": "4b187fc9",
+  "frames": [
+    {
+      "offset": 224,
+      "size": 22354,
+      "crc32": "0fbfdd76"
+    },
+    {
+      "offset": 22578,
+      "size": 22354,
+      "crc32": "0fbfdd76"
+    },
+    {
+      "offset": 44932,
+      "size": 22294,
+      "crc32": "d71122a0"
+    },
+    {
+      "offset": 67226,
+      "size": 22294,
+      "crc32": "d71122a0"
+    },
+    {
+      "offset": 89520,
+      "size": 22294,
+      "crc32": "d71122a0"
+    },
+    {
+      "offset": 111814,
+      "size": 22294,
+      "crc32": "d71122a0"
+    },
+    {
+      "offset": 134108,
+      "size": 22294,
+      "crc32": "d71122a0"
+    },
+    {
+      "offset": 156402,
+      "size": 22354,
+      "crc32": "0fbfdd76"
+    },
+    {
+      "offset": 178756,
+      "size": 22354,
+      "crc32": "0fbfdd76"
+    },
+    {
+      "offset": 201110,
+      "size": 22354,
+      "crc32": "0fbfdd76"
+    },
+    {
+      "offset": 223464,
+      "size": 22354,
+      "crc32": "9c16ec89"
+    },
+    {
+      "offset": 245818,
+      "size": 22354,
+      "crc32": "9c16ec89"
+    },
+    {
+      "offset": 268172,
+      "size": 22354,
+      "crc32": "9c16ec89"
+    },
+    {
+      "offset": 290526,
+      "size": 22354,
+      "crc32": "9c16ec89"
+    },
+    {
+      "offset": 312880,
+      "size": 22354,
+      "crc32": "9c16ec89"
+    },
+    {
+      "offset": 335234,
+      "size": 22354,
+      "crc32": "0fbfdd76"
+    }
+  ]
+}

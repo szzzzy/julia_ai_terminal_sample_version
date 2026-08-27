@@ -34,7 +34,8 @@
 #include "mqtt_client.h"
 
 #include "mqtt_comm.h"
-#include "native_ota_example.h"
+#include "ota_control_plane.h"
+#include "ota_engine.h"
 #include "ota_report.h"
 
 /** 本模块统一使用的日志标签。 */
@@ -1113,7 +1114,7 @@ static void mqtt_handle_notify_json(const char *json, size_t json_len)
  */
 static void mqtt_handle_ota_response(const char *payload, size_t payload_len)
 {
-    esp_err_t err = native_ota_handle_server_json(payload, payload_len);
+    esp_err_t err = ota_engine_handle_server_json(payload, payload_len);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA server response rejected: %s", esp_err_to_name(err));
         /* 只有当前请求等待窗口内的非法响应才触发短重试；窗口外的垃圾消息

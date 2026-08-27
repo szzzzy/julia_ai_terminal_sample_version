@@ -212,9 +212,32 @@ static esp_err_t voice_service_push_file(const char *uri)
 }
 
 /**
+ * Apply the session-local microphone state from the WSS session task.
+ *
+ * MQTT callers request this through the command queue, but a server text
+ * command is already executing in the owning session task.  Applying it here
+ * bypasses queued PCM1 frames, so a full audio queue cannot delay or lose
+ * MIC_STOP.  Both routes share this one state transition and its UI effects.
+ */
+static void voice_service_apply_mic_state(bool enabled)
+{
+    if (s_mic_active == enabled) {
+        ESP_LOGD(TAG, "MIC streaming already %s", enabled ? "enabled" : "disabled");
+        return;
+    }
+
+    s_mic_active = enabled;
+    board_audio_enable_wss_mic(enabled);
+    julia_avatar_set_dialog_phase(enabled ? JULIA_AVATAR_DIALOG_LISTENING
+                                          : JULIA_AVATAR_DIALOG_THINKING);
+    ESP_LOGI(TAG, "MIC streaming %s", enabled ? "enabled" : "disabled");
+}
+
+/**
  * @brief 处理服务端下发的完整文本帧命令（wss_transport on_text 回调）。
  *
- * 在会话任务上下文中执行：当前只有 FILE_SEND 需要立即推送。
+ * 在会话任务上下文中执行：FILE_SEND 立即推送；MIC_START/MIC_STOP 直接调用
+ * 与 MQTT 队列作业共用的内部状态应用函数，避免被 PCM1 队列挤占。
  *
  * @param[in] text 文本载荷，不要求以 NUL 结尾。
  * @param[in] len  文本长度。
@@ -235,10 +258,21 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
         return;
     }
 
+    if (len == strlen("MIC_START") && memcmp(text, "MIC_START", len) == 0) {
+        voice_service_apply_mic_state(true);
+        return;
+    }
+    if (len == strlen("MIC_STOP") && memcmp(text, "MIC_STOP", len) == 0) {
+        voice_service_apply_mic_state(false);
+        return;
+    }
+
     /* ---- 板级音频下行控制命令（融合方案 §9.4，与最小包 USB 命令同语义） ---- */
     if (len == 4 && memcmp(text, "SPKE", 4) == 0) {
         (void)board_audio_speaker_stop();
         julia_avatar_talking_stop();
+        julia_avatar_set_dialog_phase(s_mic_active ? JULIA_AVATAR_DIALOG_LISTENING
+                                                    : JULIA_AVATAR_DIALOG_IDLE);
         ESP_LOGI(TAG, "SPKE: speaker stop");
     } else if (len == 4 && memcmp(text, "SPKT", 4) == 0) {
         (void)board_audio_speaker_self_test();
@@ -253,6 +287,7 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
         long rate = strtol(buf, &end, 10);
         if (end != buf && board_audio_speaker_start((uint32_t)rate) == ESP_OK) {
             julia_avatar_talking_start();
+            julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_SPEAKING);
             ESP_LOGI(TAG, "SPKS: speaker start rate=%ld", rate);
         } else {
             ESP_LOGW(TAG, "Invalid SPKS rate: %.*s", (int)n, buf);
@@ -336,15 +371,10 @@ static void voice_service_on_queue_item(void *item, size_t item_size)
         (void)voice_service_push_file((const char *)job->data);
         break;
     case VOICE_JOB_MIC_START:
-        s_mic_active = true;
-        /* 打开板级 WSS 上行（mic_task 才开始组 PCM1 帧，见融合方案 §9.3）。 */
-        board_audio_enable_wss_mic(true);
-        ESP_LOGI(TAG, "MIC streaming enabled");
+        voice_service_apply_mic_state(true);
         break;
     case VOICE_JOB_MIC_STOP:
-        s_mic_active = false;
-        board_audio_enable_wss_mic(false);
-        ESP_LOGI(TAG, "MIC streaming disabled");
+        voice_service_apply_mic_state(false);
         break;
     case VOICE_JOB_SEND_CHUNK:
         if (!s_mic_active) {
@@ -369,6 +399,7 @@ static void voice_service_on_session_end(void)
     board_audio_enable_wss_mic(false);
     (void)board_audio_speaker_stop();
     julia_avatar_talking_stop();
+    julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_IDLE);
 }
 
 /**

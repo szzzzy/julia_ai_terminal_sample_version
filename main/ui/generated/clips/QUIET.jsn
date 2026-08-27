@@ -1,0 +1,1 @@
+{"version":1,"name":"QUIET","compression":1,"pixel_format":"RGB565_LVGL_SWAP","canvas":[360,360],"crop":[0,0,360,360],"fps":20,"frame_count":1,"raw_frame_bytes":259200,"offsets":[0],"sizes":[86134],"compressed_crc32":["d9a3d067"],"decoded_crc32":["f716348b"]}

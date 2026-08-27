@@ -1,0 +1,1 @@
+{"version":1,"name":"rle_bench","compression":1,"pixel_format":"RGB565_LVGL_SWAP","canvas":[360,360],"crop":[0,0,360,360],"fps":20,"frame_count":1,"raw_frame_bytes":259200,"offsets":[0],"sizes":[88450],"compressed_crc32":["96e9727e"],"decoded_crc32":["e57c30cb"]}

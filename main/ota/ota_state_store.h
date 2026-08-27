@@ -13,7 +13,7 @@
 
 #include "esp_err.h"
 
-#include "native_ota_example.h"
+#include "ota_types.h"
 
 #ifdef __cplusplus
 extern "C" {
