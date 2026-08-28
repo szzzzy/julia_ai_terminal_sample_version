@@ -1,3 +1,32 @@
+/**
+ * @file    julia_avatar.c
+ * @brief   Julia L1 立绘层：静态立绘 + 相位帧 + RMS 嘴型 + 微动。
+ *
+ * 模块职责与边界：
+ *   - 本模块是"当前运行时真正生效"的 L1 立绘链路（app_main 经 julia_display_init()+
+ *     julia_avatar_init() 启动）。它构建 Julia 静态立绘，并按"对话相位"
+ *     （IDLE/LISTENING/THINKING/SPEAKING）在底图上切换 LISTEN/THINK/SPEAK 相位帧，
+ *     同时用 RMS 驱动 4 档嘴型，并运行一个"微动"任务（眨眼/呼吸由微动层承担）。
+ *   - 与之相对：julia_ui.c 是 fused 遗留的总控（不参与当前构建）；julia_backlight 管
+ *     背光；julia_display_theme（或 app/julia_idle_display.c）管显示功率/息屏。
+ *   - 上游调用方：voice_service（WSS 任务）经 julia_avatar_feed_pcm/talking_start/
+ *     talking_stop/set_dialog_phase 驱动嘴型与相位；julia_idle_display 经
+ *     julia_avatar_set_dozing 切换睡眠立绘。
+ *
+ * 线程模型：
+ *   - 本模块所有 LVGL 对象操作都在 lvgl_port_lock() 临界区内进行（lvgl_port 内有独立
+ *     "lvgl" 任务在跑 lv_timer_handler）。
+ *   - julia_avatar_init() 创建一个 "avatar_l1" 任务（优先级 3，栈 4096，PSRAM），每
+ *     40ms 计算一次嘴型档位并调用 avatar_mouth_set_shape()。
+ *   - 相位/嘴型/dozing 状态用 portMUX_TYPE（s_phase_lock / s_state_lock）保护，因为
+ *     它们可能在 WSS 任务与 avatar_l1 任务之间并发读写。
+ *
+ * 数据流：
+ *   - 相位帧：LISTEN/THINK/SPEAK .bin（嵌入）→ avatar_rle_decode_rgb565() 解到 PSRAM
+ *     （360x360 RGB565）→ 校验 CRC32 → 作为 lv_img_dsc_t 绑定到底图 s_base。
+ *   - 嘴型：voice_service 每帧 PCM → julia_avatar_feed_pcm() → mouth_level_for_frame()
+ *     计算 RMS 档位(0..3) → avatar_l1 任务每 40ms 调 avatar_mouth_set_shape()。
+ */
 #include "julia_avatar.h"
 
 #include <stdbool.h>
@@ -16,6 +45,7 @@
 
 #include "avatar_chroma_assets.h"
 #include "avatar_face_base.h"
+#include "avatar_face_doze.h"
 #include "avatar_eyes.h"
 #include "avatar_mouth.h"
 #include "lvgl_port.h"
@@ -48,12 +78,15 @@ static uint8_t s_target_mouth_level;
 static uint32_t s_last_pcm_ms;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static julia_avatar_dialog_phase_t s_dialog_phase = JULIA_AVATAR_DIALOG_IDLE;
+static bool s_dozing;
 /* Last phase successfully assigned to the LVGL base image.  It is separate
  * from the requested state so a lock timeout can be retried safely. */
 static julia_avatar_dialog_phase_t s_applied_dialog_phase =
     (julia_avatar_dialog_phase_t)(JULIA_AVATAR_DIALOG_SPEAKING + 1);
 static portMUX_TYPE s_phase_lock = portMUX_INITIALIZER_UNLOCKED;
 
+/* 嵌入的相位帧二进制导出符号（链接器按 EMBED_FILES 生成 _binary_*_start/end）。
+ * 每个相位一张 360x360 RGB565 帧，用项目自有 RLE 压缩后嵌入固件。 */
 extern const uint8_t LISTEN_bin_start[] asm("_binary_LISTEN_bin_start");
 extern const uint8_t LISTEN_bin_end[] asm("_binary_LISTEN_bin_end");
 extern const uint8_t THINK_bin_start[] asm("_binary_THINK_bin_start");
@@ -61,6 +94,8 @@ extern const uint8_t THINK_bin_end[] asm("_binary_THINK_bin_end");
 extern const uint8_t SPEAK_bin_start[] asm("_binary_SPEAK_bin_start");
 extern const uint8_t SPEAK_bin_end[] asm("_binary_SPEAK_bin_end");
 
+/* 相位帧的运行时状态：压缩段、解码后缓存(PSRAM)与 CRC。loading 标志避免多个
+ * 任务同时触发重复解码。数组下标 = JULIA_AVATAR_DIALOG_* - 1（IDLE 不占位）。 */
 typedef struct {
     const char *name;
     const uint8_t *compressed_start;
@@ -87,6 +122,7 @@ static avatar_phase_frame_t s_phase_frames[] = {
     },
 };
 
+/* 相位名 → 可读字符串（用于日志）。 */
 static const char *dialog_phase_name(julia_avatar_dialog_phase_t phase)
 {
     switch (phase) {
@@ -107,6 +143,9 @@ static bool dialog_phase_is_current(julia_avatar_dialog_phase_t phase)
     return current;
 }
 
+/* 确保某相位帧已解码：首次调用时分配 PSRAM 缓冲并 RLE 解压、校验 CRC32；
+ * 之后直接返回缓存。用 loading 标志防止并发重复解码。解码结果写入 frame->pixels/
+ * image。失败时回退到静态立绘（返回值 false，由调用方决定替代源）。 */
 static bool avatar_phase_frame_ensure(avatar_phase_frame_t *frame)
 {
     if (frame == NULL) return false;
@@ -159,6 +198,8 @@ static bool avatar_phase_frame_ensure(avatar_phase_frame_t *frame)
     return true;
 }
 
+/* 取某相位对应的底图源：IDLE 或越界相位用静态待机立绘；其他相位用 RLE 相位帧
+ * （解码失败回退静态立绘）。返回的 lv_img_dsc_t 不缓存到调用方，避免悬垂引用。 */
 static const lv_img_dsc_t *avatar_source_for_phase(julia_avatar_dialog_phase_t phase)
 {
     if (phase == JULIA_AVATAR_DIALOG_IDLE ||
@@ -169,8 +210,18 @@ static const lv_img_dsc_t *avatar_source_for_phase(julia_avatar_dialog_phase_t p
     return avatar_phase_frame_ensure(frame) ? &frame->image : &avatar_asset_julia_s1_1_near_standby;
 }
 
+/* 把某对话框相位应用到底图。解开锁后由 WSS 任务调用，也可能在 avatar_l1 任务中触发。
+ * 设计要点：
+ *   - dozing 时直接跳过（睡眠立绘覆盖相位帧）；
+ *   - 取源可能触发 RLE 解码（耗时），期间更晚的相位请求可能已把 s_dialog_phase 改掉，
+ *     因此在取源后再校验"仍是当前相位"，避免过期请求覆盖最新相位；
+ *   - 所有 LVGL 对象访问都在 lvgl_port_lock 内；锁超时视为未应用，可安全重试。 */
 static bool avatar_apply_dialog_phase(julia_avatar_dialog_phase_t phase)
 {
+    portENTER_CRITICAL(&s_phase_lock);
+    bool dozing = s_dozing;
+    portEXIT_CRITICAL(&s_phase_lock);
+    if (dozing) return false;
     const lv_img_dsc_t *source = avatar_source_for_phase(phase);
     /* Decoding can take long enough for a later transport command to supersede
      * this request. Never let a stale request overwrite the latest phase. */
@@ -194,6 +245,49 @@ static bool avatar_apply_dialog_phase(julia_avatar_dialog_phase_t phase)
     return applied;
 }
 
+/* 整体切换到/退出睡眠立绘：进入睡眠时换到生成的睡眠图并隐藏眼/嘴层；
+ * 退出时回到当前相位帧并恢复眼/嘴层。锁超时回滚 s_dozing，保证状态与实际画面一致。 */
+void julia_avatar_set_dozing(bool active)
+{
+    portENTER_CRITICAL(&s_phase_lock);
+    bool changed = s_dozing != active;
+    s_dozing = active;
+    julia_avatar_dialog_phase_t phase = s_dialog_phase;
+    portEXIT_CRITICAL(&s_phase_lock);
+    if (!changed || !s_base) return;
+
+    const lv_img_dsc_t *source = active
+                                     ? &avatar_asset_julia_s0_1_night_sleep
+                                     : avatar_source_for_phase(phase);
+    if (!lvgl_port_lock(pdMS_TO_TICKS(250))) {
+        portENTER_CRITICAL(&s_phase_lock);
+        s_dozing = !active;
+        portEXIT_CRITICAL(&s_phase_lock);
+        ESP_LOGW(TAG, "LVGL lock timeout switching doze=%u", active ? 1U : 0U);
+        return;
+    }
+    lv_img_set_src(s_base, source);
+    lv_obj_t *layers[] = {
+        avatar_eyes_left_object(), avatar_eyes_right_object(), avatar_mouth_object(),
+    };
+    for (size_t i = 0; i < sizeof(layers) / sizeof(layers[0]); ++i) {
+        if (layers[i] == NULL) continue;
+        if (active) lv_obj_add_flag(layers[i], LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_clear_flag(layers[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_invalidate(layers[i]);
+    }
+    lv_obj_invalidate(s_base);
+    lvgl_port_unlock();
+    if (!active) {
+        portENTER_CRITICAL(&s_phase_lock);
+        s_applied_dialog_phase = phase;
+        portEXIT_CRITICAL(&s_phase_lock);
+    }
+    ESP_LOGI(TAG, "portrait=%s", active ? "sleep" : dialog_phase_name(phase));
+}
+
+/* 整数平方根（用于求 RMS）：逐位逼近，避免在音频回调里用浮点 sqrt。
+ * 返回 value 的整数平方根。 */
 static uint32_t integer_sqrt_u64(uint64_t value)
 {
     uint64_t bit = 1ULL << 62;
@@ -213,6 +307,9 @@ static uint32_t integer_sqrt_u64(uint64_t value)
     return (uint32_t)result;
 }
 
+/* 由一帧 PCM 计算嘴型档位(0..3)：先算 RMS，再做 EMA 平滑，然后按"上升快、下降慢"
+ * 的非对称门限单向升/降档。非对称 + 单步升降可避免在门限附近抖动（chatter），
+ * 与 fused 的 julia_lipsync 行为一致。 */
 static uint8_t mouth_level_for_frame(const int16_t *samples, size_t count)
 {
     uint64_t energy = 0;
@@ -237,6 +334,8 @@ static uint8_t mouth_level_for_frame(const int16_t *samples, size_t count)
     return level;
 }
 
+/* 喂入一帧下行扬声器 PCM：计算嘴型档位并记录"最近一次音频时刻"。由 voice_service
+ * 的 WSS 任务调用。只做整字段更新（锁内），不在音频回调里碰 LVGL。 */
 void julia_avatar_feed_pcm(const int16_t *samples, size_t sample_count)
 {
     if (samples == NULL || sample_count == 0U) {
@@ -250,6 +349,8 @@ void julia_avatar_feed_pcm(const int16_t *samples, size_t sample_count)
     portEXIT_CRITICAL(&s_state_lock);
 }
 
+/* 语音下行开始：置位 talking，清平滑器与目标档位。安全：可在 UI 初始化前调用
+ * （此时只更新静态字段，不触碰 LVGL）。 */
 void julia_avatar_talking_start(void)
 {
     portENTER_CRITICAL(&s_state_lock);
@@ -261,6 +362,7 @@ void julia_avatar_talking_start(void)
     portEXIT_CRITICAL(&s_state_lock);
 }
 
+/* 语音下行结束：清除说话状态并把嘴立刻闭合（不等下一个 40ms 节拍）。 */
 void julia_avatar_talking_stop(void)
 {
     portENTER_CRITICAL(&s_state_lock);
@@ -274,6 +376,8 @@ void julia_avatar_talking_stop(void)
     if (s_ready) avatar_mouth_set_shape(AVATAR_MOUTH_IDLE, 0);
 }
 
+/* 设置对话框相位。may be called from WSS/command tasks；相位未变或已应用则忽略
+ * 重复请求（needs_apply 判断），避免重复把同一张底图 set 一遍。 */
 void julia_avatar_set_dialog_phase(julia_avatar_dialog_phase_t phase)
 {
     if (phase < JULIA_AVATAR_DIALOG_IDLE || phase > JULIA_AVATAR_DIALOG_SPEAKING) {
@@ -303,6 +407,9 @@ julia_avatar_dialog_phase_t julia_avatar_get_dialog_phase(void)
     return phase;
 }
 
+/* 微动：对根对象做轻微缩放(呼吸)与细角度点头。该逻辑在
+ * AVATAR_ENABLE_FULL_FRAME_MOTION=0 时被整体裁掉（见文件上方宏说明——QSPI 面板
+ * 对整帧变换会产生撕裂/闪烁，故仅保留眼/嘴局部动画）。 */
 static void update_micro_motion(uint32_t now_ms)
 {
 #if AVATAR_ENABLE_FULL_FRAME_MOTION
@@ -339,6 +446,9 @@ static void update_micro_motion(uint32_t now_ms)
 #endif
 }
 
+/* L1 micro-motion 任务（优先级 3，栈 4096，PSRAM）：每 40ms 读一次嘴型状态，
+ * 若非说话或超过 PCM 保持期则目标档位置 0（闭嘴），否则用目标档位驱动嘴型层；
+ * 同时跑 update_micro_motion()。所有 LVGL 对象访问在 lvgl_port_lock 内。 */
 static void avatar_task(void *argument)
 {
     (void)argument;
@@ -370,6 +480,9 @@ static void avatar_task(void *argument)
     }
 }
 
+/* 构建并启动 L1 立绘链：在 LVGL 锁内建屏幕/根对象/底图（静态立绘）/眼/嘴，
+ * 应用已请求的相位，同步刷新首帧（此时背光尚未开——见 main.c：首帧渲染完成后才开
+ * 背光），最后创建 avatar_l1 任务。幂等（s_ready 已置真则直接返回 OK）。 */
 esp_err_t julia_avatar_init(void)
 {
     if (s_ready) {
@@ -379,6 +492,7 @@ esp_err_t julia_avatar_init(void)
         return ESP_ERR_TIMEOUT;
     }
 
+    /* 屏幕底色 + 全幅父容器。 */
     lv_obj_t *screen = lv_scr_act();
     lv_obj_set_style_bg_color(screen, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);

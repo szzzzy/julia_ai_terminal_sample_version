@@ -6,6 +6,12 @@ set(embed_files
     ${project_dir}/server_certs/ca_cert.pem
 )
 
+set(embed_binary_files
+    "ui/generated/clips/LISTEN.bin"
+    "ui/generated/clips/THINK.bin"
+    "ui/generated/clips/SPEAK.bin"
+)
+
 if(CONFIG_COMM_DEVICE_AUTH_CERTIFICATE)
     list(APPEND embed_files
         ${project_dir}/server_certs/device_client_cert.pem
@@ -33,17 +39,24 @@ set(srcs
     "hardware/tca9554.c"
     "hardware/breathing_led.c"
     "hardware/julia_led.c"
+    "hardware/pcf85063_shared.c"
+
+    # Local wall-clock restore and SNTP-to-RTC synchronization.
+    "context/julia_time.c"
 
     # L0/L1 display: ST77916 + LVGL + static layered avatar.
     "display/esp_lcd_st77916.c"
     "display/julia_display.c"
     "lvgl_port/lvgl_port.c"
+    "ui/avatar_rle.c"
     "ui/julia_avatar.c"
     "ui/avatar_parts/avatar_eyes.c"
     "ui/avatar_parts/avatar_mouth.c"
     "ui/generated/avatar_layers/avatar_face_base.c"
+    "ui/generated/avatar_layers/avatar_face_doze.c"
     "ui/generated/avatar_layers/avatar_chroma_assets.c"
     "ui/julia_backlight.c"
+    "app/julia_idle_display.c"
 
     # 本地唤醒词（WakeNet "你好小智"）：检测到后自动开麦推流。
     "voice/wake_detector.c"
@@ -106,6 +119,7 @@ idf_component_register(
         "."
         "app"
         "audio"
+        "context"
         "display"
         "hardware"
         "lvgl_port"
@@ -120,6 +134,7 @@ idf_component_register(
         "voice"
     PRIV_REQUIRES ${priv_requires}
     EMBED_TXTFILES ${embed_files}
+    EMBED_FILES ${embed_binary_files}
 )
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     JULIA_BACKLIGHT_GPIO=5

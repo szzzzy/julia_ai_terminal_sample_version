@@ -11,6 +11,13 @@
  * - 查询 ota_state_store.c，拒绝已经被隔离的 artifact；
  * - 向 ota_engine.c 输出固定大小的 native_ota_manifest_t。
  *
+ * 数据流：MQTT 订阅收到 ota_check_response → ota_engine_handle_server_json() 把
+ * 原始 JSON 透传到本模块 → 先校验 type/update/request_id/设备身份/产品/硬件版本等
+ * 控制面字段 → update=false 直接结束；update=true 再校验 artifact/version/url/
+ * sha256/image_size/security_version/expires_at，并做 URL 主机白名单、目标版本
+ * 高于当前（除非 force_update）、过期时间与隔离状态检查 → 输出已校验清单与
+ * download_requested 供 ota_engine 决定是否创建下载任务。
+ *
  * 线程安全与限制：
  * - 最近 request_id 由短临界区保护，避免检查任务写入时被响应事件读取到半个 ID；
  * - JSON 解析和 cJSON 分配只能在普通任务/事件任务上下文运行，不允许中断调用；
@@ -91,6 +98,14 @@ static bool ota_control_plane_request_id_matches(const char *request_id)
     portEXIT_CRITICAL(&s_request_id_lock);
     return matches;
 }
+
+/* ---------------------------------------------------------------------------
+ * 字段解析工具
+ *
+ * 以下函数把服务器 JSON 中的文本/数字字段转换为固定容量结构体成员。它们只做
+ * 语法与边界检查（空值、长度、类型、整数性、范围），不携带业务语义；响应解析
+ * 入口会按需逐字段调用，失败即拒收整条清单。
+ * ------------------------------------------------------------------------- */
 
 /**
  * @brief 将一个十六进制字符转换为 0～15 的半字节数值。
@@ -209,6 +224,13 @@ static bool ota_control_plane_get_i64(const cJSON *item, int64_t *value)
     return true;
 }
 
+/* ---------------------------------------------------------------------------
+ * 应用版本解析与比较
+ *
+ * 版本必须是恰好三段纯数字 major.minor.patch。逐段用 uint32 解析、逐段比较，
+ * 在版本检查和降级防护之间复用；空段、符号、溢出、多余段都被拒绝，保证比较
+ * 结果对“应不应该下载”的判断是确定性的。
+ * ------------------------------------------------------------------------- */
 /**
  * @brief Parse an exact three-part numeric version such as 1.0.0.
  *
@@ -266,6 +288,13 @@ static int ota_control_plane_compare_version(const ota_control_plane_version_t *
     return 0;
 }
 
+/* ---------------------------------------------------------------------------
+ * URL 主机名白名单
+ *
+ * 只接受 https:// 前缀，并把主机名与端口/路径/查询/片段分隔开后做精确匹配。
+ * 空白名单被当作“仅供开发构建”并放行（同时记录告警），生产构建必须配置，
+ * 否则任何主机的 URL 都可能被接受——这是安全边界，不应依赖配置默认值。
+ * ------------------------------------------------------------------------- */
 /**
  * @brief 判断 HTTPS URL 主机名是否属于精确允许列表。
  *
@@ -362,6 +391,13 @@ esp_err_t native_ota_get_device_id(char *device_id, size_t device_id_size)
  * @return ESP_ERR_NO_MEM cJSON 临时对象创建失败。
  * @return 其他 esp_err_t 设备标识读取失败。
  */
+/* ---------------------------------------------------------------------------
+ * 主动检查请求构建与响应解析入口
+ *
+ * 下面两个函数是控制面对外的两个方向：native_ota_build_check_request() 负责把
+ * 设备身份与当前版本组装成 ota_check；ota_control_plane_parse_server_response()
+ * 是控制面核心，把一条 ota_check_response 转换为可下载清单。
+ * ------------------------------------------------------------------------- */
 esp_err_t native_ota_build_check_request(char *json, size_t json_size, size_t *json_len)
 {
     if (json == NULL || json_size == 0U || json_len == NULL) {
@@ -579,6 +615,9 @@ esp_err_t ota_control_plane_parse_server_response(const char *json, size_t json_
         goto cleanup;
     }
 
+    /* 版本门槛可经 CONFIG_EXAMPLE_SKIP_VERSION_CHECK 编译期关闭（实验/强制镜像用）。
+     * 默认要求“目标版本更高”；只有 force_update=true 时才允许持平或降级，作为紧急
+     * 回退通道。注意降级仍会走下方同样的隔离检查，避免强制更新撞上线坏 artifact。 */
 #ifndef CONFIG_EXAMPLE_SKIP_VERSION_CHECK
     int version_order = ota_control_plane_compare_version(&target_version, &current_version);
     if (version_order <= 0 && !manifest->force_update) {

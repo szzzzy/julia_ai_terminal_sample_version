@@ -1,3 +1,30 @@
+/**
+ * @file    julia_backlight.c
+ * @brief   LCD 背光控制：LEDC PWM + 呼吸/渐变。
+ *
+ * 模块职责与边界：
+ *   - 用 LEDC 定时器在 JULIA_BACKLIGHT_GPIO 上输出 20kHz 10-bit PWM，控制面板背光
+ *     亮度；支持三档：直接 set、硬件 fade、以及由独立任务驱动的"呼吸"（按 LUT 循环
+ *     改变占空比）。
+ *   - 上游：app_main 在 julia_display_init()+julia_avatar_init() 前调用
+ *     julia_backlight_init()；复位周期先保持背光关闭（gpio=0，见 init 末尾），由
+ *     main.c 在"首帧完整渲染完成"后才调 julia_backlight_set(100) 点亮——避免开机白屏。
+ *   - 显示功率/息屏策略不在此处：见 julia_display_theme 或 app/julia_idle_display.c。
+ *
+ * 线程模型：
+ *   - 本模块无锁：亮度状态由"设置方"与"breathe_task"两个线程共享。所有公共入口都先
+ *     julia_backlight_breathe_stop()（多数置 s_breathing=false 并停 fade），避免呼吸
+ *     与手动/渐变动画竞态；呼吸任务对 volatile 状态做尽力读取。
+ *   - breathe_task（优先级 4，栈 4096，PSRAM）只负责按 segment 推进曲线；每段由
+ *     ledc_fade 硬件完成，任务用 vTaskDelayUntil 对齐相位，并用 IRAM ISR
+ *     （fade_done）唤醒。
+ *
+ * 关键设计：
+ *   - 用 Q10 正弦 LUT 避免浮点；gamma 表使低亮度更平缓，同时保证配置的最小/最大
+ *     duty 端点不被改变。
+ *   - BREATHE_ZERO_HOLD_PERCENT：当最小亮度为 0 时，在曲线两端各保留一段"全灭"，
+ *     降低平均功耗（只影响驻留，不改上升/下降曲线）。
+ */
 #include "julia_backlight.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
@@ -53,23 +80,30 @@ static const uint16_t s_sine_gamma22_q10[BREATHE_LUT_SEGMENTS + 1] = {
     175,153,133,115,99,84,71,59,48,39,32,25,20,15,11,8,6,4,3,2,1,1,0,
     0,0,0,0,0,0
 };
-static volatile uint8_t s_percent;
-static volatile bool s_breathing;
-static volatile bool s_gamma_enabled = true;
-static uint8_t s_min_percent, s_max_percent;
-static uint16_t s_curve_index, s_segments;
-static uint32_t s_period_ms;
-static uint32_t s_segment_ms;
-static volatile uint32_t s_generation;
-static volatile TickType_t s_segment_started_tick;
+static volatile uint8_t s_percent;             /* 当前亮度百分比（尽力一致）。 */
+static volatile bool s_breathing;              /* 呼吸模式是否运行。 */
+static volatile bool s_gamma_enabled = true;   /* 是否启用 gamma 曲线。 */
+static uint8_t s_min_percent, s_max_percent;   /* 呼吸亮度上下限。 */
+static uint16_t s_curve_index, s_segments;     /* 当前曲线段/总段数。 */
+static uint32_t s_period_ms;                   /* 呼吸周期。 */
+static uint32_t s_segment_ms;                  /* 每段时长 = period/segments。 */
+static volatile uint32_t s_generation;         /* 参数版本号，避免旧任务用已更新的配置。 */
+static volatile TickType_t s_segment_started_tick; /* 当前段的起始 tick（用于 vTaskDelayUntil）。 */
 static TaskHandle_t s_breathe_task;
-static SemaphoreHandle_t s_fade_done;
+static SemaphoreHandle_t s_fade_done;          /* 硬件 fade 完成信号（irq 给）。 */
 
+
+/* 百分比 → LEDC 占空比（10-bit），并夹到 [0,100]。 */
 static uint32_t duty_for(uint8_t percent)
 {
     return BL_MAX_DUTY * (percent > 100U ? 100U : percent) / 100U;
 }
 
+/* 计算曲线第 index 段的占空比：
+ *   - 最小亮度 0 且启用 zero-hold 时，在首尾各留一段全灭（降功耗）；
+ *   - 用 LUT（gamma 或线性）取该段的归一化幅度；
+ *   - 按 min/max duty 线性缩放到实际 PWM 占空比（避免端点被 gamma 改变）。
+ */
 static uint32_t curve_duty(uint16_t index)
 {
     if (s_min_percent == 0U && BREATHE_ZERO_HOLD_PERCENT > 0U) {
@@ -85,6 +119,8 @@ static uint32_t curve_duty(uint16_t index)
     return minimum + ((maximum - minimum) * lut[lut_index] + 511U) / 1023U;
 }
 
+/* LEDC fade 完成 ISR（IRAM）：唤醒 breathe_task，让它推进到下一段。
+ * 返回是否需要上下文切换。 */
 static bool IRAM_ATTR fade_done(const ledc_cb_param_t *param, void *arg)
 {
     (void)param;
@@ -94,12 +130,17 @@ static bool IRAM_ATTR fade_done(const ledc_cb_param_t *param, void *arg)
     return wake == pdTRUE;
 }
 
+/* 启动某一段：让 LEDC 硬件在 s_segment_ms 内渐到该段目标占空比（不等待）。 */
 static void start_segment(uint16_t index)
 {
     ledc_set_fade_with_time(BL_MODE, BL_CHANNEL, curve_duty(index), s_segment_ms);
     ledc_fade_start(BL_MODE, BL_CHANNEL, LEDC_FADE_NO_WAIT);
 }
 
+/* 呼吸任务：被 IRAM fade_done ISR 唤醒后推进到下一段。若收到新版参数
+ * （generation 变化）则重置相位；否则按段边界对齐，发新一轮硬件 fade。
+ * 说明：当相邻 gamma 样本量化到相同 duty 时 LEDC 会立即上报完成，这里不逐点做软件
+ * PWM，而是等段边界再启动下一段，保持相位均匀。 */
 static void breathe_task(void *arg)
 {
     (void)arg;
@@ -139,6 +180,9 @@ static void breathe_task(void *arg)
     }
 }
 
+/* 初始化背光：先把 GPIO 拉低（保证开机背光灭），配置 GPIO/LEDC 定时器与通道，
+ * 安装 fade 中断并注册捕获回调，创建呼吸任务。注意 init 时 duty 为 0，因此直到
+ * 调用方显式点亮（如首帧渲染完成后 julia_backlight_set/fade_to）背光都保持关闭。 */
 esp_err_t julia_backlight_init(void)
 {
     gpio_set_level(JULIA_BACKLIGHT_GPIO, 0);
@@ -164,12 +208,14 @@ esp_err_t julia_backlight_init(void)
     return ESP_OK;
 }
 
+/* 停止呼吸：置位 s_breathing=false 并停止 LEDC fade。 */
 void julia_backlight_breathe_stop(void)
 {
     s_breathing = false;
     ledc_fade_stop(BL_MODE, BL_CHANNEL);
 }
 
+/* 立即设置亮度（无渐变）。先停呼吸，避免二者抢占同一通道。 */
 void julia_backlight_set(uint8_t percent)
 {
     julia_backlight_breathe_stop();
@@ -179,6 +225,7 @@ void julia_backlight_set(uint8_t percent)
     ledc_update_duty(BL_MODE, BL_CHANNEL);
 }
 
+/* 渐变到目标亮度（duration_ms 内）。先停呼吸并清掉旧完成信号，再发起硬件 fade。 */
 esp_err_t julia_backlight_fade_to(uint8_t percent, uint32_t duration_ms)
 {
     julia_backlight_breathe_stop();
@@ -191,6 +238,7 @@ esp_err_t julia_backlight_fade_to(uint8_t percent, uint32_t duration_ms)
     return ledc_fade_start(BL_MODE, BL_CHANNEL, LEDC_FADE_NO_WAIT);
 }
 
+/* 等待最近一次 fade 完成（由 ISR 给 s_fade_done）。 */
 esp_err_t julia_backlight_wait_fade(uint32_t timeout_ms)
 {
     if (!s_fade_done) return ESP_ERR_INVALID_STATE;
@@ -198,6 +246,7 @@ esp_err_t julia_backlight_wait_fade(uint32_t timeout_ms)
                ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
+/* 以默认段数启动呼吸。 */
 esp_err_t julia_backlight_breathe_start(uint8_t min_percent, uint8_t max_percent,
                                         uint32_t period_ms)
 {
@@ -205,6 +254,9 @@ esp_err_t julia_backlight_breathe_start(uint8_t min_percent, uint8_t max_percent
                                              BREATHE_DEFAULT_SEGMENTS);
 }
 
+/* 以指定段数启动呼吸。参数非法（min>=max/max>100/段数越界/每段过短）返回 INVALID_ARG。
+ * 启动时把通道设为 min 亮度并从第 1 段开始；每次配置都会递增 s_generation，
+ * 让任务丢弃旧配置的剩余段。 */
 esp_err_t julia_backlight_breathe_start_ex(uint8_t min_percent, uint8_t max_percent,
                                            uint32_t period_ms, uint16_t segments)
 {
@@ -231,6 +283,7 @@ esp_err_t julia_backlight_breathe_start_ex(uint8_t min_percent, uint8_t max_perc
     return ESP_OK;
 }
 
+/* 切换 gamma。若正在呼吸，用当前参数重启以立即生效。 */
 esp_err_t julia_backlight_set_gamma(bool enabled)
 {
     s_gamma_enabled = enabled;
@@ -245,6 +298,7 @@ bool julia_backlight_breathing(void) { return s_breathing; }
 uint8_t julia_backlight_get_percent(void) { return s_percent; }
 uint32_t julia_backlight_get_duty(void) { return ledc_get_duty(BL_MODE, BL_CHANNEL); }
 int julia_backlight_get_gpio_level(void) { return gpio_get_level(JULIA_BACKLIGHT_GPIO); }
+/* 强制熄灭：停呼吸、停 LEDC、拉低 GPIO、清百分比。 */
 void julia_backlight_force_off(void)
 {
     julia_backlight_breathe_stop();

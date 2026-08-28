@@ -70,6 +70,19 @@ static native_ota_failure_reason_t http_downloader_open_failure_reason(
     return NATIVE_OTA_FAILURE_NETWORK_TIMEOUT;
 }
 
+/**
+ * @brief 执行一次带断点续传能力的 HTTPS 数据面下载。
+ *
+ * 分两阶段：
+ * 1. 建连协商阶段（for 循环，最多两次）：初始化并打开 HTTP 客户端，读响应头，
+ *    校验状态码 / Content-Length / Content-Range / ETag。若服务器忽略 Range
+ *    （返回 200/416）或断点的 ETag 变化，则先调用 restart_cb、把 resume 归零，
+ *    然后重新建连全量下载；每次重试都新建客户端，避免复用上一次的连接状态。
+ * 2. 读取阶段：循环读 body 块并同步交给 sink，带空读超时；sink 返回错误立即中止，
+ *    错误码原样透传（不改写 failure_reason）。
+ *
+ * 失败统一走 cleanup 释放连接资源；本函数在普通任务上下文运行并阻塞到结束。
+ */
 esp_err_t http_downloader_run(const http_downloader_config_t *config,
                               http_downloader_result_t *result)
 {
@@ -124,6 +137,7 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
             }
         }
 
+        /* 打开连接并发送请求头（write_len=0：GET 无请求体）；失败按 TLS/网络分类。 */
         esp_err_t err = esp_http_client_open(client, 0);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
@@ -146,7 +160,11 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
         }
         /* status_code 与 content_length 共同决定当前响应是完整下载还是可续传响应。 */
         int status_code = esp_http_client_get_status_code(client);
-        /* ETag 用于确认断点对应的服务器对象没有在两次请求之间被替换。 */
+        /* ETag 用于确认断点对应的服务器对象没有在两次请求之间被替换。
+         * NOTE：读取 ETag（以及下方 Content-Range）依赖编译开关
+         * CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS；关闭时 response_etag 恒为 NULL，
+         * 带 expected_etag 的续传会因“识别不到 ETag”被强制从零重试，Range 校验也会走
+         * RANGE_MISMATCH 失败路径。需用断点续传时请确认该开关已开启。 */
         char *response_etag = NULL;
 #if CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS
         (void)esp_http_client_get_response_header(client, "ETag", &response_etag);
@@ -247,6 +265,8 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
         break;
     }
 
+    /* 防御性校验：当前流程在第二次尝试必然 break 或 goto cleanup，正常不会落到这里；
+     * 保留以防将来把“从零回退”次数改成可循环时漏处理无成功会话的情形。 */
     if (client == NULL) {
         result->failure_reason = NATIVE_OTA_FAILURE_NETWORK_TIMEOUT;
         err_out = ESP_FAIL;

@@ -531,6 +531,61 @@ menu "Example Configuration"
 
     endmenu
 
+    menu "Julia idle display and wall clock"
+
+        config JULIA_DISPLAY_QUIET_TIMEOUT_SECONDS
+            int "Seconds before quiet display"
+            range 1 3600
+            default 10
+            help
+                Continuous idle time before the breathing backlight fades to the
+                quiet brightness. Voice activity resets this timer.
+
+        config JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS
+            int "Seconds before closed-eye breathing"
+            range 10 86400
+            default 300
+            help
+                Continuous idle time before the already-closed eyes remain closed and
+                the LCD backlight begins breathing. WakeNet remains active.
+
+        config JULIA_DISPLAY_ACTIVITY_POLL_MS
+            int "Idle policy polling period (ms)"
+            range 100 5000
+            default 500
+
+        config JULIA_DISPLAY_BREATHE_MIN_PERCENT
+            int "Active breathing minimum percentage"
+            range 0 100
+            default 5
+
+        config JULIA_DISPLAY_BREATHE_MAX_PERCENT
+            int "Active breathing maximum percentage"
+            range 0 100
+            default 100
+
+        config JULIA_DISPLAY_BREATHE_PERIOD_MS
+            int "Active breathing period (ms)"
+            range 500 30000
+            default 4000
+
+        config JULIA_RTC_ENABLE
+            bool "Use onboard PCF85063 RTC"
+            default y
+            help
+                Restore wall time from PCF85063 at boot and update it after SNTP sync.
+                The RTC shares the existing GPIO10/GPIO11 I2C bus with TCA9554.
+
+        config JULIA_TIMEZONE
+            string "POSIX timezone"
+            default "CST-8"
+
+        config JULIA_SNTP_SERVER
+            string "SNTP server"
+            default "pool.ntp.org"
+
+    endmenu
+
     config EXAMPLE_SKIP_COMMON_NAME_CHECK
         bool "Skip server certificate CN fieldcheck"
         default n

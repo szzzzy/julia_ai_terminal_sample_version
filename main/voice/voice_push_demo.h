@@ -7,6 +7,10 @@
  * 启动后，把 voice_push_demo.c 内固定的测试音频列表（测试音频/ 目录）按
  * "SD:/<文件名>" 逐一入队，由 voice_service 的 WSS 会话在连接就绪后推给
  * 服务器，全程不需要任何服务端命令。
+ *
+ * 注意：本演示默认编译关闭（CONFIG_VOICE_PUSH_DEMO_ENABLE=n，见 sdkconfig），
+ * 且"设备主动写"的语义需要服务端配合（接受不请自来的 BEGIN FILE 流）；关闭时
+ * voice_push_demo_start() 返回 ESP_ERR_NOT_SUPPORTED。
  */
 #pragma once
 

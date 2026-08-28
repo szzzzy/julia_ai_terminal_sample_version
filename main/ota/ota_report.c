@@ -14,6 +14,15 @@
  * - ota_state_store.c 提供共享的 NVS 容量与写入失败诊断；
  * - 本文件不调用 ESP-MQTT，不执行 HTTP/Flash 操作。
  *
+ * 持久化与去重：
+ * - 关键（critical）事件先进入 RAM 镜像 pending 数组并整体写 NVS，再交给 transport；
+ *   只要未收到 QoS 1 PUBACK，事件就保留在 NVS，断线/断电重启后会再次 flush。
+ * - 每条关键事件附带 128-bit 随机 event_id 作为幂等键：重连 flush 重复发送同一
+ *   event_id 时云端按 ID 去重，本地 transport 也按 event_id 判重，避免重复上报。
+ * - 进度（progress）只保留最新一条在 RAM，按百分比步长/时间间隔节流，不写 NVS。
+ * - PUBACK 只进入有界确认队列，真正的 NVS 删除由后台 ack 任务执行，因此上报回调
+ *   不在 MQTT 事件栈上写 Flash。
+ *
  * 并发约束：NVS 内存镜像、transport 和进度基线由 s_lock 保护；MQTT PUBACK 只入
  * 有界队列，实际删除 NVS 事件由 ota_report_ack_task 完成，因此事件回调不会写 Flash。
  */
@@ -50,6 +59,15 @@ static const char *TAG = "ota_report";
 #define OTA_REPORT_KEY "state"
 /** PUBACK 事件 ID 的 FreeRTOS 队列深度；队列满时由 NVS 保证重发。 */
 #define OTA_REPORT_ACK_QUEUE_DEPTH 8
+
+/* ---------------------------------------------------------------------------
+ * NVS 持久化队列布局
+ *
+ * s_store 是把“待 PUBACK 关键事件”连同一次 OTA 的关联上下文整体落在 NVS 的
+ * RAM 镜像。count 表示 pending 前缀的有效条目数；context_active / awaiting_boot
+ * 用于重启后把 bootloader 验收结果（success/rollback）关联回同一 artifact。
+ * s_store 只在 s_lock 持有时读写。
+ * ------------------------------------------------------------------------- */
 
 /**
  * @brief 持久化队列中的单条关键状态事件。
@@ -281,6 +299,14 @@ const char *native_ota_report_state_name(native_ota_report_state_t state)
     default: return "unknown";
     }
 }
+
+/* ---------------------------------------------------------------------------
+ * 状态消息构建
+ *
+ * 把一次 OTA 的稳定上下文与生命周期状态序列化为 ota_status JSON。所有经此构造的
+ * 消息都默认按 critical 处理并生成新的 event_id；进度路径在构造后主动改回
+ * non-critical，从而复用同一份 JSON 布局而无需专门为进度写重复代码。
+ * ------------------------------------------------------------------------- */
 
 /**
  * @brief 构建一条完整的 ota_status JSON 消息。
@@ -546,6 +572,14 @@ esp_err_t native_ota_report_context_init(native_ota_report_context_t *context,
     return ESP_OK;
 }
 
+/* ---------------------------------------------------------------------------
+ * 生命周期事件与进度上报入口
+ *
+ * 以下函数是 ota_engine / ota_boot_flow 调用的公共入口：critical 事件先持久化到
+ * NVS 队列再交给 transport；进度按步长/时间节流后只交给 transport。上报失败只返回
+ * 错误码，绝不改变 OTA 主流程的结果，保证“报告是尽力而为，下载是权威”。
+ * ------------------------------------------------------------------------- */
+
 /**
  * @brief 生成、持久化并提交一条关键 OTA 生命周期事件。
  *
@@ -613,6 +647,9 @@ esp_err_t native_ota_report_event(const native_ota_report_context_t *context,
         ESP_LOGW(TAG, "Critical OTA report queue full; retained latest %s event",
                  native_ota_report_state_name(state));
     } else {
+        /* 队列已满且本条既不是终态也不是重启事件：不挤占旧的关键事件。事件仍会在
+         * 下方尽力交给 transport，但不再持久化——这类中间态（如 downloading/verifying
+         * 的重复上报）被刻意视为可牺牲，重启后也不保证重发。 */
         store_err = ESP_ERR_NO_MEM;
     }
 
@@ -697,6 +734,14 @@ esp_err_t native_ota_report_progress(const native_ota_report_context_t *context,
     return err == ESP_ERR_NOT_SUPPORTED ? ESP_OK : err;
 }
 
+/* ---------------------------------------------------------------------------
+ * 断线重连/重启后的 flush 与 PUBACK 关联
+ *
+ * flush 把 NVS 中的关键事件逐条复制并交给 transport，但不在此删除它们——删除只在
+ * PUBACK 到达后由 ack 任务按下发的 event_id 触发。这样重发与确认共用同一 id，
+ * 幂等地去重，也避免在 MQTT 事件栈上重复写 Flash。
+ * ------------------------------------------------------------------------- */
+
 /**
  * @brief 将 NVS 中的关键事件和 RAM 中最新进度逐条交给 transport。
  *
@@ -778,6 +823,14 @@ void native_ota_report_ack_event(const char *event_id)
     strncpy(id, event_id, sizeof(id) - 1U);
     (void)xQueueSend(s_ack_queue, id, 0);
 }
+
+/* ---------------------------------------------------------------------------
+ * 跨重启启动验收事件
+ *
+ * 新镜像首次启动时，用之前持久化的上下文生成 booted_pending_verify，随后本地健康
+ * 检查决定 succeeded 或 rolled_back。该组函数必须在网络就绪前调用，且只在存在
+ * awaiting_boot 上下文时才产生事件（否则返回 ESP_OK 表示无事可做）。
+ * ------------------------------------------------------------------------- */
 
 /**
  * @brief 在锁保护下复制跨重启待验收上下文。

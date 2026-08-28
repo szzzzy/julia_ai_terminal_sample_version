@@ -5,6 +5,28 @@
  * 本模块接收控制面已经校验的服务器响应，保证同一时间只有一个 OTA 任务，
  * 并负责从 HTTPS 下载镜像、恢复断点、写入目标分区、校验摘要、切换启动分区
  * 以及成功后的重启。应用启动和 PENDING_VERIFY 验收不属于本模块。
+ *
+ * 数据流总览：
+ *   控制面 JSON → ota_control_plane 解析/版本比较 → native_ota_manifest_t →
+ *   本模块堆上深拷贝 → ota_engine_task：
+ *     · 读取/复用断点记录（ota_state_store，含 cooldown 与 ETag）；
+ *     · HTTPS Range 下载（配置证书/超时，经 esp_http_client）；
+ *     · 校验镜像头与新分区前缀（ota_stability）→ 写入（esp_ota_write）；
+ *     · 校验实际写入区 SHA-256（ota_stability）→ esp_ota_end；
+ *     · 持久化 READY_TO_COMMIT → 提交前检查（ota_stability）→ 切换 boot 分区；
+ *     · 生命周期/进度事件经 ota_report 上报；
+ *     · 失败时按终端/网络分类隔离（ota_stability + ota_state_store）。
+ *
+ * 状态机（引擎侧）：accepted → downloading → verifying → rebooting。
+ * 下载/写入期间记录一直停留在 OTA_RESUME_PHASE_DOWNLOADING，任一步骤失败可
+ * 靠检查点续传；镜像完整校验后进入 OTA_RESUME_PHASE_READY_TO_COMMIT，掉电后
+ * 可跳过重下直接提交；终端校验失败进入 OTA_RESUME_PHASE_QUARANTINED，禁止同
+ * artifact 自动重试。每次重启后的本地验收（booted_pending_verify → succeeded /
+ * failed / rolled_back / deferred）由 ota_boot_flow + ota_boot_health 完成。
+ *
+ * 调用上下文：任务由 ota_engine_handle_server_json() 在 MQTT/事件任务中创建，实际
+ * 下载在专用 FreeRTOS 任务（栈 12 KiB，优先级 5）内执行；该任务可阻塞在网络、
+ * Flash 或 NVS 上，因此本文件的所有函数都禁止在中断上下文调用。
  */
 #include <errno.h>
 #include <inttypes.h>
@@ -44,6 +66,21 @@ static const char *TAG = "ota_engine";
 /** 连续空读的上限；每次空读间隔 10 ms，达到后视为网络无响应。 */
 #define OTA_MAX_EMPTY_READS 600U
 
+/**
+ * @brief 计算连续网络失败后的下次退避冷却时长（指数退避，封顶）。
+ *
+ * @param[in] cooldown_count 已累计的冷却次数；首次调用应传 0，之后每轮 +1。
+ * @return 冷却秒数，范围 [BASE, MAX]，单位为秒。
+ *
+ * 实现把 BASE 从 1 倍起随 count 增长逐次翻倍，并受 MAX 上限与“翻倍后不越界”
+ * 的约束：count=0 或 1 时返回 BASE，count≥2 时返回 2^(count-1)*BASE，命中 MAX 后
+ * 封顶。count 达到 1 仍返回 BASE，是为了让“调用方传 count+1”与“复用记录里的
+ * cooldown_count”两种传法在首次冷却时得到同一结果。
+ * 该策略在“快速重试恢复”和“避免持续打满服务器”之间取平衡；网络类失败可
+ * 反复重试，因此冷却永不等于“隔离”，只用于临时降频。
+ *
+ * @note 纯整数运算，不访问 Flash、NVS 或网络，可在普通任务上下文调用。
+ */
 static uint32_t ota_cooldown_seconds(uint32_t cooldown_count)
 {
     uint32_t delay = CONFIG_OTA_DOWNLOAD_COOLDOWN_BASE_SECONDS;
@@ -596,6 +633,9 @@ static void ota_engine_task(void *pvParameter)
         goto cleanup;
     }
 
+    /* attempt 是本次下载任务内上报给云端的尝试序号，从 1 起。record_active 表示加载
+     * 时是否已有本 artifact 的记录，因此“复用断点”时 attempt = 历史网络失败次数 + 1，
+     * 首次下载（无记录）则为 1；该字段只用于状态事件的 attempt 字段，不影响恢复决策。 */
     if (report_context_valid) {
         report_context.attempt = record_active ? record.retry_count + 1U : 1U;
     }

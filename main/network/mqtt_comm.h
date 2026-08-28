@@ -11,6 +11,16 @@
  * - 将完整载荷按注册表路由给业务 handler；
  * - 不执行 HTTPS 下载、OTA 分区写入或业务 NVS 清理。
  *
+ * 对外有两条发送通道，消费方按可靠性区分：
+ * - mqtt_comm_publish()：QoS 1 尽力而为、不跟踪 PUBACK，也不做 NVS 持久化。适合
+ *   音频状态等辅助上报（如 audio_engine 上报 audio_status）；
+ * - OTA 关键生命周期事件：经 ota_report 注册的内部 transport（mqtt_status_transport）
+ *   进入，QoS 1 且持久化到 PUBACK，用 event_id 幂等重发，不对外暴露接口。
+ *
+ * 本层与语音面的关系：语音命令（vcmd）解析与 WSS 会话状态转换在 voice_service 实现，
+ * 它把 vcmd topic（非 critical）注册进本层注册表，仅复用本层的订阅/分片路由能力；
+ * 音频 PCM 流向由 WSS 传输层承载，不经过本模块。语音回执等语音面语义不在此文件内。
+ *
  * @note 所有 topic 必须在 mqtt_comm_start() 生效前注册（app_main 装配阶段）；
  *       启动后注册的新 topic 不会随已建立的会话订阅。
  */

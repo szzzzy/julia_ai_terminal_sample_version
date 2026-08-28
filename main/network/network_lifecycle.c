@@ -65,6 +65,24 @@ static int64_t s_next_retry_us = INT64_MAX;
 static network_service_slot_t s_slots[NETWORK_MAX_IP_READY_CALLBACKS];
 static size_t s_slot_count;
 
+/* 线程模型与共享状态保护（跨任务正确性的关键约定）：
+ * - Wi-Fi / IP 事件回调运行在 ESP-IDF 默认事件循环任务中：它们必须保持非阻塞，
+ *   只做“持锁更新状态 + notify 后台任务”，真正的 connect / 服务回调都在任务里执行。
+ * - network_lifecycle_task 是唯一调用 esp_wifi_connect() 与用户 ip_ready 回调的
+ *   任务；用户回调（mqtt / voice / time）在此任务上下文中同步执行，允许做建连、
+ *   时间同步等较慢初始化，但不能阻塞到破坏整个生命周期循环的推进。
+ * - 所有跨任务变量（s_ip_ready / s_retry_attempt / s_next_retry_us / 槽位字段）
+ *   一律经 s_state_lock 访问；事件处理与任务之间不再有其它共享。
+ * - 本模块是进程级单例：任务、netif 与事件注册只创建一次；start 幂等，cleanup 负责
+ *   把模块复位到可再次启动的初始状态。 */
+
+/**
+ * @brief 复位启动失败时部分初始化的进程级单例。
+ *
+ * 逆序释放：先注销事件处理器，再删任务、停 Wi-Fi 驱动，最后把状态与槽位复位到
+ * 初始值（s_started=false 允许之后再次 network_lifecycle_start() 重试，槽位全部
+ * 清为“待启动”）。仅在启动失败路径调用；正常运行期间不会走到这里。
+ */
 static void network_lifecycle_cleanup(void)
 {
     if (s_got_ip_handler != NULL) {
@@ -152,7 +170,9 @@ static uint32_t network_next_retry_delay_ms(void)
     return network_backoff_delay_ms(&s_retry_attempt);
 }
 
-/* Must be called with s_state_lock held. */
+/* 计算下次 Wi-Fi 重连的退避延时并写入全局截止时间。
+ * Must be called with s_state_lock held.
+ * 返回延时（毫秒）仅供调用方记日志；本函数只更新截止时间，不负责发起 connect。 */
 static uint32_t network_schedule_retry_locked(void)
 {
     uint32_t delay_ms = network_next_retry_delay_ms();
@@ -175,6 +195,16 @@ static void network_reset_service_slots_locked(void)
     }
 }
 
+/**
+ * @brief Wi-Fi 事件回调：STA_START 与 STA_DISCONNECTED 两条快路径。
+ *
+ * 运行于 ESP-IDF 事件循环任务，必须保持非阻塞：只在持锁下更新状态并 notify 后台
+ * 任务，实际 connect 交给 network_lifecycle_task。
+ *
+ * - STA_START：设备端 STA 已就绪。把重连截止时间设到“当前”，任务随即发起首次连接。
+ * - STA_DISCONNECTED：本次关联已结束（无论是启动失败还是在线掉线）。清空 IP、以有界
+ *   退避调度下一次重连，并记录断线原因；重连计时复用同一套退避计数。
+ */
 static void network_wifi_event_handler(void *arg, esp_event_base_t event_base,
                                        int32_t event_id, void *event_data)
 {
@@ -183,6 +213,7 @@ static void network_wifi_event_handler(void *arg, esp_event_base_t event_base,
 
     if (event_id == WIFI_EVENT_STA_START) {
         portENTER_CRITICAL(&s_state_lock);
+        /* 把截止时间设到“现在”：任务唤醒后立即发起首次连接尝试。 */
         s_next_retry_us = esp_timer_get_time();
         portEXIT_CRITICAL(&s_state_lock);
         xTaskNotifyGive(s_network_task);
@@ -208,6 +239,13 @@ static void network_wifi_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
+/**
+ * @brief IP_EVENT_STA_GOT_IP 回调：记录 IP 就绪并通知任务分发服务启动。
+ *
+ * 运行于事件循环任务，非阻塞：把 s_ip_ready 置真、复位重连计数（本次已连上）、
+ * 清零槽位重试状态（每个 IP 会话只启动一次服务），然后 notify 任务去执行回调。
+ * 只处理本模块名下 netif 的 GOT_IP，避免误收其它接口（如以太网）的地址事件。
+ */
 static void network_got_ip_handler(void *arg, esp_event_base_t event_base,
                                    int32_t event_id, void *event_data)
 {
@@ -327,6 +365,20 @@ static int64_t network_service_retry_deadline(bool ip_ready)
     return nearest_us;
 }
 
+/**
+ * @brief 后台网络生命周期任务：推进 Wi-Fi 重连与服务启动的单一循环。
+ *
+ * 每轮先持锁快照 s_ip_ready / s_next_retry_us，再按需分派：
+ * - 有 IP：调用所有“到期且未成功”的服务槽位；只要有调用就回到循环重算（回调可能
+ *   重新调度自己或后续槽位）；
+ * - 距 Wi-Fi 重连截止时间到点：发起 esp_wifi_connect()，并只在连接请求已受理时
+ *   清空截止时间，避免与在飞关联重复触发；
+ * - 否则：阻塞等待“Wi-Fi 重连截止时间”与“最近服务重试截止时间”中更早的一个，
+ *   期间由 STA_START / STA_DISCONNECTED / GOT_IP 事件通知唤醒。
+ *
+ * 这个单循环把 Wi-Fi 重连与服务启动的两份计时合并成一次阻塞等待，避免两个任务
+ * 竞争调度；服务回调在该任务中执行，因此不会中断任何事件循环。
+ */
 static void network_lifecycle_task(void *parameter)
 {
     (void)parameter;

@@ -4,6 +4,19 @@
  *
  * 本模块在其他业务服务启动前执行。它处理 PENDING_VERIFY 镜像的本地健康检查，
  * 必要时回滚或进入安全模式，并完成 OTA 报告与断点记录的启动对账。
+ *
+ * 生命周期与编排（app_main 最先调用本模块）：
+ *   ota_boot_health_begin() 判定启动镜像是否处于 PENDING_VERIFY →
+ *   初始化 NVS / 网络接口 / 事件循环 → 上报 booted_pending_verify →
+ *   本地健康检查（ota_boot_health_check + 可选 GPIO 诊断）→ 产品验收钩子
+ *   （ota_boot_health_product_check）→ 通过则 confirm（esp_ota_mark_app_valid_
+ *   cancel_rollback）并上报 succeeded；失败则 reject（标记无效并回滚/进入安全
+ *   模式）并上报 rolled_back。最后与运行版本对账，清理已确认版本的断点记录。
+ *
+ * 模块边界：本模块只做“启动验收”的编排与对账，本身不解析 JSON、不上报 MQTT
+ * 原始消息、不写断点记录；具体健康判定在 ota_boot_health，生命周期事件在
+ * ota_report，断点/隔离在 ota_state_store，运行版本来源为 esp_ota_ops 分区描述。
+ * 网络可用性刻意不作为镜像健康状况的判定条件（见 ota_boot_health）。
  */
 #include "ota_boot_flow.h"
 
@@ -129,6 +142,30 @@ static bool ota_get_last_invalid_version(char *version, size_t version_size)
     return true;
 }
 
+/**
+ * @brief 执行 OTA 启动验收与状态对账（应用初始化入口）。
+ *
+ * 函数在业务服务启动前，决定“刚从引擎写的镜像”是否保持有效。整体流程：
+ *   1) 读取启动镜像 OTA 状态，得到 PENDING_VERIFY 标志；
+ *   2) 初始化 NVS（不可恢复/不兼容时按“是否 PENDING_VERIFY”决定是否擦除）；
+ *   3) 初始化状态上报与网络接口/事件循环；
+ *   4) 上报 booted_pending_verify（若有待验收镜像）；
+ *   5) 本地健康检查（分区/Flash/描述/堆/队列 + 可选 GPIO 诊断）与产品验收钩子；
+ *   6) 通过 → confirm（标记 VALID 并取消回滚）+ 上报 succeeded；
+ *      失败且可见回滚 → reject（进入回滚）+ 上报 rolled_back；
+ *   7) 最后与运行版本对账：识别上次失败升级的回滚并上报，清理已确认版本的记录。
+ *
+ * 副作用：可能擦除/写 NVS，调用 esp_ota_mark_app_valid_cancel_rollback() 或
+ * esp_ota_mark_app_invalid_rollback_and_reboot()，并上报若干生命周期事件；
+ * 不可恢复错误会进入安全模式且不返回。
+ *
+ * 成功路径返回值为 void：不再向调用方报告错误，因为任何不可恢复错误已经
+ * 在函数内部转入安全模式；只有“已确认/已对账”的正常结果才会返回，可继续启动
+ * 业务服务。
+ *
+ * @note 必须在其他业务服务之前调用；只能在普通任务上下文调用（内部可能阻塞
+ *       于 GPIO 诊断/NVS/Flash 操作）。不依赖 Wi-Fi 或 MQTT 可用性。
+ */
 void ota_boot_flow_run(void)
 {
     bool pending_verify = false;
@@ -173,6 +210,9 @@ void ota_boot_flow_run(void)
 
     if (!ota_local_health_check(pending_verify)) {
         if (pending_verify) {
+            /* 区分“新镜像事实上无效、可回滚”与“根本没有旧镜像可回滚”：
+             * 前者上报 BOOT_SELF_TEST_FAILED，后者上报 ROLLBACK_UNAVAILABLE。
+             * 该三元判定在下方 product/confirm 失败分支中重复出现，含义相同。 */
             native_ota_failure_reason_t rollback_reason =
                 esp_ota_check_rollback_is_possible() ?
                 NATIVE_OTA_FAILURE_BOOT_SELF_TEST_FAILED :
@@ -225,6 +265,12 @@ void ota_boot_flow_run(void)
         }
     }
 
+    /* 启动对账（仅在“本次不是 PENDING_VERIFY 首次验收”时做回滚识别）：
+     * - 若 bootloader 最近把某分区标记为无效（存在 `esp_ota_get_last_invalid_partition`），
+     *   说明上一次升级曾在启动时被判定无效并回滚；只有在“没有新镜像待验收”时才上报
+     *   rolled_back，避免与上面 PENDING_VERIFY 分支已经上报的回滚事件重复。
+     * - 无论是否回滚，都按当前运行版本清理断点记录中已确认/已提交的条目，使下次检查
+     *   不会误把已成功运行的镜像当成待恢复状态。 */
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (running != NULL) {
         esp_app_desc_t running_desc;

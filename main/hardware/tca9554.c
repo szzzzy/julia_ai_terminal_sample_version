@@ -19,30 +19,56 @@
 
 static const char *TAG = "tca9554";
 
-/* TCA9554 寄存器映射 */
-#define TCA9554_REG_INPUT     0x00
-#define TCA9554_REG_OUTPUT    0x01
-#define TCA9554_REG_POLARITY  0x02
-#define TCA9554_REG_CONFIG    0x03
+/* TCA9554 寄存器映射（写地址 0x20 / 读地址 0x21，寄存器本身用寄存器指针表示）。
+ * 位定义：每个寄存器 8 位对应 P0..P7。 */
+#define TCA9554_REG_INPUT     0x00 /* 输入端口：读卡引脚电平（0/1 即低/高）。 */
+#define TCA9554_REG_OUTPUT    0x01 /* 输出端口：写输出锁存（默认读回上次写值）。 */
+#define TCA9554_REG_POLARITY  0x02 /* 极性反转：1 翻转对应引脚输入极性（本工程未用，保持默认 0）。 */
+#define TCA9554_REG_CONFIG    0x03 /* 配置：1=输入，0=输出（上电默认全部为输入）。 */
 
+/* 本板使用的 I2C 主控制器引脚（I2C_NUM_0）。 */
 #define TCA9554_I2C_SCL GPIO_NUM_10
 #define TCA9554_I2C_SDA GPIO_NUM_11
 
+/* 共享 I2C 总线/设备句柄。tca9554 创建总线，RTC 等其他外设通过 tca9554_i2c_bus() 复用。 */
 static i2c_master_bus_handle_t s_bus = NULL;
 static i2c_master_dev_handle_t s_dev = NULL;
+/* 串行化对扩展器寄存器的读-改-写（见 write_pin），避免多任务并发读到半开的配置。 */
 static SemaphoreHandle_t s_lock = NULL;
 
+/**
+ * @brief 读单个寄存器（阻塞式，超时 100ms）。
+ * @param[in]  reg 寄存器地址 0x00~0x03。
+ * @param[out] val 读出的值。
+ * @return 总线传输结果（ESP_OK 或 i2c_master 的错误码）。
+ */
 static esp_err_t read_reg(uint8_t reg, uint8_t *val)
 {
     return i2c_master_transmit_receive(s_dev, &reg, 1, val, 1, 100);
 }
 
+/**
+ * @brief 写单个寄存器（阻塞式，超时 100ms）。
+ * @param[in] reg 寄存器地址。
+ * @param[in] val 要写进寄存器的值。
+ * @return 总线传输结果。
+ */
 static esp_err_t write_reg(uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = { reg, val };
     return i2c_master_transmit(s_dev, buf, 2, 100);
 }
 
+/**
+ * @brief 初始化 I2C 主总线并把 TCA9554（0x20）挂到总线上（幂等；可多次调用）。
+ *
+ * 创建的 i2c_master 总线（I2C_NUM_0，SCL=IO10/SDA=IO11，400kHz，内部上拉）会同时
+ * 被 RTC 等设备复用：后续通过 tca9554_i2c_bus() 取出同一句柄。
+ * 失败时只会让 s_bus/s_dev 保持可判定状态：总线创建失败直接返回，设备添加失败
+ * 亦不破坏已有状态。本函数应在任务上下文调用（内部创建互斥锁）。
+ *
+ * @return ESP_OK 已就绪；其他 esp_err_t 总线或设备初始化失败。
+ */
 esp_err_t tca9554_init(void)
 {
     if (s_dev) {
@@ -72,6 +98,21 @@ esp_err_t tca9554_init(void)
     return ESP_OK;
 }
 
+/**
+ * @brief 把引脚配置为推挽输出并设置电平（读-改-写，带互斥锁）。
+ *
+ * 关键顺序（可防止使能瞬间引脚跳变）：
+ *   1) 读 CONFIG 与 OUTPUT 寄存器；
+ *   2) 先写 OUTPUT 输出锁存（设/清目标位），
+ *   3) 再写 CONFIG 把该引脚从“输入”切到“输出”。
+ * 这样在方向切换前输出值已就位，避免引脚一变为输出就因为锁存值未定而闪一下。
+ *
+ * @param[in] pin   引脚号 0~7（>7 或未初始化返回 ESP_ERR_INVALID_ARG）。
+ * @param[in] level true 高电平；false 低电平。
+ * @return ESP_OK 成功；ESP_ERR_INVALID_ARG 参数非法；其他 esp_err_t 总线读写失败。
+ * 注意：I2C 是阻塞式（300ms 级超时），且内部会持有 s_lock，不能在中断里调用；
+ * 调用前需已 tca9554_init()。
+ */
 esp_err_t tca9554_write_pin(uint8_t pin, bool level)
 {
     if (pin > 7 || !s_dev) {
@@ -103,6 +144,14 @@ esp_err_t tca9554_write_pin(uint8_t pin, bool level)
     return err;
 }
 
+/**
+ * @brief 读取引脚电平（读 INPUT 寄存器，输入/输出引脚均可读）。
+ *
+ * @param[in]  pin   引脚号 0~7。
+ * @param[out] level 读出电平（true 高 / false 低）。仅当传输成功时写入。
+ * @return ESP_OK 成功；ESP_ERR_INVALID_ARG 参数非法；其他 esp_err_t 总线读失败。
+ * I2C 为阻塞式且内部持锁，非中断上下文调用。
+ */
 esp_err_t tca9554_read_pin(uint8_t pin, bool *level)
 {
     if (pin > 7 || !s_dev || !level) {
@@ -116,4 +165,10 @@ esp_err_t tca9554_read_pin(uint8_t pin, bool *level)
         *level = ((in >> pin) & 1u) != 0;
     }
     return err;
+}
+
+/** 返回由 tca9554 创建、并被 RTC 等板载外设复用的共享 I2C 总线句柄。 */
+i2c_master_bus_handle_t tca9554_i2c_bus(void)
+{
+    return s_bus;
 }

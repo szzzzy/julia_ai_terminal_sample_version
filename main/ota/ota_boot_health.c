@@ -49,6 +49,8 @@ esp_err_t ota_boot_health_begin(bool *pending_verify)
     esp_ota_img_states_t state;
     esp_err_t err = esp_ota_get_state_partition(running, &state);
     if (err == ESP_ERR_NOT_FOUND) {
+        /* 没有任何 OTA 反回滚状态（如初次刷机）：不处于 PENDING_VERIFY，属于正常路径。
+         * 该状态来自 esp_ota 数据分区，与 NVS 无关，因此在 nvs_flash_init() 前也可读。 */
         return ESP_OK;
     }
     if (err != ESP_OK) {
@@ -77,11 +79,14 @@ esp_err_t ota_boot_health_confirm(void)
 esp_err_t ota_boot_health_reject(const char *reason)
 {
     ESP_LOGE(TAG, "Rejecting pending image, reason=%s", reason != NULL ? reason : "unspecified");
+    /* 必须先确认存在有效旧分区，再标记为无效；否则 mark invalid 会把当前唯一镜像
+     * 一起拉黑，导致设备无镜像可启动。返回 ROLLBACK_UNAVAILABLE 让调用方走安全模式。 */
     if (!esp_ota_check_rollback_is_possible()) {
         ESP_LOGE(TAG, "Rollback is unavailable: no valid previous application exists");
         return ESP_ERR_OTA_ROLLBACK_FAILED;
     }
 
+    /* 该调用会把当前 PENDING_VERIFY 分区标记为 invalid 并立即重启回退到旧分区。 */
     esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Rollback request failed: %s", esp_err_to_name(err));

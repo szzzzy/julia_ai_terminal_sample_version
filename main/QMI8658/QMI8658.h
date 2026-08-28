@@ -1,5 +1,17 @@
 #pragma once
 
+/*
+ * QMI8658 六轴 IMU 驱动头（实现见 QMI8658.c，经外部 I2C_Driver 组件访问）。
+ * 约定：
+ * - 地址：默认 0x6B（QMI8658_L_SLAVE_ADDRESS）；0x6A 为 SA0 拉高。
+ * - 全局 Accel（单位 g）/Gyro（单位 dps）由 getAccelerometer()/getGyroscope() 写入，
+ *   供 julia_context 读取做活动检测。
+ * - acc_odr_norm_* / gyro_odr_norm_* 的数值为 ODR（Hz），如 _8000 = 8000Hz。
+ * - 量程位在 CTRL2/CTRL3 的 4~6 位（ASCALE_OFFSET/GSCALE_OFFSET=4）。
+ * - 部分声明（getRawReadings/getAccX…/QMI8658_sensor_update/QMI8658_update_if_needed）
+ *   本文件仅声明、库文件未实现；实际使用请以本 .c 已实现函数为准。
+ */
+
 #include "I2C_Driver.h"
 
 //device address

@@ -33,9 +33,16 @@
 /** 本模块日志标签。 */
 static const char *TAG = "audio_control_plane";
 
-/** SHA-256 文本采用两个十六进制字符表示一个字节。 */
+/** SHA-256 文本采用两个十六进制字符表示一个字节（64 个字符 -> 32 字节）。 */
 #define AUDIO_CONTROL_PLANE_SHA256_HEX_LEN (NATIVE_OTA_SHA256_SIZE * 2U)
 
+/**
+ * 并发模型：请求由主动检查任务生成（写 s_last_request_id），响应在 MQTT 事件
+ * 任务中解析（读 s_last_request_id），二者是不同任务，因此用自旋锁短临界区保护
+ * 这一个 request_id。锁只包住内存复制/比较，不包住 cJSON 解析等耗时操作。
+ * 语义：只有"最近一次"请求的 request_id 才算数——稍慢到达的旧响应、或无关消息，
+ * 都会因不匹配被丢弃，防止串包或沿用过期清单。
+ */
 /** 保护最近 request_id 的短临界区锁。 */
 static portMUX_TYPE s_audio_request_id_lock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -61,6 +68,10 @@ static bool audio_control_plane_request_id_matches(const char *request_id)
     portEXIT_CRITICAL(&s_audio_request_id_lock);
     return matches;
 }
+
+/* 本组校验工具统一采用"严格白名单"语义：任一字段类型不对、为空、过长、非整数
+ * 或越界，都判为无效（返回 false），绝不做隐式转换或截断。这样保证进入下载引擎
+ * 的 native_audio_manifest_t 每一项都是可信的、可直接使用的值。 */
 
 /** 将一个十六进制字符转换为 0～15 的半字节数值；非法字符返回 -1。 */
 static int audio_control_plane_hex_to_nibble(char value)
@@ -184,6 +195,8 @@ static bool audio_control_plane_url_host_allowed(const char *url)
     return false;
 }
 
+/* 实现说明：这里只"构造并关联"，不发送。每次成功生成都会刷新 s_last_request_id，
+ * 因此服务器响应必须严格匹配最近一次请求；生成即关联，逻辑与 OTA 检查完全一致。 */
 esp_err_t native_audio_build_check_request(const char *current_audio_version,
                                            char *json, size_t json_size, size_t *json_len)
 {
@@ -229,6 +242,9 @@ esp_err_t native_audio_build_check_request(const char *current_audio_version,
     return ESP_OK;
 }
 
+/* 实现说明：全有或全无。任何一步校验失败都 goto cleanup，cleanup 里把 manifest
+ * 清零、*download_requested 置 false——绝不输出一个字段残缺/可信度不足的清单。
+ * 成功路径下 update=false 时也不会写清单（只回 download_requested=false）。 */
 esp_err_t audio_control_plane_parse_audio_response(const char *json, size_t json_len,
                                                    native_audio_manifest_t *manifest,
                                                    bool *download_requested)

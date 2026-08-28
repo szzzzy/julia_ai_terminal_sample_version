@@ -1,3 +1,15 @@
+/**
+ * @file    lvgl_port.h
+ * @brief   LVGL 与 ESP-IDF 适配层接口：初始化、锁、tick、刷新同步与显示开关。
+ *
+ * @note  本模块把 LVGL（单线程模型）接到 esp_lcd_panel（异步 DMA）上。使用前必须先
+ *        初始化好面板（见 julia_display_init），再调 lvgl_port_init。之后所有 LVGL
+ *        API 调用都须包在 lvgl_port_lock/unlock 内。
+ * @note  两种"暂停"语义：
+ *         - lvgl_port_set_display_off：关闭面板显示（可仅背光作退路）；
+ *         - lvgl_port_set_refresh_paused：只停刷新/动画，保持 GRAM 与背光，画面冻结。
+ * @see   main/display/julia_display.h（面板创建与初始化顺序）
+ */
 #pragma once
 
 #include <stdbool.h>
@@ -6,6 +18,7 @@
 #include "esp_lcd_panel_ops.h"
 #include "lvgl.h"
 
+/* 显示分辨率与本机 LVGL 双缓冲尺寸（约占整屏 1/10，两帧交替）。 */
 #define LVGL_PORT_HOR_RES           360
 #define LVGL_PORT_VER_RES           360
 #define LVGL_PORT_BUFFER_PIXELS     (LVGL_PORT_HOR_RES * LVGL_PORT_VER_RES / 10)

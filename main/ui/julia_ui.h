@@ -1,3 +1,15 @@
+/**
+ * @file    julia_ui.h
+ * @brief   julia_ui.c 的公共接口声明（L0/L1 立绘 UI 总控）。
+ *
+ * 供调用方（julia_voice / julia_lipsync / julia_display_theme）使用的"状态->表情/画面"
+ * 入口。多数函数要求 LVGL 已初始化（julia_ui_init）并且调用前无需自己加锁，
+ * 函数内部会通过 lvgl_port_lock() 串行化。若模块未初始化或锁超时，函数返回/否则弃
+ * （为 no-op），因此调用方不应依赖其返回的视觉结果。相关约定与线程模型详见 julia_ui.c。
+ *
+ * NOTE：需结合调用方确认——当前 main.c 的 L1 运行时链路走 julia_avatar（不进 julia_ui）；
+ * 本头文件/实现是否仍被实际引用，决定其是保留还是裁剪。
+ */
 #pragma once
 
 #include <stdint.h>
@@ -9,14 +21,17 @@
 #endif
 #include "julia_fsm.h"
 
+/* 表情枚举。注意：apply_expression 在立绘方案下直接 return，因此这些枚举目前
+ * 只作"命名占位"，不再驱动可见的几何表情（见 julia_ui.c 的 apply_expression）。 */
 typedef enum {
-    JULIA_EXPR_SLEEP = 0,
-    JULIA_EXPR_WATCHING,
-    JULIA_EXPR_HAPPY,
-    JULIA_EXPR_SPEAKING,
-    JULIA_EXPR_CONFUSED,
-    JULIA_EXPR_COUNT,
+    JULIA_EXPR_SLEEP = 0,   ///< 睡眠表情。
+    JULIA_EXPR_WATCHING,    ///< 注视表情。
+    JULIA_EXPR_HAPPY,       ///< 开心表情。
+    JULIA_EXPR_SPEAKING,    ///< 说话表情。
+    JULIA_EXPR_CONFUSED,    ///< 困惑表情。
+    JULIA_EXPR_COUNT,       ///< 计数器/越界判断。
 } expr_t;
+/* 对话框相位（IDLE/LISTENING/THINKING/SPEAKING），驱动嘴型与微动节奏。 */
 typedef enum { JULIA_DIALOG_PHASE_IDLE=0, JULIA_DIALOG_PHASE_LISTENING, JULIA_DIALOG_PHASE_THINKING, JULIA_DIALOG_PHASE_SPEAKING } julia_dialog_phase_t;
 
 void julia_ui_init(void);

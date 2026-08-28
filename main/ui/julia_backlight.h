@@ -1,3 +1,11 @@
+/**
+ * @file    julia_backlight.h
+ * @brief   LCD 背光接口（LEDC PWM + 呼吸/渐变）。
+ *
+ * 背光是否点亮由调用方决定：init 后默认关闭，app_main 在首帧完整渲染后才点亮。
+ * 各入口内部会先停呼吸（breathe_stop）避免与渐变/手动亮度抢占通道；所有函数非阻塞。
+ * 详见 julia_backlight.c。
+ */
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>

@@ -8,6 +8,13 @@
  * - 将下载请求交给 audio_engine。
  *
  * 本模块不持有音频运行状态：运行中判断统一转调 audio_engine。
+ *
+ * 互斥语义（与 OTA 共用网络/Flash 资源）：OTA 下载进行中时拒绝启动音频下载
+ * （OTA 优先）；音频下载自身也拒绝并发。真正的单飞保证由 audio_engine 内部的
+ * 运行标志兜底，本层只是"创建前"的一道快速互斥。
+ *
+ * NOTE：需结合调用方确认——MQTT 层目前未把 audio_check_response 分发到本入口，
+ * 详见 audio_service.c 文件头。
  */
 #pragma once
 

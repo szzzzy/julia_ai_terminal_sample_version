@@ -10,7 +10,9 @@
 #include "audio_service.h"
 #include "board_audio.h"
 #include "julia_avatar.h"
+#include "julia_time.h"
 #include "julia_display.h"
+#include "julia_idle_display.h"
 #include "mqtt_comm.h"
 #include "network_lifecycle.h"
 #include "ota_boot_flow.h"
@@ -23,8 +25,6 @@
 #include "voice_push_demo.h"
 #endif
 
-#define IDLE_RETURN_TIMEOUT_MS  (10 * 1000U)
-#define DISPLAY_SLEEP_TIMEOUT_MS (5 * 60 * 1000U)
 static const char *TAG = "app_main";
 
 /**
@@ -69,7 +69,10 @@ void app_main(void)
     } else {
         err = julia_avatar_init();
         if (err == ESP_OK) {
-            julia_backlight_set(100);
+            err = julia_idle_display_init();
+            if (err != ESP_OK) {
+                julia_backlight_set(100);
+            }
         }
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "Julia avatar init failed: %s", esp_err_to_name(err));
@@ -86,6 +89,13 @@ void app_main(void)
     err = audio_service_init();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Audio service init failed: %s", esp_err_to_name(err));
+    }
+
+    /* RTC restore is local and best-effort. SNTP starts later from the IP-ready
+     * callback, then writes the synchronized local time back to PCF85063. */
+    err = julia_time_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Julia time context init failed: %s", esp_err_to_name(err));
     }
 
     /* SD 卡（SPI，FAT 挂载到 /sdcard）：供 voice_service 的 "SD:/<name>" 文件
@@ -107,6 +117,11 @@ void app_main(void)
         ESP_LOGW(TAG, "Voice IP-ready callback registration failed: %s",
                  esp_err_to_name(err));
     }
+    err = network_lifecycle_register_ip_ready(julia_time_ip_ready, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Time-sync callback registration failed: %s",
+                 esp_err_to_name(err));
+    }
 
     /* 网络不可用绝不能阻断本地应用或影响 pending 镜像验收。Wi-Fi 管理器在后台
      * 永久重连；只有取得 IPv4 后才会调用已注册的服务启动回调。 */
@@ -126,4 +141,3 @@ void app_main(void)
     }
 #endif
 }
-

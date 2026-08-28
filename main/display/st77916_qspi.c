@@ -1,3 +1,30 @@
+/**
+ * @file    st77916_qspi.c
+ * @brief   板级 ST77916 QSPI 接线驱动（自足式，从 fused 主工程 main.c 摘取）。
+ *
+ * @section qspi_bounds 绑定与边界
+ *         本文件是一个"自足"的板级 LCD 初始化/驱动：它自己创建 QSPI 总线和 panel IO
+ *         句柄、自行下发厂商初始化序列、按 EXIO(TCA9554) 做复位、并提供整屏填充工具。
+ *         与 esp_lcd_st77916 组件驱动的区别在于它不过 esp_lcd_panel_t 接口，而是直接
+ *         拼装 SPI 事务（见下方 st77916_qspi_new/init/fill_color）。二者共用同一份厂商
+ *         初始化序列（0xF0/0xF2/...），文本上可与 julia_display.c 里的
+ *         vendor_specific_init_new 对比。
+ *
+ * @section qspi_build 构建状态
+ *         ⚠️ 当前文件未列入 main/CMakeLists.txt 的 SRCS，也未随工程编译；它保留为
+ *         板级参考实现（fused 移植文档 §3.1 提及）。此处注释仅用于维护其逻辑。
+ *
+ * @note   头文件缺失：原文 `#include "st77916_qspi.h"` 指向的
+ *         main/display/st77916_qspi.h 并不存在（目录下仅有本 .c），因此本文件单独
+ *         无法编译；依赖者（st77916_qspi_config_t / ST77916_QSPI_LCD_WIDTH/HEIGHT）
+ *         未在任意头文件中定义。⚠️ 只作参考，不在当前构建链路上。
+ *
+ * @note   复位走 I2C 与 TCA9554（板载 EXIO），与 julia_display.c 的
+ *         reset_panel_via_existing_tca9554 语义相同（另一条复位路径）。
+ *
+ * @see    main/display/julia_display.c（实际编译的接线与初始化顺序）
+ * @see    main/display/esp_lcd_st77916.c
+ */
 #include "st77916_qspi.h"
 
 #include <stddef.h>
@@ -10,6 +37,8 @@
 #include "esp_lcd_io_spi.h"
 #include "esp_log.h"
 
+/* 板级常量：像素位宽固定 RGB565；EXIO(TCA9554) 寄存器偏移（输出锁存/方向）；
+ * QSPI 协议 opcode（同 esp_lcd_st77916.c 语义）；整屏填充时分块的行数。 */
 #define ST77916_QSPI_BITS_PER_PIXEL 16
 #define ST77916_EXIO_OUTPUT_REG 0x01
 #define ST77916_EXIO_CONFIG_REG 0x03
@@ -19,6 +48,7 @@
 #define ST77916_CHUNK_LINES 20
 #define TAG "ST77916"
 
+/* 单条初始化命令：命令码 + 最多 16 字节参数 + 参数长度 + 命令后延时。 */
 typedef struct {
     uint8_t cmd;
     uint8_t data[16];
@@ -26,6 +56,9 @@ typedef struct {
     uint16_t delay_ms;
 } st77916_lcd_init_cmd_t;
 
+/* 厂商特定初始化序列（与 julia_display.c 的 vendor_specific_init_new 同源，均为
+ * 已调校的可点亮序列）。寄存器语义由厂商决定，这里只按序透传——初始化失败多半要
+ * 回查厂商手册或对比 fused 工程里的参考值，而不是在本层推断。 */
 static const st77916_lcd_init_cmd_t st77916_init_cmds[] = {
     {0xF0, {0x28}, 1, 0},
     {0xF2, {0x28}, 1, 0},
@@ -95,16 +128,21 @@ static const st77916_lcd_init_cmd_t st77916_init_cmds[] = {
     {0xFD, {0x00}, 1, 0},
     {0xFE, {0x00}, 1, 0},
     {0xFF, {0x00}, 1, 0},
+    /* 尾部三条为"可见性"开关：0x21 反显、0x11 退出睡眠(带 120ms 稳定)、0x29 开显示。 */
     {0x21, {0}, 0, 0},
     {0x11, {0}, 0, 120},
     {0x29, {0}, 0, 0},
 };
 
+/* 组装 32-bit QSPI 命令字：高字节放协议 opcode，bits[15:8] 放 LCD 命令。
+ * esp_lcd_panel_io_spi 在 quad_mode 下据此路由"写命令/读命令/写颜色"事务。 */
 static int st77916_pack_cmd(uint8_t opcode, int lcd_cmd)
 {
     return ((int)opcode << 24) | ((lcd_cmd & 0xFF) << 8);
 }
 
+/* 交换一个 16 位值的字节序：RGB565 像素在外设侧按大端送，CPU 侧为小端，填充前需转。
+ * （参考意义：julia_display.c 走 LVGL；LV_COLOR_16_SWAP 配置已解决字节序。） */
 static uint16_t st77916_swap16(uint16_t value)
 {
     return (uint16_t)((value << 8) | (value >> 8));
@@ -120,6 +158,8 @@ static esp_err_t st77916_tx_color(esp_lcd_panel_io_handle_t io, int lcd_cmd, con
     return esp_lcd_panel_io_tx_color(io, st77916_pack_cmd(LCD_OPCODE_WRITE_COLOR, lcd_cmd), param, param_size);
 }
 
+/* 设置写显存窗口：CASET(列地址 0x2A) + RASET(行地址 0x2B)，随后下发 RAMWR(0x2C)，
+ * 进入"写像素"状态。窗口为闭区间（x0..x1、y0..y1），参数按大端拆成两个字节。 */
 static esp_err_t st77916_qspi_set_window(esp_lcd_panel_io_handle_t io, int x0, int y0, int x1, int y1)
 {
     uint8_t params[4];
@@ -139,12 +179,25 @@ static esp_err_t st77916_qspi_set_window(esp_lcd_panel_io_handle_t io, int x0, i
     return st77916_tx_param(io, 0x2C, NULL, 0);
 }
 
+/* 画单个像素：把窗口设为单点再写 2 字节颜色数据（供调试/清屏前试用）。 */
 static esp_err_t st77916_qspi_draw_pixel(esp_lcd_panel_io_handle_t io, int x, int y, uint16_t color)
 {
     ESP_RETURN_ON_ERROR(st77916_qspi_set_window(io, x, y, x, y), "st77916", "set pixel window failed");
     return st77916_tx_color(io, 0x2C, &color, sizeof(color));
 }
 
+/**
+ * @brief 创建 QSPI 总线与 panel IO 句柄。
+ *
+ * @note  复用给定 spi_host：初始化四线数据 + SCK 的 spi_bus_config（max_trans_sz=2048，
+ *        即单次 DMA 至多 2048 字节），然后用 esp_lcd_new_panel_io_spi 创建 IO。
+ *        QSPI 下 dc_gpio=-1、lcd_cmd_bits=32、quad_mode=1（与 esp_lcd_st77916 一致）。
+ *
+ * @param[in]  config 板级接线配置（引脚、SPI 主机、时钟）。
+ * @param[out] ret_io 返回的 panel IO 句柄。
+ * @return ESP_OK 成功；参数为空返回 ESP_ERR_INVALID_ARG；总线/IO 创建失败返回其错误。
+ * @sideeffect 初始化/占用给定 SPI 主机（后续不可再被其他设备用同一 host 复用为数据总线）。
+ */
 esp_err_t st77916_qspi_new(const st77916_qspi_config_t *config, esp_lcd_panel_io_handle_t *ret_io)
 {
     ESP_RETURN_ON_FALSE(config != NULL, ESP_ERR_INVALID_ARG, "st77916", "config is null");
@@ -178,17 +231,20 @@ esp_err_t st77916_qspi_new(const st77916_qspi_config_t *config, esp_lcd_panel_io
     return esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)config->spi_host, &io_conf, ret_io);
 }
 
+/* 通过 I2C 写一个寄存器到 EXIO（板载 TCA9554 扩展 IO）：payload = [寄存器, 值]。 */
 static esp_err_t st77916_exio_write_reg(i2c_port_t port, uint8_t addr, uint8_t reg, uint8_t value)
 {
     uint8_t payload[2] = {reg, value};
     return i2c_master_write_to_device(port, addr, payload, sizeof(payload), pdMS_TO_TICKS(100));
 }
 
+/* 通过 I2C 读一个 EXIO 寄存器：先写寄存器号再读一个字节（write-then-read）。 */
 static esp_err_t st77916_exio_read_reg(i2c_port_t port, uint8_t addr, uint8_t reg, uint8_t *value)
 {
     return i2c_master_write_read_device(port, addr, &reg, 1, value, 1, pdMS_TO_TICKS(100));
 }
 
+/* 回读面板厂商 ID(0x04) 与状态(0x09) 打到日志；失败不致命，便于烧录后确认面板型号。 */
 static void st77916_log_panel_id(esp_lcd_panel_io_handle_t io)
 {
     uint8_t id[4] = {0};
@@ -208,6 +264,18 @@ static void st77916_log_panel_id(esp_lcd_panel_io_handle_t io)
     }
 }
 
+/**
+ * @brief 通过板载 EXIO(TCA9554) 做 LCD 硬件复位（active-low）。
+ *
+ * @note  时序与电平：复位脚先拉低 >=20ms 再拉高，随后等 120ms 让面板从复位中恢复
+ *        （这是面板上电/复位后显示可用的稳定时间，与 esp_lcd_st77916 里的硬件复位
+ *        一致，只是这里经由 I2C EXIO 而非 GPIO）。方向寄存器先把 RST 位设为输出，
+ *        再改输出锁存，避免使能瞬间电平抖动。
+ *
+ * @param[in] config 板级接线配置（含 I2C 端口/引脚、exio 地址、复位位号）。
+ * @return ESP_OK 成功；地址扫描失败返回 ESP_ERR_NOT_FOUND；总线/设备错误返回对应 err。
+ * @sideeffect 安装并占用 I2C 驱动；翻转 RST 位电平；阻塞 140ms 左右。
+ */
 esp_err_t st77916_qspi_reset(const st77916_qspi_config_t *config)
 {
     ESP_RETURN_ON_FALSE(config != NULL, ESP_ERR_INVALID_ARG, "st77916", "config is null");
@@ -258,6 +326,12 @@ esp_err_t st77916_qspi_reset(const st77916_qspi_config_t *config)
     return ESP_OK;
 }
 
+/**
+ * @brief 初始化面板：先设地址模式(0x36=0x00 不交换/不镜像)与像素格式(0x3A=0x55 RGB565)，
+ *        再顺序下发厂商初始化序列，最后回读面板 ID/状态打日志。
+ * @pre  io 已由 st77916_qspi_new 创建，且面板已完成复位。
+ * @sideeffect 改写面板内部寄存器；阻塞（逐条命令延时，含 0x11 后的 120ms）。
+ */
 esp_err_t st77916_qspi_init(esp_lcd_panel_io_handle_t io)
 {
     ESP_RETURN_ON_FALSE(io != NULL, ESP_ERR_INVALID_ARG, "st77916", "io is null");
@@ -279,6 +353,20 @@ esp_err_t st77916_qspi_init(esp_lcd_panel_io_handle_t io)
     return ESP_OK;
 }
 
+/**
+ * @brief 用单色整屏填充（清屏用）。
+ *
+ * @note  数据流：先在堆上分配一块 MALLOC_CAP_DMA 的 chunk（宽 x CHUNK_LINES 像素），
+ *        填满目标色并转成大端，再按行分块多次下发：每块先设窗口（0, y, width-1, y+lines-1）
+ *        再写颜色。分块是为了复用同一个小而快的 DMA 缓冲，避免一次性分配整屏大缓冲；
+ *        RGB565 像素在外设侧按大端（byte-swap）发送。
+ *
+ * @param[in] io     panel IO 句柄。
+ * @param[in] width  宽（超出面板宽会被截断）。
+ * @param[in] height 高（超出面板高会被截断）。
+ * @param[in] color  RGB565 颜色值。
+ * @return ESP_OK 成功；参数为空/尺寸非法返回 ESP_ERR_INVALID_ARG；内存不足 ESP_ERR_NO_MEM。
+ */
 esp_err_t st77916_qspi_fill_color(esp_lcd_panel_io_handle_t io, uint16_t width, uint16_t height, uint16_t color)
 {
     uint16_t *chunk = NULL;

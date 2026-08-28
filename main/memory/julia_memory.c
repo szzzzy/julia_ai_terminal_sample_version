@@ -1,3 +1,34 @@
+/**
+ * @file    julia_memory.c
+ * @brief   记忆与例行检测模块——事件日志、用户画像、会话摘要与 LLM prompt 组装。
+ *
+ * 数据流（输入 → 校验 → 转换 → 存储/状态更新 → 输出）：
+ *  - 输入：对话文本（record_turn）、情绪事件文本（append）、遗忘指令、关键词。
+ *  - 校验：敏感词打码（contains_sensitive）、UTF-8 安全截断（utf8_copy）、
+ *    类型区间（type<=3）、SD 挂载状态、锁/队列/NVS 可用性。
+ *  - 转换：cJSON 序列化/解析、事件字段打包（julia_event_t+crc32）、
+ *    会话 JSONL 逐行追加、画像去重（add_unique 上限 12）。
+ *  - 存储：SD 卡目录 /sdcard/julia/memory 下的多个文件；NVS（julia_memory）
+ *    保存 turn_count 与最后交互时间；事件日志走环形覆盖 + 双头（ping-pong）。
+ *  - 状态更新：s_last_interaction、s_turn_count、s_profile、s_summary、事件环形
+ *    缓冲与 CRC 校验；主动触发 julia_routine_on_activity(JULIA_ACTIVITY_DIALOG)。
+ *  - 输出：构建好的 system prompt、LLM 可用记忆片段、遗忘答复、最近/关键词事件。
+ *
+ * 所有权与并发：
+ *  - s_lock 保护画像/摘要/会话/NVS 相关状态（不含事件）。
+ *  - s_event_lock 保护事件环形缓冲 s_events 与 s_event_header。
+ *  - s_event_queue 把已校验事件交给后台 event_writer_task 落盘，避免阻塞调用方。
+ *  - 直接文件操作（parse/rename/fsync/clean_old_log）在持锁下串行执行；事件文件
+ *    由写入任务独占访问（调用方只入队，不直接写该文件）。
+ *
+ * 持久化介质：SD 卡 FAT（/sdcard），必须在 julia_memory_init 前完成挂载；
+ * 过期策略：会话日志按时间(30 天)和大小(24KB)双限，事件日志为环形覆盖。
+ *
+ * NOTE：julia_memory_init() 在本工程中暂未见调用点，若未调用则本模块的状态
+ *       与后台写入任务不会被启动（append/get_recent 等会因 s_event_queue 为空
+ *       而失败），需结合启动流程确认。
+ */
+
 #include "julia_memory.h"
 
 #include <stdio.h>
@@ -21,35 +52,45 @@
 
 #define TAG "memory"
 #define MEMORY_DIR JULIA_SD_MOUNT_POINT "/julia/memory"
-#define PROFILE_PATH MEMORY_DIR "/profile.json"
-#define PROFILE_TEMP MEMORY_DIR "/profile.tmp"
-#define CONVERSATION_PATH MEMORY_DIR "/conversation_v2.jsonl"
-#define CONVERSATION_TEMP MEMORY_DIR "/conversation.tmp"
-#define SUMMARY_PATH MEMORY_DIR "/summary.txt"
-#define MAX_LOG_BYTES (24 * 1024)
-#define RETENTION_SECONDS (30LL * 24 * 60 * 60)
-#define EVENT_PATH MEMORY_DIR "/events_v1.bin"
-#define EVENT_CAPACITY 50
-#define EVENT_SLOT_COUNT (EVENT_CAPACITY + 1)
-#define EVENT_HEADER_COPIES 2
-#define EVENT_MAGIC 0x4a4d4531U
-#define EVENT_VERSION 1U
-#define EVENT_QUEUE_DEPTH 16
+#define PROFILE_PATH MEMORY_DIR "/profile.json"                 /* 用户画像（cJSON 对象） */
+#define PROFILE_TEMP MEMORY_DIR "/profile.tmp"                  /* 画像写临时后再改名，防崩溃损坏 */
+#define CONVERSATION_PATH MEMORY_DIR "/conversation_v2.jsonl"   /* 追加式会话日志，每行一个 JSON */
+#define CONVERSATION_TEMP MEMORY_DIR "/conversation.tmp"        /* 会话清理临时文件 */
+#define SUMMARY_PATH MEMORY_DIR "/summary.txt"                  /* 最近对话摘要（s_summary 持久化） */
+#define MAX_LOG_BYTES (24 * 1024)                               /* 会话日志超过则截断到末尾 24KB */
+#define RETENTION_SECONDS (30LL * 24 * 60 * 60)                 /* 会话日志按 30 天过期 */
+#define EVENT_PATH MEMORY_DIR "/events_v1.bin"                  /* 事件日志（环形覆盖） */
+#define EVENT_CAPACITY 50                                       /* 环形缓冲区最多保留条数 */
+#define EVENT_SLOT_COUNT (EVENT_CAPACITY + 1)                   /* 物理槽位=容量+1（多出 1 用于 head 定位） */
+#define EVENT_HEADER_COPIES 2                                   /* 双头(ping-pong)，写损坏时回退到上一代 */
+#define EVENT_MAGIC 0x4a4d4531U                                 /* 'JME1' 魔数 */
+#define EVENT_VERSION 1U                                        /* 事件文件格式版本 */
+#define EVENT_QUEUE_DEPTH 16                                    /* 事件入队深度，提供短暂背压 */
 
 void julia_routine_background_flush(void);
 
+/*
+ * 事件文件头。与事件记录一样采用“末尾 CRC32”布局，落盘后校验。
+ * 双份头（EVENT_HEADER_COPIES=2）写入同一文件的不同偏移，每次写相邻槽位，
+ * 崩溃时总能读到至少一份完整合法的头（选择 generation 更大者）。
+ */
 typedef struct {
     uint32_t magic;
     uint16_t version;
     uint16_t size;
-    uint32_t generation;
-    uint32_t write_idx;
-    uint32_t count;
-    uint32_t epoch;
+    uint32_t generation;   /* 每次写入递增，用于区分两份头的新旧 */
+    uint32_t write_idx;    /* 下一个要写入的槽位（环形） */
+    uint32_t count;        /* 有效事件数（≤ EVENT_CAPACITY） */
+    uint32_t epoch;        /* 环形写满后覆盖的次数（用于观察重写轮数） */
     uint32_t reserved;
     uint32_t crc32;
 } event_header_t;
 
+/*
+ * RAM 内缓存的事件（紧凑形式，不含 96 字节记录里的 storage_padding）。
+ * 磁盘/API 使用完整的 julia_event_t（96 字节），加载/回读时经 cache_event 与
+ * expand_event 在这两种布局间转换，从而省掉内存里 20 字节/条的填充。
+ */
 typedef struct {
     uint32_t timestamp;
     uint8_t type;
@@ -61,6 +102,8 @@ typedef struct {
 
 _Static_assert(sizeof(event_header_t) == 32, "event header must be 32 bytes");
 
+/* 状态（见文件头并发说明）。s_profile/s_summary 持锁后在多个函数间共享，
+ * s_NVS 保存 turn_count/last_time，s_last_interaction 供长离隔判断。 */
 static SemaphoreHandle_t s_lock;
 static cJSON *s_profile;
 static char s_summary[2048];
@@ -73,6 +116,7 @@ static cached_event_t s_events[EVENT_SLOT_COUNT];
 static event_header_t s_event_header;
 static uint8_t s_event_header_slot;
 
+/* CRC 覆盖 crc32 字段之前的所有字节（offsetof 恰好排除尾部 crc32）。 */
 static uint32_t event_crc(const julia_event_t *event)
 {
     return esp_crc32_le(0, (const uint8_t *)event, offsetof(julia_event_t, crc32));
@@ -83,6 +127,7 @@ static uint32_t header_crc(const event_header_t *header)
     return esp_crc32_le(0, (const uint8_t *)header, offsetof(event_header_t, crc32));
 }
 
+/* 头合法判定：魔数/版本/大小/计数约束 + 末尾 CRC 自洽。 */
 static bool valid_header(const event_header_t *header)
 {
     return header->magic == EVENT_MAGIC && header->version == EVENT_VERSION &&
@@ -90,11 +135,13 @@ static bool valid_header(const event_header_t *header)
            header->count <= EVENT_CAPACITY && header->crc32 == header_crc(header);
 }
 
+/* 事件合法判定：CRC 校验且非全零（CRC==0 视为无效待写入的空槽）。 */
 static bool valid_event(const julia_event_t *event)
 {
     return event->crc32 != 0 && event->crc32 == event_crc(event);
 }
 
+/* 96 字节 julia_event_t → 76 字节 cached_event_t（略去 storage_padding）。 */
 static void cache_event(cached_event_t *cached, const julia_event_t *event)
 {
     cached->timestamp = event->timestamp;
@@ -105,6 +152,7 @@ static void cache_event(cached_event_t *cached, const julia_event_t *event)
     cached->crc32 = event->crc32;
 }
 
+/* compact cached_event_t → 96 字节 julia_event_t，并做 CRC 校验（供对外返回）。 */
 static bool expand_event(const cached_event_t *cached, julia_event_t *event)
 {
     memset(event, 0, sizeof(*event));
@@ -117,6 +165,7 @@ static bool expand_event(const cached_event_t *cached, julia_event_t *event)
     return valid_event(event);
 }
 
+/* 生成一个全新的、后续未覆盖过的空头（用于首次创建/全部清除后）。 */
 static void init_event_header(void)
 {
     memset(&s_event_header, 0, sizeof(s_event_header));
@@ -126,12 +175,22 @@ static void init_event_header(void)
     s_event_header.crc32 = header_crc(&s_event_header);
 }
 
+/* 把 stdio 缓冲刷到 OS 并强制落盘（fsync）。返回 ESP_OK/ESP_FAIL。 */
 static esp_err_t sync_file(FILE *file)
 {
     if (fflush(file) != 0) return ESP_FAIL;
     return fsync(fileno(file)) == 0 ? ESP_OK : ESP_FAIL;
 }
 
+/*
+ * 持久化一条事件到磁盘：先写事件本体，再写“下一版”头到相邻槽位，成功后更新
+ * 内存缓存与头。两步都 fsync，避免崩溃时读到半写状态。
+ *  - 事件槽位 = 双头之后按 write_idx 顺序排列（事件部分本身不带头）。
+ *  - 头槽位 = s_event_header_slot ^ 1（ping-pong 轮流写，保留上一代作回退）。
+ * 并发：仅在后台写入任务中调用，因此对文件与 s_event_header 的访问不会与其它
+ * 任务竞争；中间的 s_event_lock 只保证读端（get_recent/recall）能看到成对一致的
+ * 缓存与头。
+ */
 static esp_err_t persist_event(const julia_event_t *event)
 {
     FILE *file = fopen(EVENT_PATH, "r+b");
@@ -147,11 +206,11 @@ static esp_err_t persist_event(const julia_event_t *event)
         sync_file(file) == ESP_OK) {
         event_header_t next = s_event_header;
         next.generation++;
-        next.write_idx = (index + 1U) % EVENT_SLOT_COUNT;
-        if (next.count < EVENT_CAPACITY) next.count++;
-        else next.epoch++;
+        next.write_idx = (index + 1U) % EVENT_SLOT_COUNT;      /* 环形推进 */
+        if (next.count < EVENT_CAPACITY) next.count++;          /* 未满则增加计数 */
+        else next.epoch++;                                      /* 已满则只记覆盖轮数 */
         next.crc32 = header_crc(&next);
-        uint8_t slot = s_event_header_slot ^ 1U;
+        uint8_t slot = s_event_header_slot ^ 1U;                /* 写到另一份头 */
         if (fseek(file, (long)(slot * sizeof(event_header_t)), SEEK_SET) == 0 &&
             fwrite(&next, 1, sizeof(next), file) == sizeof(next) &&
             sync_file(file) == ESP_OK) {
@@ -167,6 +226,8 @@ static esp_err_t persist_event(const julia_event_t *event)
     return err;
 }
 
+/* 后台写盘任务：排队收到事件即 persist（fsync 可能较慢，借助队列做背压），
+ * 每次循环顺带触发例行检测的延迟落盘。取到事件即持久化，无其它任务写事件文件。 */
 static void event_writer_task(void *arg)
 {
     (void)arg;
@@ -180,6 +241,12 @@ static void event_writer_task(void *arg)
     }
 }
 
+/*
+ * 加载事件文件：读取并校验两份头，选择合法且 generation 更大的一版；随后按槽位
+ * 读回每条事件（CRC 校验失败视为空槽），全部装入内存缓存。最后创建事件队列与
+ * 写入任务（优先把任务栈放在 PSRAM，不可用则退回内部 RAM）。
+ * 若文件不存在，则以一个全新的空头起步（s_events 全零）。
+ */
 static esp_err_t load_events(void)
 {
     init_event_header();
@@ -190,6 +257,7 @@ static esp_err_t load_events(void)
         bool valid0 = valid_header(&headers[0]);
         bool valid1 = valid_header(&headers[1]);
         if (valid0 || valid1) {
+            /* 任一头合法即可；两者都合法时取 generation 更大者作为当前头。 */
             s_event_header_slot = valid1 && (!valid0 || headers[1].generation > headers[0].generation);
             s_event_header = headers[s_event_header_slot];
         }
@@ -219,6 +287,8 @@ static esp_err_t load_events(void)
     return ESP_OK;
 }
 
+/* 敏感词判定：命中即整体打码/丢弃，绝不持久化原文。列表为中文金融/身份类词与
+ * 常见英文密钥字段，属简化启发式，不是严格 PII 检测。 */
 static bool contains_sensitive(const char *text)
 {
     static const char *words[] = {"密码", "身份证", "银行卡", "信用卡", "验证码", "access key", "api key", "secret"};
@@ -227,6 +297,8 @@ static bool contains_sensitive(const char *text)
     return false;
 }
 
+/* 按 size-1 上限复制，但会把末尾回退到完整 UTF-8 字符边界：从尾部丢弃所有
+ * 10xxxxxx 续字节，避免把一个多字节字符拦腰截断（防乱码）。 */
 static void utf8_copy(char *dest, size_t size, const char *source, size_t length)
 {
     if (!size) return;
@@ -235,6 +307,8 @@ static void utf8_copy(char *dest, size_t size, const char *source, size_t length
     memcpy(dest, source, length); dest[length] = 0;
 }
 
+/* 从文本里抓取 marker 之后直到第一个句末标点/空格的字段值，用于“我叫/叫我/我的生日是/
+ * 我喜欢/记住”等画像抽取。找不到 marker 则置空并返回。 */
 static void extract_after(const char *text, const char *marker, char *value, size_t value_size)
 {
     const char *start = strstr(text, marker);
@@ -252,6 +326,7 @@ static void extract_after(const char *text, const char *marker, char *value, siz
     utf8_copy(value, value_size, start, end - start);
 }
 
+/* 新建一份默认画像（version=1，各字段为空/空数组）。 */
 static cJSON *new_profile(void)
 {
     cJSON *profile = cJSON_CreateObject();
@@ -264,6 +339,7 @@ static cJSON *new_profile(void)
     return profile;
 }
 
+/* 先写临时文件再 rename 覆盖正式文件，避免半写损坏画像。 */
 static esp_err_t save_profile(void)
 {
     char *json = cJSON_Print(s_profile);
@@ -278,6 +354,7 @@ static esp_err_t save_profile(void)
     return rename(PROFILE_TEMP, PROFILE_PATH) == 0 ? ESP_OK : ESP_FAIL;
 }
 
+/* 从 SD 卡读取画像；文件缺失/损坏/超大(>32KB)都回退到新画像并落盘一次。 */
 static void load_profile(void)
 {
     FILE *file = fopen(PROFILE_PATH, "rb");
@@ -291,6 +368,7 @@ static void load_profile(void)
     if (!s_profile) { s_profile = new_profile(); save_profile(); }
 }
 
+/* 一次性载入最近对话摘要（s_summary 是有界缓冲，见 append_summary）。 */
 static void load_summary(void)
 {
     FILE *file = fopen(SUMMARY_PATH, "rb");
@@ -299,6 +377,7 @@ static void load_summary(void)
     s_summary[length] = 0; fclose(file);
 }
 
+/* 向数组追加去重后的字符串值；数组超过 12 条时丢弃最旧（从头部删除）。 */
 static void add_unique(cJSON *array, const char *value)
 {
     if (!array || !value[0]) return;
@@ -309,6 +388,7 @@ static void add_unique(cJSON *array, const char *value)
     cJSON_AddItemToArray(array, cJSON_CreateString(value));
 }
 
+/* 更新/新增画像字符串字段。 */
 static void set_string(const char *name, const char *value)
 {
     cJSON *item = cJSON_GetObjectItemCaseSensitive(s_profile, name);
@@ -316,6 +396,8 @@ static void set_string(const char *name, const char *value)
     else cJSON_AddStringToObject(s_profile, name, value);
 }
 
+/* 从一轮对话中抽取画像信息：敏感文本直接跳过；按“我叫/叫我/我的生日是/我喜欢/记住”
+ * 提取到对应字段。只做规则匹配，不依赖 LLM。 */
 static void update_profile(const char *text)
 {
     if (contains_sensitive(text)) return;
@@ -332,6 +414,8 @@ static void update_profile(const char *text)
     if (value[0]) add_unique(cJSON_GetObjectItemCaseSensitive(s_profile, "notes"), value);
 }
 
+/* 追加一行“用户：…\nJulia：…\n”到最近对话摘要。超出缓冲时保留后半段
+ * （从 UTF-8 边界切分），保证提示里最新对话总在。随后写回 summary.txt。 */
 static void append_summary(const char *user_text, const char *assistant_text)
 {
     char user[128], assistant[128], line[300];
@@ -350,6 +434,13 @@ static void append_summary(const char *user_text, const char *assistant_text)
     if (file) { fwrite(s_summary, 1, strlen(s_summary), file); fclose(file); }
 }
 
+/* 会话日志维护：
+ * 1) 逐行解析 JSONL，删除 timestamp 早于 RETENTION_SECONDS(30 天)的条目；
+ * 2) 若结果仍超过 MAX_LOG_BYTES(24KB)，用 in-place shift 把文件截断到末尾 24KB
+ *    （并回退到换行边界，保证不出现半行的 JSON）；
+ * 3) 生成新文件后替换正式文件（CONVERSATION_TEMP → CONVERSATION_PATH）。
+ * 注意：条目内的 timestamp 是记录时的 wall-clock 秒；若时钟未同步（<2024），
+ * 该条不会被保留（时间戳为 0 或 uptime 值）。 */
 static void clean_old_log(void)
 {
     FILE *input = fopen(CONVERSATION_PATH, "rb");
@@ -372,6 +463,7 @@ static void clean_old_log(void)
     if (output_size > MAX_LOG_BYTES) {
         output = fopen(CONVERSATION_TEMP, "r+b");
         if (output) {
+            /* 定位到“末尾 MAX_LOG_BYTES”所在行的起始处，用读写游标把尾部前移。 */
             long read_pos = output_size - MAX_LOG_BYTES;
             fseek(output, read_pos, SEEK_SET);
             int ch;
@@ -395,6 +487,13 @@ static void clean_old_log(void)
     remove(CONVERSATION_PATH); rename(CONVERSATION_TEMP, CONVERSATION_PATH);
 }
 
+/* 初始化记忆系统。
+ * 前置：SD 已挂载（否则返回 ESP_ERR_INVALID_STATE）。
+ * 副作用：mkdir 目录、加载/创建画像与摘要、清理过期会话日志、打开 NVS
+ *         （julia_memory 命名空间）、读取 turn_count/last_time，
+ *          并由 load_events() 启动事件写入后台任务。
+ * 调用上下文：应在系统启动早期、任何记忆读写之前调用一次。
+ * NOTE：本工程暂未发现对该函数的调用点（见报告）。 */
 esp_err_t julia_memory_init(void)
 {
     if (!julia_sd_is_mounted()) return ESP_ERR_INVALID_STATE;
@@ -419,6 +518,9 @@ esp_err_t julia_memory_init(void)
     return load_events();
 }
 
+/* 组装 system prompt：base_prompt ＋ 画像(JSON) ＋ 最近对话摘要 ＋ 防泄露提示。
+ * 输出须 >= output_size；画像/摘要缺任一时都按空串拼接，不会失败。
+ * 调用上下文：语音对话任务发送 AI 请求前调用一次。 */
 esp_err_t julia_memory_build_prompt(const char *base_prompt, char *output, size_t output_size)
 {
     if (!base_prompt || !output || !output_size || !s_lock) return ESP_ERR_INVALID_ARG;
@@ -432,11 +534,19 @@ esp_err_t julia_memory_build_prompt(const char *base_prompt, char *output, size_
     return ESP_OK;
 }
 
+/* 记录一轮对话（情绪取 NONE）——见 with_emotion 版本。 */
 esp_err_t julia_memory_record_turn(const char *user_text, const char *assistant_text)
 {
     return julia_memory_record_turn_with_emotion(user_text, assistant_text, JULIA_MEMORY_EMOTION_NONE);
 }
 
+/* 记录一轮对话（带情绪）。
+ * 输入：用户/助手文本，emotion（julia_emotion_t）。
+ * 副作用：更新画像并保存、追加摘要、追加会话 JSONL（敏感词打码）、
+ *          更新 s_last_interaction 与 s_turn_count 并提交到 NVS、每 10 轮清理一次
+ *          会话日志、写一条 type=0 事件、通知例行检测 DIALOG 活动。
+ * 返回：evt_err（事件入队结果），但即使事件失败，对话记录本身仍已落盘。
+ * 调用上下文：语音对话任务完成一轮后调用。 */
 esp_err_t julia_memory_record_turn_with_emotion(const char *user_text,
                                                 const char *assistant_text,
                                                 uint8_t emotion)
@@ -463,6 +573,15 @@ esp_err_t julia_memory_record_turn_with_emotion(const char *user_text,
     return event_err;
 }
 
+/* 处理“遗忘类”请求，命中则返回 true（调用方跳过 AI 并直接使用 reply 答复）。
+ * 匹配规则（按优先级）：
+ *  - 含“所有/全部/清空记忆”→ 全清（重置画像、清摘要、删会话与摘要文件）；
+ *  - 含“名字/称呼”→ 清 name+preferred_name；
+ *  - 含“生日”→ 清 birthday；
+ *  - 含“喜好/喜欢”→ 清空 preferences 数组；
+ *  - 其它含“忘记/清空记忆”→ 删除最近一条 notes；
+ *  - 不含任何遗忘关键词 → 返回 false。
+ * 注意“清空记忆”同时出现在第 1 分支与总入口判定里。 */
 bool julia_memory_handle_forget(const char *text, char *reply, size_t reply_size)
 {
     if (!text || (!strstr(text, "忘记") && !strstr(text, "清空记忆"))) return false;
@@ -487,8 +606,16 @@ bool julia_memory_handle_forget(const char *text, char *reply, size_t reply_size
     save_profile(); xSemaphoreGive(s_lock); return true;
 }
 
+/* 返回最后交互的 wall-clock 秒；未初始化时为 0。供长离隔判断使用。 */
 int64_t julia_memory_last_interaction(void) { return s_last_interaction; }
 
+/* 入队一条事件记录（异步，由后台任务持久化）。
+ * 校验：summary 非空、type<=3（0=对话/1=情绪/3=界面；2 保留）、队列已创建。
+ * 时间戳：优先 wall-clock 秒（time(NULL)）；若时钟 <2024（未同步）则退化为
+ *          uptime 秒（esp_timer_get_time()/1e6），避免 0xFFFFFFFF 附近跳变，且
+ *          API 层保证非负。type==0 的 summary 额外截到 61 字节（原因待确认）。
+ * 失败：队列满时阻塞最多 500ms，超时返回 ESP_ERR_TIMEOUT（背压策略）。
+ * 副作用：仅入队，不直接写文件；事件是否落盘由 event_writer_task 决定。 */
 esp_err_t julia_memory_append(uint8_t type, uint8_t emotion, const char *summary)
 {
     if (!summary || type > 3 || !s_event_queue) return ESP_ERR_INVALID_ARG;
@@ -506,6 +633,9 @@ esp_err_t julia_memory_append(uint8_t type, uint8_t emotion, const char *summary
                ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
+/* 取最近 n 条有效事件，新的在前。n 先被 max 截断，再被实际条数截断；
+ * 从当前 write_idx 的前一个槽位向前回读，CRC 校验不过（空槽/损坏）则跳过。
+ * 返回实际写出的条数。取到一致快照（锁保护缓存/头成对更新）。 */
 int julia_memory_get_recent(int n, julia_event_t *out, int max)
 {
     if (n <= 0 || !out || max <= 0 || !s_event_lock) return 0;
@@ -523,6 +653,8 @@ int julia_memory_get_recent(int n, julia_event_t *out, int max)
     return written;
 }
 
+/* 关键词回忆：与 get_recent 相同的从新到旧回读，但只保留 summary 中含 kw 子串的
+ * 事件（strstr 大小写敏感、按子串匹配，不做分词）。返回命中数，最多 max 条。 */
 int julia_memory_recall_keyword(const char *kw, julia_event_t *out, int max)
 {
     if (!kw || !kw[0] || !out || max <= 0 || !s_event_lock) return 0;
@@ -539,6 +671,9 @@ int julia_memory_recall_keyword(const char *kw, julia_event_t *out, int max)
     return written;
 }
 
+/* 把最近最多 4 条事件的 summary 拼成一行（"; " 分隔），供拼进 prompt。
+ * 内部把输出上限钳到 200 字节，一次调用最多写入 buf_size 字节。返回字符串长度。
+ * NOTE：本工程尚未看到调用点，可能为预留接口。 */
 int julia_memory_format_for_prompt(char *buf, int buf_size)
 {
     if (!buf || buf_size <= 0) return 0;
@@ -556,6 +691,8 @@ int julia_memory_format_for_prompt(char *buf, int buf_size)
     return (int)strlen(buf);
 }
 
+/* 清空全部事件：丢弃在途队列、清内存缓存、复位头、删除事件文件。
+ * 仅针对事件日志，不影响画像/摘要/会话日志。 */
 esp_err_t julia_memory_forget_all(void)
 {
     if (!s_event_lock || !s_event_queue) return ESP_ERR_INVALID_STATE;

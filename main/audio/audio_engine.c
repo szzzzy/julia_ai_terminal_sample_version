@@ -14,6 +14,21 @@
  * - 传输核心由 http_downloader 完成（连接、Range、ETag、读循环）；
  * - 摘要计算复用 ota_stability 的分区回读路径，与固件 OTA 同一校验语义；
  * - 不解析控制面 JSON、不依赖 MQTT 客户端句柄。
+ *
+ * 与固件 OTA 引擎（ota_engine.c）的对照（本模块是它的"平行"分支，不是子集）：
+ * - 相同点：同一 http_downloader 传输核心、同一 native_ota_failure_reason_t
+ *   失败分类、同一"NVS 断点 + Range 续传 + 分片重组"思路、同一 MQTT 生命周期上报；
+ * - 差异点：① 目标写独立音频数据分区（audio_data，fat），不写任何 OTA 应用槽；
+ *   ② 校验用"回读分区算 SHA-256 与清单比对"，替代 OTA 的镜像头/可启动性校验；
+ *   ③ 完成通知走弱钩子 native_audio_on_ready()（产品可提供强符号覆盖），OTA 则是
+ *   直接切槽重启；④ 断点记录存 NVS 命名空间 "audio_resume"，与 OTA 的
+ *   ota_resume / ota_report 天然隔离；⑤ 与 OTA 下载互斥且 OTA 优先（见 audio_service）。
+ *
+ * 下载任务状态机（由 audio_download_task 承载，栈 12288 B、优先级 5）：
+ *   [idle] --audio_engine_start--> accepted --> downloading --(body 完整+长度匹配)-->
+ *     verifying --(SHA-256 比对)--> ready(完成，回调 native_audio_on_ready) --> idle
+ *   任一步失败 --> failed（按失败类别决定保留还是清除断点） --> idle
+ * 状态与进度经 audio_report_status() 上报为 MQTT audio_status。
  */
 #include "audio_engine.h"
 
@@ -40,28 +55,54 @@
 /** 本模块统一使用的日志标签。 */
 static const char *TAG = "audio_engine";
 
-/** 音频断点记录布局版本；改变布局时必须递增。 */
+/** 本组宏共同约束"掉电安全 + NVS 寿命"，改动任一都需重新评估： */
+/** 音频断点记录布局版本；改变布局时必须递增，否则旧记录判为过期从零下载。 */
 #define AUDIO_ENGINE_STORE_SCHEMA_VERSION 1U
 
-/** NVS 断点检查点之间的最小写入间隔，单位为字节。 */
+/**
+ * NVS 断点检查点之间的最小写入间隔，单位为字节。
+ * 权衡：间隔越小，掉电可续传的粒度越细，但 NVS 擦写次数越多、写入越频繁；
+ * 间隔越大，NVS 越省、但掉电后最多丢失 <16 KiB 已下载数据需要重下。
+ * 音频素材通常远小于固件（上限 1 MiB），此处与 OTA 的检查点窗口保持同一量级。
+ */
 #define AUDIO_ENGINE_CHECKPOINT_BYTES (16U * 1024U)
 
-/** 断点记录中的 ETag 文本容量，包含末尾 NUL。 */
+/** 断点记录中的 ETag 文本容量，包含末尾 NUL（与 http_downloader 的 ETag 容量一致）。 */
 #define AUDIO_ENGINE_ETAG_SIZE 128
 
-/** 音频 NVS 命名空间，与 ota_resume / ota_report 天然隔离。 */
+/** 音频 NVS 命名空间，与 ota_resume / ota_report 天然隔离，互不串读。 */
 #define AUDIO_ENGINE_NVS_NAMESPACE "audio_resume"
 
-/** 是否已有音频任务运行；通信事件可能来自不同任务，因此通过临界区访问。 */
+/**
+ * 并发模型：s_audio_in_progress 是"单飞"运行标志，用于在任意调用方（如 MQTT
+ * 事件任务、主动检查任务）发起下载时互斥，避免同一时刻存在两个音频下载任务。
+ * - 写者：audio_engine_start() 创建任务前置 true；audio_download_task() 结尾
+ *   （cleanup 段）置 false。两者都持自旋锁短临界区。
+ * - 读者：audio_engine_is_running()（供 audio_service 判定 OTA/音频互斥）。
+ * - 锁语义：用 portMUX 自旋锁是因为可能在中断/事件上下文被读取；锁只保护这一个
+ *   bool，绝不包住下载、Flash/NVS 写等耗时操作，否则会拉长中断/调度延迟。
+ * - 注意：锁不是队列/信号量，不提供"等待下载完成"能力；调用方如需等待应轮询
+ *   audio_engine_is_running() 或依赖后续 audio_status 事件。
+ */
+/** 是否已有音频任务运行。 */
 static bool s_audio_in_progress;
-/** 保护 s_audio_in_progress 的 FreeRTOS 自旋锁，不保护耗时下载操作。 */
+/** 保护 s_audio_in_progress 的短临界区自旋锁。 */
 static portMUX_TYPE s_audio_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
 /**
- * @brief 可跨重启恢复的音频下载断点记录。
+ * @brief 可跨重启恢复的音频下载断点记录（NVS blob "record"，单值存储）。
  *
- * verified_offset 表示已写入并通过 NVS 检查点的数据前缀长度；恢复时必须对
- * 清单、URL、摘要和 HTTP Content-Range 再次校验。
+ * 语义要点：
+ * - verified_offset 是"已写入并通过 NVS 检查点"的数据前缀长度，即掉电后安全
+ *   可复用的前缀长度；因为是检查点粒度，它只会落后于 s->offset（内存中已写长度），
+ *   绝不会超前。
+ * - 恢复前提：只有"清单元数据完全一致"时才允许复用前缀；恢复时仍须对清单、URL、
+ *   摘要和 HTTP Content-Range 重新校验（服务器可能返回别的内容），不能盲目信任。
+ * - version 字段仅用于日志/展示，不参与 audio_record_matches() 的身份判定——
+ *   因为同一 audio_id + 大小 + URL + 摘要即视为同一素材内容。
+ * - etag 是"服务器确认续传对象仍是同一版本"的凭据，仅在 resume 时传入下载器。
+ * - 布局必须是定长、无指针、无 padding（见下方 _Static_assert），否则跨固件版本
+ *   NVS 兼容性会被破坏。
  */
 typedef struct {
     uint32_t schema_version; /**< 记录布局版本，必须等于 AUDIO_ENGINE_STORE_SCHEMA_VERSION。 */
@@ -86,6 +127,15 @@ static void audio_download_task(void *pvParameter);
 /* ------------------------------------------------------------------------- */
 /* NVS 辅助                                                                    */
 /* ------------------------------------------------------------------------- */
+
+/* 本组 NVS 辅助约定：
+ * - 全部运行在音频下载任务（audio_download_task）上下文中，属普通任务，可阻塞，
+ *   但不是中断安全；不持有 s_audio_state_lock。
+ * - 每次"保存"都执行 nvs_set_* + nvs_commit：写与提交成对，保证重命名掉电会话后
+ *   记录要么完整写入要么保持旧值（NVS 本身在此处不做跨页事务，因此以 commit 为
+ *   持久化边界）。失败时把底层 esp_err_t 原样返回，由调用方决定是否中止下载。
+ * - audio_record_load/audio_current_version_load 失败时返回非 OK，但绝不修改
+ *   输出缓冲的前置状态；注意 nvs_get_str 可能已部分填充缓冲，调用方应自行 memset。 */
 
 static esp_err_t audio_nvs_open(nvs_handle_t *handle, nvs_open_mode_t mode)
 {
@@ -229,6 +279,11 @@ static bool audio_record_matches(const audio_resume_record_t *record,
  * @param[in] progress        进度百分比 0～100。
  * @param[in] failure_reason  失败原因；无失败传 NATIVE_OTA_FAILURE_NONE。
  * @return ESP_OK 已交给 MQTT 发送队列；其他值表示 MQTT 未就绪或构造失败。
+ *
+ * @note 本上报是"尽力而为"：MQTT 未连接时会失败但不影响下载结果。
+ *       progress 只在 ready 时有意义（100），accepted/downloading/verifying/failed
+ *       一律为 0；servers 用 error_code 的数值（即 native_ota_failure_reason_t
+ *       的枚举值）判断失败类别，因此该枚举不可重排、只能追加。
  */
 static esp_err_t audio_report_status(const native_audio_manifest_t *manifest,
                                      const char *state, uint32_t progress,
@@ -279,20 +334,39 @@ static esp_err_t audio_report_status(const native_audio_manifest_t *manifest,
 /* ------------------------------------------------------------------------- */
 
 /**
- * @brief 音频下载 sink 上下文：把下载器网络块写入音频数据分区并保存检查点。
+ * @brief 音频下载 sink 上下文：把下载器的网络块写入音频数据分区并保存检查点。
+ *
+ * 该上下文只被一个生产者（http_downloader_run，在同一音频下载任务内同步调用）
+ * 使用，因此无需再加锁；它把"sink 数据 -> Flash 写入 -> 检查点"这一条链的
+ * 状态（写位置、持久化水印）集中管理。
  */
 typedef struct {
-    const native_audio_manifest_t *manifest; /**< 当前清单，只读。 */
+    const native_audio_manifest_t *manifest; /**< 当前清单，只读（用于边界/重置）。 */
     const esp_partition_t *partition; /**< 目标音频数据分区。 */
-    audio_resume_record_t *record; /**< 当前断点记录，sink 更新检查点。 */
-    size_t offset; /**< 已写入分区长度（含断点前缀），同时是摘要边界。 */
-    size_t last_checkpoint; /**< 上次 NVS 检查点对应的偏移。 */
+    audio_resume_record_t *record; /**< 当前断点记录，sink 更新它的 verified_offset。 */
+    size_t offset; /**< 已写入分区的字节数（含断点前缀），同时是摘要校验的边界。 */
+    size_t last_checkpoint; /**< 上次已持久化到 NVS 的检查点偏移，用于触发下一次写。 */
 } audio_engine_sink_ctx_t;
 
 /**
- * @brief 将下载器网络块写入音频数据分区（公共下载器 sink 回调）。
+ * @brief 将下载器网络块写入音频数据分区（http_downloader sink 回调）。
  *
- * @return ESP_OK 数据已写入；其他值中止下载并透传给调用方分类。
+ * @param[in] ctx  audio_engine_sink_ctx_t*。
+ * @param[in] data 本次网络块首地址，仅回调返回前有效，不能保留。
+ * @param[in] len  数据长度，单位为字节。
+ * @return ESP_OK 数据已写入并（必要时）保存了检查点。
+ * @return 其他 esp_err_t 中止下载，错误码原样返回给 http_downloader_run()，由
+ *         调用方（audio_download_task）按错误码映射失败类别。
+ *
+ * @note 约束/副作用：
+ * - 在 http_downloader_run 的调用任务（即音频下载任务）上下文中同步执行，可写
+ *   Flash 与 NVS，但不应阻塞过久（网络读循环在等下一次回调）；不能保留 data 指针。
+ * - 即使服务端用 chunked 编码没有 Content-Length，也绝不让任何一块数据把实际
+ *   写入长度推过清单声明的 file_size，防止恶意/损坏响应破坏分区；上游还据此把
+ *   ESP_ERR_INVALID_SIZE 分类为校验/大小失败。
+ * - 每跨过 AUDIO_ENGINE_CHECKPOINT_BYTES 才写一次 NVS 检查点（先写记录再 commit），
+ *   失败时中止下载；此时内存 offset 已前进但 NVS 水印仍停留在上次检查点，掉电后
+ *   最多丢一个检查点窗口的数据。
  */
 static esp_err_t audio_engine_sink(void *ctx, const uint8_t *data, size_t len)
 {
@@ -326,9 +400,18 @@ static esp_err_t audio_engine_sink(void *ctx, const uint8_t *data, size_t len)
 }
 
 /**
- * @brief 公共下载器断点重置回调：重建断点记录并清零写入偏移。
+ * @brief http_downloader 断点重置回调：重建断点记录并清零写入偏移。
  *
- * @return ESP_OK 允许从零开始全量下载；其他值中止下载。
+ * 触发条件：服务器忽略 Range（返回 200/416，即不支持续传）或响应 ETag 变化，
+ * 下载器决定放弃已有前缀、从零全量重传。本回调负责把"持久化断点"与"内存写位置"
+ * 一起归零，并把当前清单重新落盘为一条全新的初始断点记录。
+ *
+ * @param[in] ctx audio_engine_sink_ctx_t*。
+ * @return ESP_OK 允许从零开始全量下载。
+ * @return 其他 esp_err_t 中止下载，错误码原样透传给 http_downloader_run()。
+ *
+ * @note 回调时下载器尚未读取新连接的 body，可安全重置写目标；NVS 写失败时返回
+ *       非 OK 会中止本次下载（此时断点已不可信，宁可失败也不半途续传）。
  */
 static esp_err_t audio_engine_restart(void *ctx)
 {
@@ -356,9 +439,16 @@ static esp_err_t audio_engine_restart(void *ctx)
  * Content-Length、Content-Range 与完整接收校验由下载器完成，分区写入与
  * 检查点由 sink 完成。摘要校验失败或分区不可用时清除断点记录；网络类失败
  * 保留断点供下次续传。
+ *
+ * @note 本函数是 FreeRTOS 任务入口：运行在"audio_task"（prio=5、栈 12288 B），
+ *       全程阻塞直到下载结束或失败。它独占拥有 pvParameter（堆上深拷贝），
+ *       进入后立即释放；任务结束前必须由本函数自己把 s_audio_in_progress 清回
+ *       false 并 vTaskDelete(NULL)，因此任何提前 return 都会破坏单飞标志。
  */
 static void audio_download_task(void *pvParameter)
 {
+    /* 深拷贝到局部变量后立即释放入参：清单的所有权已从调用方转移给本任务，
+     * 此后 manifest 与下载循环解耦，不再依赖调用方缓冲区的生命周期。 */
     native_audio_manifest_t manifest = *(native_audio_manifest_t *)pvParameter;
     free(pvParameter);
 
@@ -385,6 +475,9 @@ static void audio_download_task(void *pvParameter)
         failure_reason = NATIVE_OTA_FAILURE_STORAGE_UNAVAILABLE;
         goto cleanup;
     }
+    /* 音频素材必须能完整放进目标数据分区：清单 file_size 是校验过的正数，
+     * 且已被控制面限制在 CONFIG_AUDIO_MAX_FILE_SIZE（默认 1 MiB，与 audio_data
+     * 分区等大小）。此处再与分区实际容量比对，防御"清单大小 > 分区"导致越界写。 */
     if (manifest.file_size > partition->size) {
         ESP_LOGE(TAG, "Audio file_size=%" PRIu32 " exceeds partition size=%" PRIu32,
                  manifest.file_size, partition->size);
@@ -395,10 +488,14 @@ static void audio_download_task(void *pvParameter)
     /* 只有清单元数据完全一致时才允许复用 Flash 前缀和 HTTP Range 检查点。 */
     err = audio_record_load(&record);
     if (err == ESP_OK) {
+        /* 还要满足"已有前缀"且"严格小于完整长度"：前缀 0 表示没下载过、
+         * 等于 file_size 表示其实已下完（应直接走校验，而非再发起 Range）。 */
         if (audio_record_matches(&record, &manifest) &&
             record.verified_offset > 0U &&
             record.verified_offset < manifest.file_size) {
             record_active = true;
+            /* normalize 会把 offset 向下对齐到 Flash 加密安全写入边界；若启用加密，
+             * 对齐可能丢弃尚未持久化的尾部数据，因此续传以它的返回值为准。 */
             resume_offset = ota_stability_normalize_resume_offset(record.verified_offset);
             resume = resume_offset > 0U;
             ESP_LOGI(TAG, "Resuming audio artifact %s from offset=%zu",
@@ -414,6 +511,8 @@ static void audio_download_task(void *pvParameter)
     }
 
     if (!record_active) {
+        /* 首次下载（无断点记录）或旧记录不属于本清单：重建初始断点并立即持久化，
+         * 使后续每次写入都有可依赖的 NVS 水印，掉电才能续传。 */
         audio_record_init(&record, &manifest);
         err = audio_record_save(&record);
         if (err != ESP_OK) {
@@ -430,6 +529,9 @@ static void audio_download_task(void *pvParameter)
     sink_ctx.offset = resume_offset;
     sink_ctx.last_checkpoint = resume_offset;
 
+    /* 下载器配置：expected_size / resume_offset / expected_etag 从断点恢复而来；
+     * cert_pem=NULL 表示用构建嵌入的 CA；sink 与 restart 回调把"写分区 + 检查点"
+     * 注入传输核心。传输层失败的分类完全交给下载器（dl_result.failure_reason）。 */
     (void)audio_report_status(&manifest, "downloading", 0, NATIVE_OTA_FAILURE_NONE);
 
     http_downloader_config_t dl_config = {
@@ -459,7 +561,9 @@ static void audio_download_task(void *pvParameter)
         } else {
             failure_reason = NATIVE_OTA_FAILURE_IMAGE_VALIDATE_FAILED;
         }
-        /* 网络类失败保留断点记录供下次续传；其余错误清除。 */
+        /* 只有"可重试的瞬态"传输失败才保留断点记录供下次续传（网络/ TLS / HTTP 状态）；
+         * 其余（NVS 写失败、存储/校验类）属于环境或资源问题，重试往往无意义，清除
+         * 断点以便下次从零开始，避免拿着不可信的断点反复失败。 */
         keep_record = (failure_reason == NATIVE_OTA_FAILURE_NETWORK_TIMEOUT ||
                        failure_reason == NATIVE_OTA_FAILURE_TLS_VERIFY_FAILED ||
                        failure_reason == NATIVE_OTA_FAILURE_HTTP_STATUS_INVALID);
@@ -477,7 +581,9 @@ static void audio_download_task(void *pvParameter)
         }
     }
 
-    /* body 完整、长度匹配是摘要校验之前的必要条件。 */
+    /* body 完整、长度匹配是摘要校验之前的必要条件：即便传输层返回 OK，
+     * 也可能因 chunked/截断导致实际写入长度与清单不符。这里把"长度不符"
+     * 与"体不完整"区分开——后者是网络超时（可续传），前者是内容异常（清断点）。 */
     if (!dl_result.complete || sink_ctx.offset != manifest.file_size) {
         ESP_LOGE(TAG, "Received audio is incomplete: got=%zu expected=%" PRIu32,
                  sink_ctx.offset, manifest.file_size);
@@ -490,7 +596,9 @@ static void audio_download_task(void *pvParameter)
 
     (void)audio_report_status(&manifest, "verifying", 0, NATIVE_OTA_FAILURE_NONE);
 
-    /* 从分区实际写入的内容重新计算摘要，与固件 OTA 同一校验路径。 */
+    /* 摘要校验：以"分区里真实写入的 [0,file_size) 前缀"重算 SHA-256，与清单对比。
+     * 这是完整性/防篡改的最后一道保障；校验失败即认定素材不可信（HASH_MISMATCH）。
+     * 范围严格限定为 file_size，避免把分区剩余空间混入摘要。 */
     uint8_t downloaded_sha256[NATIVE_OTA_SHA256_SIZE];
     err = ota_stability_calculate_partition_sha256(partition, manifest.file_size,
                                                    downloaded_sha256);
@@ -504,7 +612,9 @@ static void audio_download_task(void *pvParameter)
         goto cleanup;
     }
 
-    /* 摘要校验通过：记录当前素材版本并清除断点，随后通知上层播放。 */
+    /* 摘要校验通过：先把"当前已安装版本"写入 NVS（成败只记日志，不阻止交付），
+     * 再清除断点（此时素材已完整且可信，不再需要续传记录），随后通知上层播放。
+     * 若版本持久化失败仍继续：素材本身可用，仅版本上报可能为旧值。 */
     err = audio_current_version_save(manifest.version);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to persist current audio version: %s", esp_err_to_name(err));
@@ -513,6 +623,8 @@ static void audio_download_task(void *pvParameter)
     record_active = false;
 
     (void)audio_report_status(&manifest, "ready", 100, NATIVE_OTA_FAILURE_NONE);
+    /* 弱钩子：默认实现只记日志；产品板级代码可提供强符号覆盖以播放分区内容。
+     * 这里不拿返回值中断下载流程——播放失败不影响"下载已完成"这一事实。 */
     esp_err_t play_err = native_audio_on_ready(&manifest, sink_ctx.offset);
     if (play_err != ESP_OK) {
         ESP_LOGW(TAG, "Audio playback handoff reported: %s", esp_err_to_name(play_err));
@@ -520,6 +632,9 @@ static void audio_download_task(void *pvParameter)
     failure_reason = NATIVE_OTA_FAILURE_NONE;
 
 cleanup:
+    /* 统一退出路径：失败时上报（必要时按 keep_record 决定是否清除断点），
+     * 无论成功/失败都必须清回单飞标志后自删任务，否则 audio_engine_start 会
+     * 永久拒绝后续下载。 */
     if (failure_reason != NATIVE_OTA_FAILURE_NONE) {
         ESP_LOGE(TAG, "Audio task finished with reason=%s",
                  native_ota_failure_reason_name(failure_reason));
@@ -538,17 +653,24 @@ cleanup:
 /* 公共接口                                                                    */
 /* ------------------------------------------------------------------------- */
 
+/* 说明：头文件 audio_engine.h 已给出完整契约；此处的实现要点是——
+ * 任何时候至多存在一个音频下载任务（单飞），由 s_audio_in_progress + 自旋锁保证：
+ * 置位与创建任务在临界区内是原子的，且任务创建失败必须回滚置位，否则会永久占用
+ * 单飞名额。任务栈 12288 B、优先级 5（与 OTA 下载任务同量级）。 */
 esp_err_t audio_engine_start(const native_audio_manifest_t *manifest)
 {
     if (manifest == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    /* 深拷贝清单到堆对象作为任务参数：调用方可用任意生命周期缓冲传入，
+     * 任务取得所有权后自行释放，双方无指针共享。 */
     native_audio_manifest_t *request = calloc(1, sizeof(*request));
     if (request == NULL) {
         return ESP_ERR_NO_MEM;
     }
     *request = *manifest;
 
+    /* 单飞检查 + 置位必须同一临界区内完成，避免两个调用方同时通过检查。 */
     portENTER_CRITICAL(&s_audio_state_lock);
     if (s_audio_in_progress) {
         portEXIT_CRITICAL(&s_audio_state_lock);
@@ -561,6 +683,7 @@ esp_err_t audio_engine_start(const native_audio_manifest_t *manifest)
     ESP_LOGI(TAG, "Creating audio task: audio_id=%s, version=%s, size=%" PRIu32,
              request->audio_id, request->version, request->file_size);
     if (xTaskCreate(audio_download_task, "audio_task", 12288, request, 5, NULL) != pdPASS) {
+        /* 任务创建失败：必须回滚置位。否则下次调用会被 s_audio_in_progress 挡住。 */
         portENTER_CRITICAL(&s_audio_state_lock);
         s_audio_in_progress = false;
         portEXIT_CRITICAL(&s_audio_state_lock);
@@ -591,6 +714,9 @@ esp_err_t audio_engine_get_current_version(char *version, size_t version_size)
     return ESP_OK;
 }
 
+/* 弱符号默认钩子：产品板级代码可提供同名强符号覆盖以接管播放（例如把
+ * audio_data 分区读出的 stored_size 字节交给扬声器）。定义在 .c 而非 .h，
+ * 使"无强符号时全局只此一份弱定义"且默认不报未定义引用。 */
 __attribute__((weak)) esp_err_t native_audio_on_ready(const native_audio_manifest_t *manifest,
                                                       size_t stored_size)
 {

@@ -38,6 +38,10 @@ bool julia_lipsync_ui_enabled(void);
  */
 esp_err_t julia_lipsync_demo(uint32_t duration_ms);
 
+/* ---- 会话生命周期 ----
+ * 用法：julia_lipsync_begin() -> julia_lipsync_play()/play_file() 若干次 -> julia_lipsync_end()。
+ * begin 清零累积状态并（FUSED/EXPR_ONLY）开启表情 UI 的 talking 状态；end 关闭 UI 与扬声器。
+ * 未 begin 就 play 会导致状态未经初始化为 0，属未定义行为；重复 begin/end 按上述顺序复用。 */
 void julia_lipsync_begin(void);
 esp_err_t julia_lipsync_play(const int16_t *samples, size_t sample_count);
 esp_err_t julia_lipsync_play_file(const char *path);

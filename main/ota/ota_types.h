@@ -68,6 +68,10 @@ extern "C" {
  *
  * 分类用于串口日志、状态事件 error_code、恢复策略和测试断言；具体底层
  * esp_err_t 仍会同时记录。固件 OTA 与音频素材下载共用本枚举。
+ *
+ * 注意：字符串名映射在 ota_stability.c 的 native_ota_failure_reason_name()；
+ * 新增枚举值必须在末尾追加并把字符串名同步过去，否则协议层 error_code 会落到 "UNKNOWN"
+ * （当前 NATIVE_OTA_FAILURE_STORAGE_UNAVAILABLE 即存在该缺口）。
  */
 typedef enum {
     NATIVE_OTA_FAILURE_NONE = 0, /**< 未发生失败。 */

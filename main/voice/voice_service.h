@@ -10,6 +10,16 @@
  * 文件推送协议（BEGIN FILE <size> <name> -> 1200 B 二进制帧 -> END <bytes>）
  * 在本模块内实现，传输交给纯传输层 wss_transport；URI 到本地路径的受控映射
  * 由 voice_uri 提供。本模块不采集音频、不做编解码。
+ *
+ * 线程模型：
+ * - MQTT 语音命令在 ESP-MQTT 事件任务上下文解析（voice_service_on_mqtt_command），
+ *   只做校验并调用 *_enqueue 有界入队，绝不直接触网；
+ * - WSS 服务端文本/二进制/队列回调在"WSS 会话任务"上下文同步执行
+ *   （voice_service_on_server_text / on_binary / on_queue_item），发送用
+ *   wss_transport_send_now()；
+ * - MIC 上行 PCM1 帧由 board_audio 的 mic_task 经 voice_service_send_chunk() 入队，
+ *   实际发送也在会话任务。
+ * 会话级状态 s_mic_active 仅由 WSS 会话任务上下文读写。
  */
 #pragma once
 
@@ -98,12 +108,19 @@ esp_err_t voice_service_send_chunk(const uint8_t *buf, size_t len);
 /**
  * @brief 开启 MIC 流式发送状态（对应 MIC_START 语音命令）。
  *
+ * 命令仅入队，真正生效在 WSS 会话任务（voice_service_apply_mic_state）。
+ * 该状态转换幂等：s_mic_active 已为 true 时重复 MIC_START 为无操作。
+ * 生效后 board_audio 的 MIC 上行被启用，UI 切到 LISTENING。
+ *
  * @return ESP_OK 命令已入队；ESP_ERR_NO_MEM 命令队列已满；ESP_ERR_INVALID_STATE 尚未启动。
  */
 esp_err_t voice_service_mic_start(void);
 
 /**
  * @brief 关闭 MIC 流式发送状态（对应 MIC_STOP 语音命令）。
+ *
+ * 命令仅入队，真正生效在 WSS 会话任务（voice_service_apply_mic_state）。
+ * 幂等：已为 false 时重复 MIC_STOP 为无操作。生效后 MIC 上行关闭，UI 切到 THINKING。
  *
  * @return ESP_OK 命令已入队；ESP_ERR_NO_MEM 命令队列已满；ESP_ERR_INVALID_STATE 尚未启动。
  */

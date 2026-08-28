@@ -10,6 +10,44 @@
  * 4. 提供通用 mqtt_comm_publish()（QoS 1 尽力而为）供辅助状态上报。
  *
  * 本模块不感知任何具体业务：不解析语音命令、不解析音频清单、不下载固件、不写 Flash。
+ *
+ * ── 上下游与生命周期 ────────────────────────────────────────────────
+ * 由 network_lifecycle 在取得 IPv4 后通过 mqtt_comm_ip_ready() 回调拉起
+ * mqtt_comm_start()；此后连接由 ESP-MQTT 内部任务维持，本模块只推进业务状态。
+ *   - 下行数据流：注册表命中 topic → 分片重组 → handler。OTA 响应交给
+ *     ota_engine_handle_server_json()（完整清单的深层校验在 ota_control_plane），
+ *     ota_notify 只在此处做轻量校验并唤醒主动检查任务。
+ *   - 上行状态流：ota_report 模块经 native_ota_report_set_transport() 注册的
+ *     mqtt_status_transport() 注入本模块，由 ota_status_task 异步 enqueue（QoS 1），
+ *     PUBACK 经 s_status_tracks 关联回 event_id 后转发给 ota_report 完成 NVS 删除。
+ *
+ * ── 任务/执行上下文（并发模型） ─────────────────────────────────────
+ * 本模块跨三个并发上下文协作，这是理解代码的核心：
+ *   1. ESP-MQTT 事件任务：驱动 mqtt_event_handler()，只推进连接/订阅/接收状态，
+ *      不做任何可能阻塞的动作，也不访问 Flash；一切需要阻塞或较长持锁的动作
+ *      （如重连 stop/start）都转交给 ota_check_task，NVS ACK 删除则由 ota_report
+ *      内部的确认任务完成。本模块事件回调内绝不等待发送或写 Flash。
+ *   2. ota_check_task：全模块唯一的 ota_check 发布者，决定检查节奏、响应短重试
+ *      与服务器恢复策略；离开它，事件回调中的就绪/响应/拒绝位都无人消费。
+ *   3. ota_status_task：唯一执行状态 enqueue 的上下文，负责关键事件出队、进度
+ *      槽位发送、msg_id↔event_id 关联与 PUBACK 消费、NVS ACK 入队。
+ * 三者通过与共享事件组（s_connection_events）、任务通知（xTaskNotifyGive/Take）
+ * 及自旋锁/互斥量（s_registry_lock、s_check_state_lock、s_start_lock 为 portMUX，
+ * s_status_lock 为可阻塞的 mutex）严格同步，凡跨任务共享的位/计数都必须用锁。
+ *
+ * ── 控制面 vs 语音面边界 ───────────────────────────────────────────
+ * 本文件只承载 MQTT「控制面」：OTA 检查/响应/通知/状态，外加 topic 注册表与通用
+ * mqtt_comm_publish()（QoS 1 尽力而为，供 audio_engine 等上报 audio_status 等辅助
+ * 状态）。语音命令（vcmd）语法解析、与 WSS 会话共用的状态转换、以及语音回执等语音
+ * 面语义均由 voice_service 实现：它把 vcmd topic 注册进本模块注册表（非 critical），
+ * 仅复用本层的订阅/分片路由，并不在本模块内分发或回执。音频 PCM 流向由 WSS 传输层
+ * 承载，不在本模块内。故本模块对业务语义零感知。
+ *
+ * ── 依赖 ───────────────────────────────────────────────────────────
+ * FreeRTOS（任务/事件组/队列/信号量/自旋锁）、esp-mqtt 客户端、cJSON（仅解析
+ * 轻量 ota_notify；响应的深层解析交给 ota_control_plane，避免在本层重复）。TLS
+ * 信任锚来自构建嵌入的 server_certs/ca_cert.pem（自签，故跳过 CN 校验），不使用
+ * esp_crt_bundle（公网 CA 不信任自签服务器）。
  */
 
 #include <inttypes.h>
@@ -53,13 +91,15 @@ static bool mqtt_uri_uses_tls(const char *uri)
 #define MQTT_TOPIC_SIZE 192
 /** ota_notify 只允许轻量 JSON，避免通知通道成为无界输入入口。 */
 #define MQTT_OTA_NOTIFY_MAX_LEN 512
-/** 表示 MQTT 已连接且全部 critical 订阅均已确认。 */
+/** 表示 MQTT 已连接且全部 critical 订阅均已确认（发布 OTA 检查/状态的门禁）。 */
 #define MQTT_OTA_READY_BIT BIT0
 /** A validated response for the check currently being awaited by ota_check_task. */
 #define MQTT_OTA_RESPONSE_BIT BIT1
 /** A structurally invalid response should trigger bounded retry without waiting for timeout. */
 #define MQTT_OTA_RESPONSE_REJECTED_BIT BIT2
-/** 用于记录已交给 ESP-MQTT 的关键状态事件，等待对应 QoS 1 PUBACK。 */
+/** 用于记录已交给 ESP-MQTT 的关键状态事件，等待对应 QoS 1 PUBACK。
+ *  深度 = 关键队列深度 + 4：QoS 1 队列最多容纳 CONFIG_OTA_REPORT_QUEUE_DEPTH 条
+ *  关键事件，额外槽位覆盖「PUBACK 尚未关联进来」的并发窗口，避免关联表先于队列打满。 */
 #define MQTT_STATUS_TRACK_SIZE (CONFIG_OTA_REPORT_QUEUE_DEPTH + 4)
 
 /** 已注册下行 topic 的最大数量；OTA 占 2 个，语音命令占 1 个，剩余供扩展。 */
@@ -337,6 +377,11 @@ static bool mqtt_status_is_ready(void)
 /**
  * @brief 从关键状态队列发送一条消息并建立 msg_id 关联。
  *
+ * 设计要点：关键生命周期事件为什么用 QoS 1 且必须持久化到 PUBACK——OTA 事件承诺
+ * 至少一次送达，断线期间未确认的事件仍留在 NVS，重连后按同一 event_id 重发，
+ * 服务器依据 event_id 幂等去重。因此这里 enqueue 后还要把 msg_id 写回关联表，
+ * 好让后续 MQTT_EVENT_PUBLISHED 能根据 msg_id 找到 event_id 上报 ACK。
+ *
  * @return true 一条关键事件已交给 ESP-MQTT。
  * @return false 当前未就绪、队列为空、发送失败或关联失败。
  *
@@ -375,6 +420,11 @@ static bool mqtt_status_drain_one_critical(void)
 
 /**
  * @brief 发送 RAM 中最新的一条下载进度。
+ *
+ * 进度与关键事件的区别：同样是 QoS 1，但进度只保存在 RAM 的一个可替换槽位，不进入
+ * NVS。它代表“当前下载到哪”，是典型的 best-effort 遥测——断线后旧进度即失效，重连
+ * 只会发送最新一帧；把进度持久化到 NVS 是不值得的成本。因此 PUBACK 关联用 event_id
+ * 只对关键事件有效，进度消息的 PUBACK 在 mqtt_status_process_published() 中被安全忽略。
  *
  * @return true 进度已交给 ESP-MQTT。
  * @return false 当前没有可发送进度、连接未就绪或发送失败。
@@ -639,6 +689,10 @@ static void mqtt_reset_sub_msg_ids(void)
 esp_err_t mqtt_comm_register_topic(const char *topic, size_t max_payload_len,
                                    bool critical, mqtt_inbound_handler_t handler)
 {
+    /* 注册只发生在 mqtt_comm_start() 之前（app_main 装配阶段）。若在连接建立后才
+     * 调用，客户端不会随已建立的会话订阅该 topic，需要等下一次重连才生效。critical
+     * 为 true 意味着：连接就绪判定（MQTT_OTA_READY_BIT）要等该 topic 的 SUBACK 到了
+     * 才算完成，因此 OTA 的两个专属下行 topic 必须标为 critical。 */
     if (topic == NULL || topic[0] == '\0' || handler == NULL ||
         max_payload_len == 0U || max_payload_len > NATIVE_OTA_JSON_MAX_LEN) {
         return ESP_ERR_INVALID_ARG;
@@ -718,6 +772,17 @@ static TickType_t mqtt_next_check_delay(void)
     return mqtt_seconds_to_ticks(total_seconds);
 }
 
+/**
+ * @brief 计算「响应超时」短重试的等待 tick。
+ *
+ * 这是与正常周期检查不同的另一套速率：check 已发出但 15s 内没等到合法响应时，
+ * 用从 CONFIG_OTA_CHECK_RESPONSE_RETRY_BASE_SECONDS 起步的指数退避做有限次短重试，
+ * 避免服务器短暂无响应就长期离开业务；延迟逐级翻倍并钳制到
+ * CONFIG_OTA_CHECK_RESPONSE_RETRY_MAX_SECONDS，再叠加 0～1000ms 抖动。
+ *
+ * @param[in] retry 已进行的重试计数（0 表示第一次重试前）。
+ * @return 换算后的 FreeRTOS tick 数，始终大于 0。
+ */
 static TickType_t mqtt_check_retry_delay(unsigned retry)
 {
     uint32_t delay_seconds = (uint32_t)CONFIG_OTA_CHECK_RESPONSE_RETRY_BASE_SECONDS;
@@ -773,6 +838,13 @@ static TickType_t mqtt_recovery_check_delay(unsigned *step)
     return mqtt_seconds_to_ticks(seconds);
 }
 
+/**
+ * @brief 请求检查任务在下一轮清空当前等待状态（会话变更）。
+ *
+ * 由 ESP-MQTT 事件回调在断线/重建连接时置位；检查任务在循环开头消费。
+ * 设为一个独立位而非直接写等待状态，是避免事件任务与检查任务在同一轮循环中
+ * 对 s_waiting_for_check_response 的读写互相踩踏：复位动作交给真正的拥有者执行。
+ */
 static void mqtt_check_request_session_reset(void)
 {
     portENTER_CRITICAL(&s_check_state_lock);
@@ -807,6 +879,14 @@ static bool mqtt_check_is_waiting(void)
     return waiting;
 }
 
+/**
+ * @brief 读取并清零「会话已复位」请求位。
+ *
+ * 只在检查任务循环内调用，一次读取即消费；事件任务侧只通过 request 置位，
+ * 从而保证复位动作由检查任务单线程执行，无需在事件回调里改动等待状态。
+ *
+ * @return true 本次循环开始时存在待处理的会话复位（调用方应重置重试/恢复进度）。
+ */
 static bool mqtt_check_take_session_reset(void)
 {
     portENTER_CRITICAL(&s_check_state_lock);
@@ -816,6 +896,16 @@ static bool mqtt_check_take_session_reset(void)
     return requested;
 }
 
+/**
+ * @brief 请求重建 MQTT 客户端连接（由检查任务在回调上下文外执行）。
+ *
+ * 事件回调绝不能在此处直接 stop/start：esp_mqtt_client_stop/start 可能阻塞，
+ * 且与当前正在运行的事件回调存在重入风险。因此本函数只清就绪位、复位订阅状态、
+ * 置位 s_reconnect_requested 并唤醒检查任务；真正的 stop/start 由检查任务在循环
+ * 顶部完成。旧会话的订阅确认与消息 ID 随之作废（mqtt_reset_sub_msg_ids）。
+ *
+ * @param[in] reason 触发重建的简短原因，仅用于日志。
+ */
 static void mqtt_request_reconnect(const char *reason)
 {
     ESP_LOGW(TAG, "MQTT reconnect requested: %s", reason);
@@ -1015,7 +1105,9 @@ static void mqtt_ota_check_task(void *pv_parameter)
         }
 
         /* 走到这里只有两种情形：等待窗口内被 notify 唤醒（安全替换旧请求），
-         * 或正常/恢复周期等待结束。两种情况都发布一个携带新 request_id 的请求。 */
+         * 或正常/恢复周期等待结束。两种情况都发布一个携带新 request_id 的请求。
+         * 注意“替换”是无害的：控制面的 request_id 检查保证旧请求的迟到响应
+         * 不会结束这次新请求的等待窗口，因此收到 ota_notify 时可以放心立即补发。 */
         if (s_waiting_for_check_response) {
             ESP_LOGD(TAG, "Replacing pending OTA check after external wakeup");
         }
@@ -1217,9 +1309,14 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     /* 事件回调只推进连接/接收状态；固件下载由 native OTA 任务异步执行。 */
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED: {
-        /* 每次重连都重新订阅全部已注册 topic，并等待全部 critical SUBACK，
-         * 防止只连接成功就误发设备专属消息。订阅调用可能阻塞，绝不能在
-         * 自旋锁临界区内执行；sub_msg_id 的常规写只发生在 MQTT 事件任务内。 */
+        /* 每次连接成功都必须重新订阅全部已注册 topic：ESP-MQTT 在断线重连后不会
+         * 保留上次会话的订阅（clean session 语义），因此这是新会话建立订阅的唯一
+         * 时机。关键约束是绝不能在订阅全部确认（SUBACK）前就把 MQTT_OTA_READY_BIT
+         * 置位，否则 ota_check_task / ota_status_task 会在 broker 尚未真正接收订阅
+         * 时误发设备专属消息，导致响应/通知丢失。
+         *
+         * 订阅调用（esp_mqtt_client_subscribe）可能阻塞，绝不能在自旋锁临界区内
+         * 执行；sub_msg_id 的常规写只发生在 MQTT 事件任务内，故此处无需加锁。 */
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
         xEventGroupClearBits(s_connection_events, MQTT_OTA_READY_BIT |
                              MQTT_OTA_RESPONSE_BIT | MQTT_OTA_RESPONSE_REJECTED_BIT);
@@ -1231,7 +1328,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             ESP_LOGI(TAG, "Subscribing to %s, msg_id=%d",
                      s_registered_topics[i].topic, msg_id);
             if (msg_id < 0 && s_registered_topics[i].critical) {
-                /* critical 订阅失败必须重建连接；非 critical topic 下次重连再试。 */
+                /* critical 订阅必须全部成功，否则连接会被判定为不完整而重建；
+                 * 非 critical topic（如语音命令）失败只影响下一次重连前收不到该面。 */
                 ESP_LOGW(TAG, "Critical topic subscribe call failed: %s",
                          s_registered_topics[i].topic);
                 critical_subscribe_failed = true;
@@ -1240,6 +1338,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         if (critical_subscribe_failed) {
             mqtt_request_reconnect("Critical topic subscribe call failed");
         } else {
+            /* 启动 SUBACK 确认窗口：检查任务据此在超时后主动重建连接，防止
+             * broker 一直不回应 SUBACK 导致连接永远停留在“半就绪”。 */
             s_suback_deadline_ms = esp_timer_get_time() / 1000LL +
                                    (int64_t)CONFIG_COMM_MQTT_SUBACK_TIMEOUT_SECONDS * 1000LL;
             if (s_check_task != NULL) {
@@ -1249,6 +1349,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
     }
     case MQTT_EVENT_DISCONNECTED:
+        /* 断线后订阅确认与消息 ID 全部作废（mqtt_reset_sub_msg_ids），并清除就绪位，
+         * 使 ota_check_task 回到“等待连接”状态——它不再发布检查，避免离线期间反复
+         * 调用发送接口。重连由 ESP-MQTT 自动完成（disable_auto_reconnect=false），
+         * 届时会再次触发 CONNECTED 走订阅流程。 */
         ESP_LOGW(TAG, "MQTT_EVENT_DISCONNECTED; client will reconnect automatically");
         mqtt_reset_payload();
         mqtt_status_handle_disconnected();
@@ -1262,6 +1366,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         }
         break;
     case MQTT_EVENT_SUBSCRIBED: {
+        /* 与 CONNECTED 时记录的 sub_msg_id 对账：ESP-MQTT 的 SUBACK 事件只带
+         * 消息 ID，不含 topic 字符串，必须靠「这是哪个订阅调用返回的 ID」来匹配
+         * 具体 topic。匹配后把对应 sub_msg_id 置回 -1（无待确认订阅）。 */
         ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
         bool matched = false;
         portENTER_CRITICAL(&s_registry_lock);
@@ -1279,10 +1386,13 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             break;
         }
         if (s_suback_deadline_ms != 0 && mqtt_all_critical_subscribed()) {
-            /* 全部 critical topic 都确认后才同时放行状态 flush 和主动检查任务。 */
+            /* 全部 critical topic 都确认后才同时放行状态 flush 和主动检查任务。
+             * 置位 READY 即宣告“连接可用”，两个 OTA 专属 topic 的订阅已就绪。 */
             xEventGroupSetBits(s_connection_events, MQTT_OTA_READY_BIT);
             s_suback_deadline_ms = 0;
-            /* 只入队持久化事件和最新进度；不在回调里访问 Flash 或等待发送。 */
+            /* flush_pending() 只把 NVS 中的持久化事件与 RAM 最新进度交给本模块的
+             * 状态队列（不写入 Flash、不等待发送）；真正的 PUBACK 删除由 ota_report
+             * 的确认任务完成。因此可在事件回调中安全调用。 */
             (void)native_ota_report_flush_pending();
             if (s_check_task != NULL) {
                 xTaskNotifyGive(s_check_task);

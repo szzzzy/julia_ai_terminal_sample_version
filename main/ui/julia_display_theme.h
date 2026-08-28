@@ -1,3 +1,11 @@
+/**
+ * @file    julia_display_theme.h
+ * @brief   显示功率/主题策略接口（fused 移植；当前未纳入构建）。
+ *
+ * 控制 LCD 背光功率状态机（全亮→调暗→doze→唤醒）与主题（背景色 + 呼吸灯色）的
+ * 加载/切换。julia_backlight_setter_t 是背光亮度写入函数指针。
+ * 该实现属遗留/备用；当前生效的息屏策略在 app/julia_idle_display.c。详见 .c。
+ */
 #pragma once
 
 #include <stdbool.h>

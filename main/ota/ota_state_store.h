@@ -4,6 +4,11 @@
  *
  * 状态保存在独立的 ota_resume namespace 中，不与业务配置共用键名。
  * 检查点按固定数据量写入，避免每个网络包都触发 Flash 擦写。
+ *
+ * 生命周期与命名注意：这里的阶段（phase）只描述“下载/校验/隔离”这一侧的可恢复状态，
+ * 用于断点续传、冷却和隔离策略；它不等于对外上报的 ota_status 生命周期状态
+ * （见 ota_report.h native_ota_report_state_t，含 accepted/downloading/…/rolled_back）。
+ * 两者的取值相互独立，不要混用。
  */
 #pragma once
 
@@ -43,6 +48,34 @@ typedef enum {
 /** Persistent network retry cooldown. This intentionally never means quarantined. */
 #define OTA_RESUME_PHASE_COOLING_DOWN ((ota_resume_phase_t)4)
 
+/*
+ * 断点阶段（phase）合法迁移表。
+ *
+ * 持久化值：EMPTY=0（保留）、DOWNLOADING=1、READY_TO_COMMIT=2、
+ *           QUARANTINED=3、COOLING_DOWN=4。
+ *
+ * 分支由 ota_engine.c 的 ota_engine_task 驱动，写入方是它，读取方是它自己在
+ * 下一次启动/重试时，以及 ota_boot_flow.c 在启动验收后的对账清理。
+ *
+ *   无记录 / EMPTY ──(record_init: 下载开始)──▶ DOWNLOADING
+ *   DOWNLOADING ──(下载+镜像校验完成, phase=READY_TO_COMMIT)──▶ READY_TO_COMMIT
+ *   DOWNLOADING ──(终端校验失败, quarantine_record)──▶ QUARANTINED
+ *   DOWNLOADING ──(网络失败 retry_count 达到阈值)──▶ COOLING_DOWN
+ *   COOLING_DOWN ──(冷却延时结束, 重置 retry_count)──▶ DOWNLOADING
+ *   DOWNLOADING/READY_TO_COMMIT ──(记录与当前清单或目标分区不一致, ota_state_store_clear)──▶ 删除(回 EMPTY)
+ *   READY_TO_COMMIT ──(当前版本启动成功, reconcile)──▶ 记录被删除(回 EMPTY)
+ *   READY_TO_COMMIT ──(提交前掉电, 下轮核对分区摘要后直接提交或重下)──▶ 保持
+ *   QUARANTINED ──(终端错误, 禁止自动重试)──▶ 保持不变
+ *
+ * 设计约束（Why）：
+ * - 只有 DOWNLOADING/READY_TO_COMMIT 之间可以安全地“无成本”来回，因为它们代表
+ *   一个已校验前缀的合法断点；QUARANTINED 是终态，不允许静默回到 DOWNLOADING，
+ *   这样同一坏镜像不会在重启后无限重下。
+ * - COOLING_DOWN 是短时网络抖动后的“退避闸门”，它与 QUARANTINED 语义完全相反
+ *   （一个允许重试、一个禁止重试），因此故意不写成同一个枚举值。
+ * - 记录被“删除”等价于回到 EMPTY：表示没有可继续的对象，需要从零初始化。
+ */
+
 /**
  * @brief 可跨重启恢复的 OTA 元数据记录。
  *
@@ -60,10 +93,11 @@ typedef struct {
     char url[NATIVE_OTA_URL_SIZE]; /**< 目标固件 HTTPS URL。 */
     char etag[128]; /**< 服务器 ETag，用于确认续传内容仍是同一版本。 */
     uint8_t target_partition_subtype; /**< 目标 OTA 分区 subtype，防止恢复到错误槽位。 */
-    uint8_t phase; /**< ota_resume_phase_t 的持久化值，范围为 DOWNLOADING～QUARANTINED。 */
+    uint8_t phase; /**< ota_resume_phase_t 的持久化值（见上方合法迁移表）。
+                    *   记录校验允许的范围是 DOWNLOADING～COOLING_DOWN，含冷却、隔离阶段。 */
     uint16_t reserved; /**< 保留字段，用于维持布局对齐和后续扩展空间，当前不参与恢复匹配。 */
     uint32_t failure_reason; /**< 隔离时保存的 native_ota_failure_reason_t 数值；未失败时为 0。 */
-    uint32_t cooldown_count;
+    uint32_t cooldown_count; /**< 冷却已进入过的次数，用于指数退避 cooldown 延时；UINT32_MAX 表示不再增长。 */
 } ota_resume_record_t;
 
 /**

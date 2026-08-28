@@ -26,6 +26,8 @@ extern "C" {
  * @return false URI 格式不支持、包含不安全路径段或缓冲区不足。
  *
  * @note 该映射不检查文件是否存在；调用方仍需自行 open。
+ * @note 前缀匹配区分大小写；仅做纯字符串变换，无文件 I/O、无阻塞。
+ *       path 容量须 ≥ 路径长度 + 1，本项目调用方使用 `VOICE_SERVICE_URI_MAX_LEN + 16`。
  */
 bool voice_uri_to_path(const char *uri, char *path, size_t path_cap);
 

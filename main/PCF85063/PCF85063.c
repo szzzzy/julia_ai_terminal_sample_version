@@ -9,8 +9,22 @@
 * | Info        :   Basic version
 *
 ******************************************************************************/
+/*
+ * 补充说明（本工程上下文）：
+ * - 本文件是 Waveshare 移植的 PCF85063 完整驱动（含闹钟、复位、报警等），
+ *   经外部 I2C_Driver 组件（I2C_Write/I2C_Read）访问 RTC，从机地址 0x51。
+ * - 上游：main/context/julia_context.c 调用 PCF85063_Init()/Read_Time()/Set_All()，
+ *   用于“无 SNTP 也能读到当地时间”与“把 SNTP 校时写回 RTC”。
+ * - 与 main/hardware/pcf85063_shared.c 关系：两者操作同一颗 0x51 芯片，但分属
+ *   不同总线栈（本文件用外部 I2C_Driver，shared 用 ESP-IDF i2c_master。
+ *   NOTE：需结合调用方确认两者是否会同时初始化并写同一 RTC，见 julia_context.c
+ *   与 julia_time.c 的初始化次序。
+ * - 时间字段均为十进制（decToBcd/bcdToDec 已转换），年份为 0~99 存寄存器，真实
+ *   年份 = 1970 + 寄存器值（YEAR_OFFSET）。
+ */
 #include "PCF85063.h"
 
+/* 全局时间缓存：PCF85063_Loop()/Read_Time() 写；供外部读取当前时间。 */
 datetime_t datetime= {0};
 
 static uint8_t decToBcd(int val);
@@ -23,6 +37,7 @@ parameter:
             
 Info:Initiate Normal Mode, RTC Run, NO reset, No correction , 24hr format, Internal load capacitane 12.5pf
 ******************************************************************************/
+/* 初始化：写 CTRL1 = CAP_SEL（12.5pF），即普通模式、RTC 运行、无复位、无校正、24 小时制。 */
 void PCF85063_Init()
 {
 	uint8_t Value = RTC_CTRL_1_DEFAULT|RTC_CTRL_1_CAP_SEL;
@@ -40,6 +55,7 @@ void PCF85063_Init()
 	// PCF85063_Set_All(Now_datetime);
 }
 
+/* 周期读取并把结果写入全局 datetime，供外部获取当前时间。 */
 void PCF85063_Loop(void)
 {
   PCF85063_Read_Time(&datetime);
@@ -60,6 +76,7 @@ function:	Set Time
 parameter:
 Info:		
 ******************************************************************************/
+/* 仅写“时分秒”三字节（从秒寄存器 0x04 起）。字段传十进制，内部转 BCD。 */
 void PCF85063_Set_Time(datetime_t time)
 {
 	uint8_t buf[3] = {decToBcd(time.second),
@@ -73,6 +90,7 @@ function:	Set Date
 parameter:
 Info:		
 ******************************************************************************/
+/* 仅写“日/星期/月/年”四字节（从日寄存器 0x07 起）。年份 = 传入 year - YEAR_OFFSET。 */
 void PCF85063_Set_Date(datetime_t date)
 {
 	uint8_t buf[4] = {decToBcd(date.day),
@@ -87,6 +105,11 @@ function:	Set Time And Date
 parameter:
 Info:		
 ******************************************************************************/
+/*
+ * 一次性写完整时间+日期（7 字节，从秒寄存器 0x04 起连续写：秒.分.时.日.星期.月.年）。
+ * 注意并不停振/启振，RTC 在写入期间继续走秒；写入若跨秒进位会导致秒/分轻微不一致，
+ * 但一般校时场景可接受（更严谨应先在 CTRL1 置 STOP 再写、写完清 STOP）。
+ */
 void PCF85063_Set_All(datetime_t time)
 {
 	uint8_t buf[7] = {decToBcd(time.second),
@@ -104,6 +127,14 @@ function:	Read Time And Date
 parameter:
 Info:		
 ******************************************************************************/
+/*
+ * 读(04h)起 7 字节 → BCD 解码。各字段掩码含义（参考 PCF85063 数据手册）：
+ *   秒 &0x7F：bit7 是 OS（振荡停止）标志，读数时清零；
+ *   分 &0x7F：bit7 保留，清零；
+ *   时 &0x3F：bit6=12/24 制、bit5=AM/PM；24 制下只用低 6 位；
+ *   日 &0x3F；星期 &0x07（0=周日…6=周六）；月 &0x1F（bit5 为世纪标志）；
+ *   年= 解码值 + YEAR_OFFSET(1970)。
+ */
 void PCF85063_Read_Time(datetime_t *time)
 {
 	uint8_t buf[7] = {0};
@@ -148,6 +179,12 @@ function:	Set Alarm
 parameter:			
 Info:		
 ******************************************************************************/
+/*
+ * 写闹钟（从 0x0B 起，6 字节）。前 3 字节为秒/分/时闹钟值（清掉各自 AEN_ 位表示启用该字段），
+ * 第 4/5 字节为日/星期闹钟，这里用 RTC_ALARM(0x80) 置 AEN_ 位=1 表示“禁用日/星期闹钟”。
+ * NOTE：本函数把 buf 声明为 5 字节却调用 I2C_Write(..., 6)，第 6 字节（星期闹钟寄存器）
+ * 读的是数组越界（栈上无效值）。若要用到日/星期闹钟请修正该长度/缓冲区。
+ */
 void PCF85063_Set_Alarm(datetime_t time)
 {
 
@@ -164,10 +201,11 @@ void PCF85063_Set_Alarm(datetime_t time)
 }
 
 /******************************************************************************
-function:	
+function:	Read Alarm
 parameter:			
 Info:		
 ******************************************************************************/
+/* 读闹钟寄存器（0x0B 起 6 字节）并解码（掩码与 Read_Time 一致，排除各 AEN_ 位）。 */
 void PCF85063_Read_Alarm(datetime_t *time)
 {
 	uint8_t bufss[6] = {0};
@@ -185,6 +223,7 @@ function:	Convert normal decimal numbers to binary coded decimal
 parameter:			
 Info:		
 ******************************************************************************/
+/* 十进制 → BCD：val/10 为十位（×16 即左移 4 位），val%10 为个位。val 须在 0~99。 */
 static uint8_t decToBcd(int val)
 {
 	return (uint8_t)((val / 10 * 16) + (val % 10));
@@ -195,6 +234,7 @@ function:	Convert binary coded decimal to normal decimal numbers
 parameter:			
 Info:		
 ******************************************************************************/
+/* BCD → 十进制：高半字节 ×10 + 低半字节。 */
 static int bcdToDec(uint8_t val)
 {
 	return (int)((val / 16 * 10) + (val % 16));
@@ -205,6 +245,7 @@ function:
 parameter:	
 Info:		
 ******************************************************************************/
+/* 把时间结构格式化为可读字符串写入 datetime_str（调用方需保证缓冲区足够大）。 */
 void datetime_to_str(char *datetime_str,datetime_t time)
 {
 	sprintf(datetime_str, " %d.%d.%d  %d %d:%d:%d ", time.year, time.month, 

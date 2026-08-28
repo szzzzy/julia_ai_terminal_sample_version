@@ -4,6 +4,34 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * @file    esp_lcd_st77916.c
+ * @brief   ST77916 TFT LCD 面板驱动的 ESP-IDF 实现（esp_lcd_panel_t 接口）。
+ *
+ * @section drv_bounds 模块边界
+ *         本文件是"通用面板驱动"层：只关心如何把一帧像素交给 ST77916 并在其上做
+ *         命令/参数往返，以及基础的复位/开窗/几何变换/开关显示。它不持有任何板级
+ *         引脚或背光信息（RST 引脚号与活动电平由 panel_dev_config 传入），也不依赖
+ *         LVGL。板级引脚、SPI 总线、I2C 复位、背光由 julia_display.c / lvgl_port.c 提供。
+ *
+ * @section drv_iface 与 ESP-IDF 的契约
+ *         driver 通过 `esp_lcd_panel_io_*`（esp_lcd_panel_io_spi）与面板通信，实现
+ *         `esp_lcd_panel_t` 接口回调：reset/init/draw_bitmap/invert_color/mirror/
+ *         swap_xy/set_gap/disp_on_off/del。这些回调的调用顺序由上层遵循
+ *         panel → reset → init → disp_on →（此后可 draw_bitmap）的确立流程约束。
+ *
+ * @section drv_qspi QSPI 特性
+ *         QSPI（use_qspi_interface=1）下，命令字被扩展成 32-bit，把协议 opcode
+ *         放入高字节、LCD 命令放入 bits[15:8]，从而让 esp_lcd_panel_io_spi 在
+ *         无 DC 引脚的情况下正确路由"写命令/读命令/写颜色"事务（见 tx_param/tx_color）。
+ *
+ * @note   初始化序列与寄存器含义是面板厂商相关的；驱动不假设寄存器语义，只按
+ *         （可覆盖的）命令表逐条下发。延时与个别寄存器含义无法在本层确认，见
+ *         vendor_specific_init_default 附近说明。
+ *
+ * @see    esp_lcd_st77916.h
+ * @see    main/display/julia_display.c
+ */
 #include <stdlib.h>
 #include <sys/cdefs.h>
 
@@ -20,10 +48,17 @@
 
 #include "esp_lcd_st77916.h"
 
+/* QSPI 协议 opcode：非 QSPI 模式下，esp_lcd_panel_io_spi 通过 DC 引脚区分命令与数据；
+ * 而在 quad_mode（32-bit 命令字）下，命令字的高字节携带这些 opcode，告诉 LCD 控制器
+ * 这一事务是"写命令/读命令/写颜色"，从而把指令路由到正确的协议阶段。低字节才放 LCD
+ * 命令码（见 tx_param/tx_color）。 */
 #define LCD_OPCODE_WRITE_CMD        (0x02ULL)
 #define LCD_OPCODE_READ_CMD         (0x0BULL)
 #define LCD_OPCODE_WRITE_COLOR      (0x32ULL)
 
+/* ST77916 厂商"命令集"切换命令及其子入口：有些厂商初始化序列是分段的，先用
+ * CMD_SET=0xF0 进入扩展命令组，下发子命令组后用 PARAM_SET=0x00 退出。驱动依赖
+ * 这一约定来判定当前是否处于"扩展命令集"（见 panel_st77916_init）。 */
 #define ST77916_CMD_SET             (0xF0)
 #define ST77916_PARAM_SET           (0x00)
 
@@ -56,6 +91,24 @@ typedef struct {
     } flags;
 } st77916_panel_t;
 
+/**
+ * @brief 创建一个 ST77916 面板实例并返回通用面板句柄。
+ *
+ * @note  只做"分配 + 记录配置 + 挂回调"，不发送任何 SPI/i2c 事务；真正的
+ *        数据搬运要等调用方随后调用 reset/init。
+ *
+ * @param[in]  io 已初始化好的面板 IO（esp_lcd_panel_io_handle_t）。
+ * @param[in]  panel_dev_config 面板设备配置：RST GPIO、RGB/BGR 顺序、像素位宽、
+ *               以及可选的 vendor_config（厂商初始化命令覆盖 + QSPI 开关）。
+ * @param[out] ret_panel 返回的面板句柄，失败时不写。
+ *
+ * @return ESP_OK 成功；ESP_ERR_INVALID_ARG io/配置/ret_panel 为空；
+ *         ESP_ERR_NO_MEM 结构分配失败；ESP_ERR_NOT_SUPPORTED 颜色序或像素位宽不支持。
+ *
+ * @pre  io 已由 esp_lcd_new_panel_io_spi() 创建，SPI 总线已初始化。
+ * @sideeffect 若 reset_gpio_num >= 0，会将该引脚配置为推挽输出（不拉电平）。
+ *         失败时若已配置 RST 引脚会 `gpio_reset_pin` 并释放结构。
+ */
 esp_err_t esp_lcd_new_panel_st77916(const esp_lcd_panel_io_handle_t io, const esp_lcd_panel_dev_config_t *panel_dev_config, esp_lcd_panel_handle_t *ret_panel)
 {
     ESP_RETURN_ON_FALSE(io && panel_dev_config && ret_panel, ESP_ERR_INVALID_ARG, TAG, "invalid argument");
@@ -135,6 +188,8 @@ err:
     return ret;
 }
 
+/* 发送一个 LCD 参数/命令。标准 SPI 下直接透传命令码；QSPI 下把命令码左移 8 位并入
+ * 高字节 opcode，组成 32-bit 命令字交 esp_lcd_panel_io_tx_param 处理。 */
 static esp_err_t tx_param(st77916_panel_t *st77916, esp_lcd_panel_io_handle_t io, int lcd_cmd, const void *param, size_t param_size)
 {
     if (st77916->flags.use_qspi_interface) {
@@ -145,6 +200,8 @@ static esp_err_t tx_param(st77916_panel_t *st77916, esp_lcd_panel_io_handle_t io
     return esp_lcd_panel_io_tx_param(io, lcd_cmd, param, param_size);
 }
 
+/* 发送 LCD 颜色（像素）数据。与 tx_param 的区别仅是 opcode 用 WRITE_COLOR（0x32），
+ * 让面板进入传递像素数据的状态（配合先发的 RAMWR 命令）。 */
 static esp_err_t tx_color(st77916_panel_t *st77916, esp_lcd_panel_io_handle_t io, int lcd_cmd, const void *param, size_t param_size)
 {
     if (st77916->flags.use_qspi_interface) {
@@ -155,6 +212,10 @@ static esp_err_t tx_color(st77916_panel_t *st77916, esp_lcd_panel_io_handle_t io
     return esp_lcd_panel_io_tx_color(io, lcd_cmd, param, param_size);
 }
 
+/**
+ * @brief 释放面板实例：若曾配置 RST 引脚则复位该引脚并释放结构。
+ * @note  不主动关闭面板/回填任何发送状态；调用前上层应已做完垃圾收尾。
+ */
 static esp_err_t panel_st77916_del(esp_lcd_panel_t *panel)
 {
     st77916_panel_t *st77916 = __containerof(panel, st77916_panel_t, base);
@@ -167,6 +228,16 @@ static esp_err_t panel_st77916_del(esp_lcd_panel_t *panel)
     return ESP_OK;
 }
 
+/**
+ * @brief 复位 ST77916（硬件或软件）。
+ *
+ * @note  时序说明：
+ *         - 硬件路径：RST 拉低 >=10ms 再拉高，随后等待 120ms 让面板完成上电内部
+ *           初始化（此延时来自面板 datasheet，是上电/复位后显示可用的最短时间）。
+ *         - 软件路径：发送 SWRESET(0x01) 命令 + 等 120ms，用于 RST 引脚未接的场合。
+ * @pre  io 已初始化；若走软件复位则要求 SPI 已就绪。
+ * @sideeffect 翻转 RST 引脚电平（若配置了）；阻塞当前任务数十至百余毫秒。
+ */
 static esp_err_t panel_st77916_reset(esp_lcd_panel_t *panel)
 {
     st77916_panel_t *st77916 = __containerof(panel, st77916_panel_t, base);
@@ -186,6 +257,24 @@ static esp_err_t panel_st77916_reset(esp_lcd_panel_t *panel)
     return ESP_OK;
 }
 
+/* 厂商特定初始化序列（vendor_specific_init_default）。
+ *
+ * 作用：ST77916 不同的批次/模组厂商对电源、Gamma、扫描方向等寄存器取值不同，
+ *       因此不能在驱动里假设一组"通用"值，而是把整套命令表作为基线序列下发，
+ *       调用方也可通过 vendor_config.init_cmds 整体覆盖。
+ *
+ * 下面这一段（~0xF0~0xFF 组合）实际上是一份"已完成伽马调校、可点亮本模组"的序列。
+ * 数组里被 `//` 注释掉的若干行是调试/备选值（不同亮度、相位、扫描顺序的变体），
+ * 保留它们是为了后续烧录调参时能快速对比，而不必重新查阅厂商手册。
+ *
+ * 语义说明（不逐字节展开）：
+ *   - 0xF0/0xF1/0xF2 ... 多数是厂商"命令扩展组"入口与电源/时序/伽马配置寄存器；
+ *   - 0x21 进入反显、0x11 睡眠退出、0x29 打开显示——全屏正常显示所必需的"开关"指令；
+ *   - 0x11 后带 120ms 延时：让面板从睡眠退出并完成内部自举（datasheet 要求）。
+ *
+ * NOTE：需结合调用方/模组供应商确认：个别寄存器位（如 0xE0/0xE1 伽马表）的精确含义，
+ *       本层仅负责按序透传，不解读其色温/伽马语义。
+ */
 static const st77916_lcd_init_cmd_t vendor_specific_init_default[] = {
     // {0xF0, (uint8_t []){0x08}, 1, 0},
     // {0xF2, (uint8_t []){0x08}, 1, 0},
@@ -867,6 +956,25 @@ static const st77916_lcd_init_cmd_t vendor_specific_init_default[] = {
     {0x29, (uint8_t []){0x00}, 0, 0},
 };
 
+/**
+ * @brief 初始化 ST77916：先设置地址模式与像素格式，再下发厂商特定初始化序列。
+ *
+ * @note  为什么要先发 MADCTL/COLMOD：这两条决定了后续所有像素数据的解读方式——
+ *        MADCTL 决定扫描方向/镜像/交换，COLMOD 决定每像素位宽（RGB565）。它们与
+ *        "厂商初始化序列"解耦：即便调用方覆盖了 init_cmds，这里也能保证在进入
+ *        厂商命令表之前，面板已知晓正确的地图与像素格式。
+ *
+ * @note  init_cmds 与内部覆盖逻辑：
+ *         - 若调用方通过 vendor_config 提供了 init_cmds，则用之；否则用内置默认序列。
+ *         - 厂商序列里如果再次出现 MADCTL/COLMOD，会覆盖这里把过的值（is_cmd_overwritten），
+ *           并同步更新 st77916->madctl_val / colmod_val，保证后续镜像/交换仍基于最终值。
+ *         - ST77916_CMD_SET(0xF0) 是"扩展命令组"切换命令：值为 PARAM_SET(0x00) 表示
+ *           已退出扩展组（回到普通命令集），非 0 表示进入扩展组。is_user_set 跟踪这一
+ *           状态，仅当处于"普通命令集"时才允许覆盖 MADCTL/COLMOD。
+ *
+ * @pre  面板需先 reset（硬件或软件复位），SPI/IO 就绪。
+ * @sideeffect 阻塞若干毫秒（逐条命令 + 每条指令自身延时），会改写面板内部寄存器。
+ */
 static esp_err_t panel_st77916_init(esp_lcd_panel_t *panel)
 {
     st77916_panel_t *st77916 = __containerof(panel, st77916_panel_t, base);
@@ -930,6 +1038,19 @@ static esp_err_t panel_st77916_init(esp_lcd_panel_t *panel)
     return ESP_OK;
 }
 
+/**
+ * @brief 以 RAMWR 方式绘制一块矩形像素区。
+ *
+ * @note  窗口坐标约定：`x_start/x_end`、`y_start/y_end` 是左闭右开区间（x_end-1、
+ *        y_end-1 才是最后一个像素），与 LVGL 的 area 传参一致——上层 LVGL flush
+ *        经常把 area 的 x2+1/y2+1 传入。像素为 RGB565（fb_bits_per_pixel=16）。
+ *        会先加 x_gap/y_gap 偏置（set_gap 设置的面板显示区偏移），再依次下发
+ *        CASET(列地址窗)/RASET(行地址窗)/RAMWR(写显存)。
+ *
+ * @pre  面板已 init，SPI/IO 就绪；color_data 指向 DMA 可达的内存（内部 RAM 或已同步
+ *       的 PSRAM），长度需满足 (x_end-x_start)*(y_end-y_start)*bpp/8，否则可能超限。
+ * @sideeffect 向面板写入该矩形窗口的像素；错误（队列/DMA）会被回传给调用方。
+ */
 static esp_err_t panel_st77916_draw_bitmap(esp_lcd_panel_t *panel, int x_start, int y_start, int x_end, int y_end, const void *color_data)
 {
     st77916_panel_t *st77916 = __containerof(panel, st77916_panel_t, base);
@@ -961,6 +1082,7 @@ static esp_err_t panel_st77916_draw_bitmap(esp_lcd_panel_t *panel, int x_start, 
     return tx_color(st77916, io, LCD_CMD_RAMWR, color_data, len);
 }
 
+/** @brief 反显开关：发送 INVON(0x21)/INVOFF(0x20)。只改面板内部反显位，不动显存。 */
 static esp_err_t panel_st77916_invert_color(esp_lcd_panel_t *panel, bool invert_color_data)
 {
     st77916_panel_t *st77916 = __containerof(panel, st77916_panel_t, base);
@@ -975,6 +1097,11 @@ static esp_err_t panel_st77916_invert_color(esp_lcd_panel_t *panel, bool invert_
     return ESP_OK;
 }
 
+/**
+ * @brief 镜像开关：修改 MADCTL 寄存器的 BIT(6)(水平)/BIT(7)(垂直) 并立即回写。
+ * @note  这是驱动层的"几何变换"，不重排显存；只改变面板扫描方向。
+ *        会在本地缓存 madctl_val（struct 字段）以保证后续其他变换基于最新值。
+ */
 static esp_err_t panel_st77916_mirror(esp_lcd_panel_t *panel, bool mirror_x, bool mirror_y)
 {
     st77916_panel_t *st77916 = __containerof(panel, st77916_panel_t, base);
@@ -997,6 +1124,7 @@ static esp_err_t panel_st77916_mirror(esp_lcd_panel_t *panel, bool mirror_x, boo
     return ret;
 }
 
+/** @brief 交换 X/Y 轴（面板旋转 90°）：切换 MADCTL 的 MV 位并回写。 */
 static esp_err_t panel_st77916_swap_xy(esp_lcd_panel_t *panel, bool swap_axes)
 {
     st77916_panel_t *st77916 = __containerof(panel, st77916_panel_t, base);
@@ -1012,6 +1140,7 @@ static esp_err_t panel_st77916_swap_xy(esp_lcd_panel_t *panel, bool swap_axes)
     return ESP_OK;
 }
 
+/** @brief 设置显示区偏移（gap）：用于把逻辑坐标平移到面板显示区起点。 */
 static esp_err_t panel_st77916_set_gap(esp_lcd_panel_t *panel, int x_gap, int y_gap)
 {
     st77916_panel_t *st77916 = __containerof(panel, st77916_panel_t, base);
@@ -1020,6 +1149,12 @@ static esp_err_t panel_st77916_set_gap(esp_lcd_panel_t *panel, int x_gap, int y_
     return ESP_OK;
 }
 
+/**
+ * @brief 开关显示：进入/退出睡眠。
+ *
+ * @note  开屏路径会先发 SLPOUT(0x11)（退出睡眠，随后 120ms 让面板稳定）再发 DISPON；
+ *        关屏路径发 DISPOFF + SLPIN。这里的 120ms 是面板退出睡眠的稳定时间要求。
+ */
 static esp_err_t panel_st77916_disp_on_off(esp_lcd_panel_t *panel, bool on_off)
 {
     st77916_panel_t *st77916 = __containerof(panel, st77916_panel_t, base);

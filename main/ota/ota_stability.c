@@ -41,6 +41,10 @@ static const char *TAG = "ota_stability";
  *
  * @param[in] reason 失败原因枚举值，可为未知值。
  * @return 指向静态只读字符串的指针；未知值返回 UNKNOWN。
+ *
+ * NOTE：枚举中的 NATIVE_OTA_FAILURE_STORAGE_UNAVAILABLE 未在此 switch 列出，
+ *       因此会被归到 default 的 "UNKNOWN"。若要求它与协议层字符串一致（上报 error_code），
+ *       需补一个 case；此处只记录现状，不修改行为。
  */
 const char *native_ota_failure_reason_name(native_ota_failure_reason_t reason)
 {
@@ -253,6 +257,8 @@ esp_err_t ota_stability_validate_image_header(const uint8_t *header, size_t head
     }
 #endif
 
+    /* 应用描述符紧跟在镜像头与首 segment 头之后；偏移量必须与 ESP 镜像布局一致，
+     * 否则会把 segment 数据误判为 app_desc（magic_word 检查会将其拦下并报无效）。 */
     const size_t app_desc_offset = sizeof(esp_image_header_t) +
                                    sizeof(esp_image_segment_header_t);
     memcpy(app_desc, header + app_desc_offset, sizeof(*app_desc));
@@ -377,7 +383,9 @@ esp_err_t ota_stability_calculate_partition_sha256(const esp_partition_t *partit
 native_ota_failure_reason_t ota_stability_pre_commit_check(
     const native_ota_manifest_t *manifest, const esp_partition_t *partition)
 {
-    /* 提交前再次检查分区容量，防止调用方绕过下载阶段直接提交超大清单。 */
+    /* 检查顺序把“必然失败/无需额外设施”的快速判定放前面：先是最省事的分区容量，
+     * 再到堆、板级电源、板级业务状态，最后是需读取 eFuse 的 Secure Boot。
+     * 任一失败都会让 ota_engine 保留 READY_TO_COMMIT 记录，推迟到下次再提交。 */
     if (manifest == NULL || partition == NULL || manifest->image_size == 0U ||
         manifest->image_size > partition->size) {
         return NATIVE_OTA_FAILURE_IMAGE_TOO_LARGE;
@@ -392,6 +400,8 @@ native_ota_failure_reason_t ota_stability_pre_commit_check(
         return NATIVE_OTA_FAILURE_PRECONDITION_LOW_POWER;
     }
     if (native_ota_check_business_state() != ESP_OK) {
+        /* 复用一个“自检失败”分类上报为 BOOT_SELF_TEST_FAILED；ota_engine 据此把
+         * 上报状态映射为 DEFERRED，而不是终态 FAILED，从而保留记录等待稍后重试。 */
         ESP_LOGW(TAG, "Board business-state check deferred OTA commit");
         return NATIVE_OTA_FAILURE_BOOT_SELF_TEST_FAILED;
     }

@@ -1,3 +1,28 @@
+/**
+ * @file    julia_display.c
+ * @brief   板级显示封装：装配 ST77916(QSPI) 面板并把 LVGL 显示端口(LVGL_PORT)接上。
+ *
+ * @section jd_scope 职责与边界
+ *         本文件是"板级接线 + 初始化编排"层：
+ *           - 选定板载引脚（SPI2、SCK/数据/CS、时钟 40MHz、360x360）；
+ *           - 通过现有 TCA9554 做面板复位（reset_panel_via_existing_tca9554）；
+ *           - 初始化 SPI 总线 → panel IO → 创建 ST77916 面板 → reset/init/disp_on；
+ *           - 最后调用 lvgl_port_init 把面板接给 LVGL（此时才建 LVGL 任务/锁/tick）。
+ *         它不直接绘制像素：所有渲染走 LVGL，经 lvgl_port 的 flush_cb 落到面板。
+ *
+ * @section jd_order 初始化顺序（panel → lvgl_port → ui）
+ *         本函数只完成前两段；`main.c` 在 julia_display_init 成功后，再接 julia_avatar_init
+ *         （创建立绘并做首次全屏刷新）。因此顺序严格为 panel → lvgl_port → ui，
+ *         这与移植文档 §6.3 一致：LVGL 初始化的前提是 panel 已创建。
+ *
+ * @section jd_backlight 背光
+ *         背光（LEDC PWM，julia_backlight 模块）与本文件独立，由 main.c 在立绘首帧
+ *         渲染成功后才点亮；本函数日志中的 "backlight held off" 即反映这一点。
+ *
+ * @see    main/lvgl_port/lvgl_port.c（LVGL 显示端口与刷新回调）
+ * @see    main/display/esp_lcd_st77916.c（通用 ST77916 面板驱动）
+ * @see    main/app/main.c（顶层初始化顺序：显示 → 立绘）
+ */
 #include "julia_display.h"
 
 #include "driver/gpio.h"
@@ -29,6 +54,12 @@ static const char *TAG = "julia_display";
 static esp_lcd_panel_handle_t s_panel;
 static bool s_ready;
 
+/* 针对本模组调校过的厂商初始化序列（与 esp_lcd_st77916 的默认序列、以及
+ * st77916_qspi.c 的序列同源，但部分寄存器（伽马表 0xE0/0xE1、亮度/相位等）取值不同，
+ * 以本项目烧录验证为准）。寄存器语义由厂商决定，这里只按序透传。
+ *
+ * NOTE：需结合模组/供应商确认：个别寄存器位（伽马、电源时序）的精确含义无法在本层
+ *       推断，改动请在真机上对比验证后再锁定。 */
 static const st77916_lcd_init_cmd_t vendor_specific_init_new[] = {
     {0xF0, (uint8_t[]){0x28}, 1, 0},
     {0xF2, (uint8_t[]){0x28}, 1, 0},
@@ -217,6 +248,15 @@ static const st77916_lcd_init_cmd_t vendor_specific_init_new[] = {
 };
 
 
+/**
+ * @brief 复用已存在的 TCA9554 驱动做面板硬件复位（active-low）。
+ *
+ * @note  为什么走 TCA9554 而不是直接 GPIO：本板把 LCD 复位信号接到板载 EXIO
+ *        （原理图标注 EXIO2，TCA9554 引脚从 0 起，因此是 P1），且 TCA9554 已被其他
+ *        设备使用（I2C_NUM_0），复用其驱动可避免安装第二个共享冲突的所有者。此函数
+ *        与 st77916_qspi_reset 的语义等价（同为 EXIO 复位），是当前实际编译的复位路径。
+ * @sideeffect 初始化 TCA9554；RST 拉低 20ms → 拉高 120ms；阻塞约 140ms。
+ */
 static esp_err_t reset_panel_via_existing_tca9554(void)
 {
     /* The board labels this signal EXIO2.  TCA9554 pins are zero-based here,
@@ -232,6 +272,29 @@ static esp_err_t reset_panel_via_existing_tca9554(void)
     return ESP_OK;
 }
 
+/**
+ * @brief 初始化板级 ST77916 显示并注册 LVGL 显示端口（幂等）。
+ *
+ * @note  初始化顺序（严格按此）：
+ *         1. 通过 TCA9554 硬件复位面板；
+ *         2. 初始化 SPI2 总线（QSPI 四线，DMA 自动选）；
+ *         3. 创建 panel IO（CLK 40MHz、命令位宽 32、quad_mode=1、传输完成回调挂到
+ *            lvgl_port_color_trans_done）——这个回调是 LVGL flush 与 DMA 异步完成同步的关键；
+ *         4. 创建 ST77916 面板（vendor_config 注入本模组初始化序列 + 开启 QSPI 接口）；
+ *         5. reset → init → disp_on_off(true) 让面板真正工作；
+ *         6. lvgl_port_init(s_panel) 把面板接给 LVGL（建 LVGL 任务/锁/tick）。
+ *        之后 main.c 再调用 julia_avatar_init 走 UI。任一步失败即返回，s_ready 保持 false。
+ *
+ * @note  关键配置说明：
+ *         - `.reset_gpio_num = -1`：复位已由 TCA9554 完成，面板驱动不再管理 RST GPIO。
+ *         - `.trans_queue_depth = 1`：只允许一个在途 SPI 传输，与
+ *           lvgl_port_draw_bitmap_sync 的阻塞式等待一拍完成回调匹配，避免队列过深。
+ *         - SPI 总线 `max_trans_sz` 取一行 LVGL 缓冲（BUFFER_PIXELS 像素），同 DMA 块一致。
+ *
+ * @pre  背光模块、TCA9554 驱动可用（tca9554_init 在函数内调用）。
+ * @return ESP_OK 成功；否则某一步的 esp_err_t（部分资源可能已分配，但 s_ready 不变）。
+ * @sideeffect 占用 SPI2 主机与相关 GPIO；启动 LVGL 任务与 tick 定时器（最终一步成功时）。
+ */
 esp_err_t julia_display_init(void)
 {
     if (s_ready) {
@@ -305,6 +368,7 @@ esp_err_t julia_display_init(void)
     return ESP_OK;
 }
 
+/** @brief 查询显示是否已完成初始化（供上层 main.c 决定是否继续接立绘/点亮背光）。 */
 bool julia_display_is_ready(void)
 {
     return s_ready;

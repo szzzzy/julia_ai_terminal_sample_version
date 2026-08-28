@@ -60,11 +60,17 @@ static const char *const DEMO_AUDIO_FILES[] = {
 /**
  * @brief 阻塞式入队：直到入队成功或遇到不可重试的错误。
  *
- * 语音服务未启动时重试（等 voice_service_ip_ready 生效），队列满时重试（等会话
- * 任务排空一个槽位），从而在多个文件之间自然串行，不会把命令队列撑爆。
+ * 只有两类错误被当作"暂时不可用"而重试：
+ *   - ESP_ERR_INVALID_STATE：WSS 客户端尚未启动（等 voice_service_ip_ready 生效）；
+ *   - ESP_ERR_NO_MEM：命令队列已满（等会话任务排空一个槽位）。
+ * 其余错误（如参数/长度非法）立即向上返回，不做无意义重试。
+ *
+ * 由于同一 WSS 会话按序消费命令队列，而队列深度为 VOICE_QUEUE_DEPTH(4)，这里
+ * 在"入队成功"与"队列满"之间自然形成节拍：每批准一个文件、等会话跑完再入队下一个，
+ * 从而在多文件之间串行且不会把队列撑爆。
  *
  * @param[in] uri 文件 URI，不允许为 NULL。
- * @return ESP_OK 已入队；其他 esp_err_t 不可重试的失败。
+ * @return ESP_OK 已入队；其他 esp_err_t 为不可重试的失败（参数/长度非法）。
  */
 static esp_err_t demo_enqueue_blocking(const char *uri)
 {
@@ -79,6 +85,9 @@ static esp_err_t demo_enqueue_blocking(const char *uri)
 
 /**
  * @brief 显式传输整个文件列表一次。
+ *
+ * 逐一入队目录中的文件；任一不可重试错误即中止并返回 ESP_FAIL（此时已入队的
+ * 文件仍会被会话任务推流，本函数只是不再排后续文件）。
  *
  * @return ESP_OK 全部文件都已入队；ESP_FAIL 中途遇到不可重试错误。
  */
@@ -101,6 +110,10 @@ static esp_err_t demo_push_list_once(void)
 /**
  * @brief 演示任务主体：显式传输一次；CONFIG_VOICE_PUSH_DEMO_INTERVAL_SECONDS
  *        > 0 时按周期重复整个列表。
+ *
+ * 任务在后台阻塞式入队（见 demo_enqueue_blocking）。interval==0 时分发一次后
+ * 永久休眠（vTaskDelay(portMAX_DELAY)），任务仍存活但不再动作——这是一种简单
+ * 的"演示结束不销毁任务"做法，代价是保留一个 3KB 栈。
  */
 static void voice_push_demo_task(void *parameter)
 {
@@ -126,6 +139,19 @@ static void voice_push_demo_task(void *parameter)
 /* 演示关闭：不创建任何任务，voice_push_demo_start() 直接返回不支持。 */
 #endif /* CONFIG_VOICE_PUSH_DEMO_ENABLE */
 
+/**
+ * @brief 启动设备主动推送演示任务（见 voice_push_demo.h）。
+ *
+ * 实现要点：
+ *   - 幂等：用 s_demo_lock 自旋锁保护 s_demo_started；重复调用直接返回 ESP_OK，
+ *     不会创建第二个任务。
+ *   - 任务栈 3072 字节、优先级 3；失败时回滚 s_demo_started 并返回 ESP_ERR_NO_MEM。
+ *
+ * @return ESP_OK 演示任务已创建（或已启动过）。
+ * @return ESP_ERR_NOT_SUPPORTED 演示未启用（CONFIG_VOICE_PUSH_DEMO_ENABLE=n）。
+ * @return ESP_ERR_NO_MEM 任务创建失败。
+ * @note 本函数不阻塞；不允许在中断上下文调用。
+ */
 esp_err_t voice_push_demo_start(void)
 {
 #if CONFIG_VOICE_PUSH_DEMO_ENABLE

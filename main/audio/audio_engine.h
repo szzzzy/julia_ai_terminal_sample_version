@@ -8,10 +8,16 @@
  * （如 JULIA 播放栈）播放，并上报 audio_status 生命周期事件。
  *
  * 模块边界：
- * - 不依赖 MQTT；状态上报经通信层通用发布接口 mqtt_comm_publish() 发送到
- *   音频状态 topic；
- * - 不解析控制面 JSON；清单由 audio_service 校验后传入；
- * - 运行中判断以本模块为准，调用方不得另存副本。
+ * - 不持有 MQTT 客户端句柄、不解析控制面 JSON；清单由 audio_service 校验后传入，
+ *   状态上报经通信层通用发布接口 mqtt_comm_publish() 发送到音频状态 topic；
+ * - 运行中判断以本模块为准，调用方不得另存副本；
+ * - 与固件 OTA 引擎（ota_engine）平行：共用 http_downloader、失败分类与 NVS 断点
+ *   续传思路，但写独立音频数据分区、校验用 SHA-256、完成通知走弱钩子、
+ *   断点存 "audio_resume" 命名空间，且与 OTA 下载互斥、OTA 优先（见 audio_service）。
+ *
+ * 下载任务（audio_task，优先级 5、栈 12288 B）的状态机与资源占用见 audio_engine.c；
+ * 关于"音频下载 vs I2S 采集/播放"：本模块只负责把音频素材落地到分区，不读写 I2S，
+ * 真正的采集/回放由 components/julia_board_audio 与 main/voice 承担。
  */
 #pragma once
 
@@ -40,6 +46,8 @@ extern "C" {
  * @return ESP_ERR_NO_MEM 清单副本分配或任务创建失败。
  *
  * @note 只创建任务，不在调用者上下文中执行下载；不允许在中断上下文调用。
+ *       任务参数 = 优先级 5、栈 12288 B（"audio_task"），阻塞直到下载结束。
+ *       任何错误路径都会确保清回单飞标志，因此失败后可直接重试。
  */
 esp_err_t audio_engine_start(const native_audio_manifest_t *manifest);
 

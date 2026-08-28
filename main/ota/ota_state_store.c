@@ -71,7 +71,9 @@ void ota_state_store_log_nvs_usage(const char *tag, const char *operation,
  */
 static bool record_is_valid(const ota_resume_record_t *record)
 {
-    /* 记录以固定 blob 布局保存；不接受未知 schema、空字符串或越过清单的恢复偏移。 */
+    /* 记录以固定 blob 布局保存；不接受未知 schema、空字符串或越过清单的恢复偏移。
+     * phase 取值范围覆盖 DOWNLOADING～COOLING_DOWN 的全部可持久化阶段（含冷却与隔离），
+     * 因此冷却/隔离记录也能跨重启存活，而不是只允许“下载中/待提交”两种。 */
     return record != NULL &&
            record->schema_version == OTA_STATE_STORE_SCHEMA_VERSION &&
            record->expected_size > 0 &&

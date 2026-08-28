@@ -4,6 +4,12 @@
  *
  * OTA 主任务只构建统一事件并交给本模块。具体 MQTT 队列和
  * PUBACK 关联由通信模块注册 transport 实现，因此下载任务不会直接调用 MQTT。
+ *
+ * 可靠性分层：
+ * - 生命周期事件（critical=true）先写入 NVS 待发送队列，收到 QoS 1 PUBACK
+ *   前不会删除，可跨重启/断线重发；
+ * - 下载进度（critical=false）只保留最新一条 RAM 槽位，按节流策略尽力发送，
+ *   不持久化，允许丢失。
  */
 #pragma once
 

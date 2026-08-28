@@ -8,6 +8,14 @@
  * - 传输由纯传输层 wss_transport 完成（连接、帧、握手、保活、重连）；
  * - FILE_SEND 的 URI 映射由 voice_uri 完成；
  * - 所有对外接口只做有界入队，实际发送在 WSS 会话任务上下文中执行。
+ *
+ * 并发/上下文：
+ * - MQTT 事件任务：voice_service_on_mqtt_command 解析命令 -> voice_service_* 入队；
+ * - mic_task：board_audio 的 PCM1 帧 -> voice_service_on_board_audio_frame ->
+ *   voice_service_send_chunk() 入队；
+ * - WSS 会话任务（唯一"执行"上下文）：on_text / on_binary / on_queue_item /
+ *   on_session_end 同步执行；传输层在该任务中收敛全部 socket/TLS 读写。
+ * - 会话级状态 s_mic_active 仅由 WSS 会话任务上下文读写（无锁、靠任务内串行）。
  */
 
 #include "voice_service.h"
@@ -23,6 +31,7 @@
 
 #include "board_audio.h"
 #include "julia_avatar.h"
+#include "julia_idle_display.h"
 #include "mqtt_comm.h"
 #include "voice_uri.h"
 #include "wss_transport.h"
@@ -221,6 +230,8 @@ static esp_err_t voice_service_push_file(const char *uri)
  */
 static void voice_service_apply_mic_state(bool enabled)
 {
+    julia_idle_display_note_activity();
+    julia_idle_display_set_busy(enabled);
     if (s_mic_active == enabled) {
         ESP_LOGD(TAG, "MIC streaming already %s", enabled ? "enabled" : "disabled");
         return;
@@ -267,12 +278,19 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
         return;
     }
 
-    /* ---- 板级音频下行控制命令（融合方案 §9.4，与最小包 USB 命令同语义） ---- */
+    /* ---- 板级音频下行控制命令（融合方案 §9.4，与最小包 USB 命令同语义） ----
+     * 这是服务器经 WSS 下行文本帧下发的控制面：SPKS 开播 / SPKV 音量 /
+     * SPKE 停播 / SPKT 自检 / MICS 休眠触发 / MICW 恢复上传，全部只在
+     * WSS 会话任务上下文执行（on_text 回调）。与上行（MIC 推流）无竞态，
+     * 但与在下行 PCM（on_binary）之间隐含着顺序约束：必须先 SPKS 成功
+     * 才允许写 PCM，否则 PCM 被 on_binary 丢弃（见 voice_service_on_binary）。 */
     if (len == 4 && memcmp(text, "SPKE", 4) == 0) {
         (void)board_audio_speaker_stop();
         julia_avatar_talking_stop();
         julia_avatar_set_dialog_phase(s_mic_active ? JULIA_AVATAR_DIALOG_LISTENING
                                                     : JULIA_AVATAR_DIALOG_IDLE);
+        julia_idle_display_note_activity();
+        julia_idle_display_set_busy(s_mic_active);
         ESP_LOGI(TAG, "SPKE: speaker stop");
     } else if (len == 4 && memcmp(text, "SPKT", 4) == 0) {
         (void)board_audio_speaker_self_test();
@@ -288,6 +306,8 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
         if (end != buf && board_audio_speaker_start((uint32_t)rate) == ESP_OK) {
             julia_avatar_talking_start();
             julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_SPEAKING);
+            julia_idle_display_note_activity();
+            julia_idle_display_set_busy(true);
             ESP_LOGI(TAG, "SPKS: speaker start rate=%ld", rate);
         } else {
             ESP_LOGW(TAG, "Invalid SPKS rate: %.*s", (int)n, buf);
@@ -330,7 +350,11 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
 
 /**
  * @brief WSS 下行二进制（服务端 PCM）→ 板级扬声器（融合方案 §9.4）。
- * 只在已 SPKS 开始播放时写入；未开始直接丢弃（§9.6 保护）。
+ *
+ * 前置约束：必须已由 SPKS 开始播放（board_audio_speaker_is_playing()），
+ * 否则整帧丢弃（§9.6 保护）——服务器推流顺序要求"先 SPKS，再 PCM 帧"。
+ * 长度必须非 0 且为偶数：PCM 是 16-bit mono，偶数长度才能被安全地当作
+ * int16 数组喂给 `julia_avatar_feed_pcm()`（否则越界/错位）。
  */
 static void voice_service_on_binary(const uint8_t *data, size_t len)
 {
@@ -400,6 +424,8 @@ static void voice_service_on_session_end(void)
     (void)board_audio_speaker_stop();
     julia_avatar_talking_stop();
     julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_IDLE);
+    julia_idle_display_note_activity();
+    julia_idle_display_set_busy(false);
 }
 
 /**

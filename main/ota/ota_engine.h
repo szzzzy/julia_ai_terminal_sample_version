@@ -5,6 +5,17 @@
  * 本模块负责服务器响应调度、唯一下载任务、断点续传、Flash 写入、镜像校验、
  * 启动分区切换和重启。应用启动验收由 ota_boot_flow 负责。
  *
+ * 生命周期（引擎侧驱动的阶段）：accepted → downloading → verifying → rebooting；
+ * 成功后设备重启并以 booted_pending_verify 进入启动验收，最终转为 succeeded /
+ * rolled_back（由 ota_boot_flow + ota_boot_health 完成本地确认或回滚）；failed 与
+ * deferred 是本引擎失败路径上报的收纳状态。本头文件只暴露引擎侧入口；启动验收与
+ * 回滚接口见 ota_boot_flow.h。
+ *
+ * 模块边界：本模块只负责“取回镜像并切换启动分区”。控制面 JSON 解析和服务器版本
+ * 比较在 ota_control_plane；断点/隔离持久化在 ota_state_store；生命周期与进度上报在
+ * ota_report；SHA-256、镜像头预检、提交前检查等参考实现在 ota_stability。本文件只
+ * 通过上述模块的公共接口协作，不访问其内部状态。
+ *
  * @note 运行状态只保存在 OTA 引擎内部，由短临界区保护；本函数不允许在中断
  *       上下文中调用。
  */

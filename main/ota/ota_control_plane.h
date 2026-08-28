@@ -5,6 +5,11 @@
  * 本模块只处理 MQTT 控制消息：生成版本检查请求、关联 request_id，
  * 并把服务器 JSON 深拷贝为已校验的 native_ota_manifest_t。它不创建 FreeRTOS
  * 下载任务、不访问 OTA 分区，也不执行 HTTP 固件下载。
+ *
+ * 状态边界：本模块几乎无状态，仅保留最近一次主动检查的 request_id，用于把迟到
+ * 的响应与“正在等待的那次请求”做关联，避免把旧响应误当作本次升级。OTA 的生命
+ * 周期状态（accepted/downloading/.../deferred）由 ota_report 层维护，不在本模块
+ * 内持有——本模块只在“是否值得下载”上做一次性判定。
  */
 #pragma once
 

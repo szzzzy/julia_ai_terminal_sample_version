@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "driver/i2c_master.h"
 #include "esp_err.h"
 
 /** TCA9554 的 7 位 I2C 从机地址。 */
@@ -50,3 +51,6 @@ esp_err_t tca9554_write_pin(uint8_t pin, bool level);
  * @return ESP_OK 成功；ESP_ERR_INVALID_ARG 参数非法。
  */
 esp_err_t tca9554_read_pin(uint8_t pin, bool *level);
+
+/** Return the shared board I2C bus used by TCA9554, RTC and other onboard devices. */
+i2c_master_bus_handle_t tca9554_i2c_bus(void);

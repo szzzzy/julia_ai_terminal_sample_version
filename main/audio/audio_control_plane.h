@@ -8,6 +8,10 @@
  *
  * 协议版本不升级：复用现有 MQTT/HTTPS 双通道与 schema_version=1 语义，
  * 仅新增 audio_* 报文类型与独立 topic 前缀。
+ *
+ * 注意本模块解析的是"音频素材下载"的 MQTT 检查报文（audio_check/audio_check_response），
+ * 与"WSS 下行文本命令"（SPKS/SPKV/SPKE/SPKT/MICS/MICW，见 main/voice）是两套
+ * 完全独立的协议，别混淆：这里的"控制面"管素材更新，不碰 I2S 采集/音量/自检音。
  */
 #pragma once
 

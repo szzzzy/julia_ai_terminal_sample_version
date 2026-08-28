@@ -10,6 +10,16 @@
  * - 挂载点 /sdcard，format_if_mount_failed=false（绝不格式化用户的卡）；
  * - 缺卡不阻断应用：返回错误，voice_service 推送会以 ERROR file_open_failed
  *   呈现，不会影响 OTA/MQTT/WSS 会话。
+ *
+ * NOTE（需结合调用方确认）：
+ * - 本文件是“单次同步挂载”，内部没有失败自动重试或卡拔出检测逻辑；main.c 中
+ *   “挂载失败会自动重试”的注释与本实现不符（真实行为是失败即返回，依赖上层/
+ *   网络生命周期另行处理）。若确实需要自动重试应在此处或在调用方自行实现。
+ * - voice_service.c 的注释称“由 sd_card.c 提供强符号 julia_wireless_sd_lock/unlock”，
+ *   但当前仓库未见这两个强符号定义（仅 voice_service.c 内有弱默认实现），SD 访问锁
+ *   是否真实生效需确认。
+ * - /sdcard 挂载点同时被 main/storage/julia_sd.c 使用（其 julia_sd_init() 也会挂载同一
+ *   挂载点）。两者若同时调用 esp_vfs_fat_sdmmc_mount() 会因已挂载而冲突，需确认启用顺序。
  */
 
 #include <stdio.h>

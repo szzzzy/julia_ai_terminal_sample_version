@@ -5,6 +5,19 @@
  * 此模块补充 ESP-IDF 官方 native OTA 例程的 GPIO 诊断：在确认 PENDING_VERIFY
  * 镜像前检查分区、物理 Flash、应用描述、堆和基础 FreeRTOS 队列。网络可用性
  * 不属于镜像健康条件，因此不在本模块中检查。
+ *
+ * 调用时序（由 ota_boot_flow.c 的 ota_boot_flow_run 在其它业务服务启动前驱动）：
+ *   1. ota_boot_health_begin()  读取运行分区是否为 ESP_OTA_IMG_PENDING_VERIFY；
+ *   2. ota_boot_health_check()   执行不依赖网络的本地健康检查；
+ *   3. 通过 → ota_boot_health_confirm()；失败 → ota_boot_health_reject()（并伴随重启）。
+ *
+ * 接口语义（本模块只读写 ESP-IDF OTA 状态，不访问 NVS、不发起网络）：
+ * - confirm 调用 esp_ota_mark_app_valid_cancel_rollback()，把 PENDING_VERIFY 镜像
+ *   标记为 VALID、取消回滚、使镜像永久生效，**不重启**；
+ * - reject 先检查 esp_ota_check_rollback_is_possible()，可行则调用
+ *   esp_ota_mark_app_invalid_rollback_and_reboot() —— 该 API 会标记分区无效并**立即重启**
+ *   回退到上一个应用槽；
+ * - begin 在无 OTA 状态（初次刷机）时返回“非 pending”，是正常路径而非错误。
  */
 #pragma once
 
@@ -25,13 +38,16 @@ extern "C" {
  */
 typedef bool (*ota_boot_health_gpio_diagnostic_t)(void);
 
-/** 读取当前运行镜像是否处于 PENDING_VERIFY。 */
+/** 读取当前运行镜像是否处于 PENDING_VERIFY。
+ *  返回 ESP_OK 时 *pending_verify 指示是否处于待验收；无 OTA 状态视为“否”。 */
 esp_err_t ota_boot_health_begin(bool *pending_verify);
 
-/** 将通过健康检查的运行镜像标记为 VALID。 */
+/** 将通过健康检查的运行镜像标记为 VALID（取消回滚，不重启）。
+ *  @return ESP_OK 已确认；其他值由 esp_ota_mark_app_valid_cancel_rollback 返回。 */
 esp_err_t ota_boot_health_confirm(void);
 
-/** 检查回滚可行性并拒绝当前待验收镜像。 */
+/** 检查回滚可行性并拒绝当前待验收镜像。
+ *  @return ESP_OK 已发起回滚并重启；ESP_ERR_OTA_ROLLBACK_FAILED 表示无可用旧镜像。 */
 esp_err_t ota_boot_health_reject(const char *reason);
 
 /**

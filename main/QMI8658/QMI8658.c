@@ -1,23 +1,51 @@
+/**
+ * @file    QMI8658.c
+ * @brief   QMI8658 六轴 IMU（加速度+陀螺仪）驱动，经外部 I2C_Driver 组件访问。
+ *
+ * 硬件连接/配置：
+ * - I2C 从机地址：默认 0x6B（QMI8658_L_SLAVE_ADDRESS，SA0 接地）；0x6A 为 SA0 拉高。
+ * - 默认量程：加速度 ±4g、陀螺仪 ±64dps；ODR 8000Hz（可在 QMI8658_Init 前改
+ *   acc_scale/gyro_scale/acc_odr/gyro_odr 全局默认值，或运行时用 setAccODR/setGyroODR 调整）。
+ * - 供电：由板级电源带起；QMI8658_Init 先读 WHO_AM_I 校验芯片，再把 acc/gyro 配到运行态。
+ * - 初始化顺序：必须在 julia_context 的 context_task 使用 IMU 之前调用 QMI8658_Init()
+ *   （julia_context_init() 内先 PCF85063_Init()、QMI8658_Init()，再创建 context_task）。
+ *
+ * 数据流（全局变量）：
+ *   getAccelerometer()/getGyroscope() 读寄存器 → 换算成物理量 → 写全局 Accel/Gyro；
+ *   julia_context 的 motion_detected() 读 Accel/Gyro 做“是否有人靠近/活动”判断。
+ * 单位：Accel 为 g（重力加速度），Gyro 为 dps（度/秒）；raw 均按 16-bit 有符号、大端顺序
+ * 在两字节中（低字节在前）解析，再乘各自 scale（range/32768）。
+ *
+ * 注意：I2C_Write/I2C_Read 来自外部组件（阻塞式），本驱动函数均应在任务上下文中调用。
+ */
+
 #include "QMI8658.h"
 
+/* 全局传感器数据：由 getAccelerometer()/getGyroscope() 写入，julia_context 读取。 */
 IMUdata Accel;
 IMUdata Gyro;
 
-uint8_t Device_addr ; // default for SD0/SA0 low, 0x6A if high
-acc_scale_t acc_scale = ACC_RANGE_4G;
-gyro_scale_t gyro_scale = GYR_RANGE_64DPS;
-acc_odr_t acc_odr = acc_odr_norm_8000;
-gyro_odr_t gyro_odr = gyro_odr_norm_8000;
-sensor_state_t sensor_state = sensor_default;
-lpf_t acc_lpf;
+uint8_t Device_addr ; /* 当前使用的从机地址：SA0 低=0x6B（默认），SA0 高=0x6A。 */
+acc_scale_t acc_scale = ACC_RANGE_4G;         /* 加速度量程（默认 ±4g）。 */
+gyro_scale_t gyro_scale = GYR_RANGE_64DPS;    /* 陀螺仪量程（默认 ±64dps）。 */
+acc_odr_t acc_odr = acc_odr_norm_8000;        /* 加速度输出率（默认 8000Hz）。 */
+gyro_odr_t gyro_odr = gyro_odr_norm_8000;     /* 陀螺仪输出率（默认 8000Hz）。 */
+sensor_state_t sensor_state = sensor_default; /* 当前工作状态。 */
+lpf_t acc_lpf;                                /* 加速度低通滤波档位。 */
 
+/* accelScales/gyroScales：把原始 16-bit 码换算成物理量的比例（g/LSB、dps/LSB）。 */
 float accelScales, gyroScales;
-float accelScales = 0;
-uint8_t readings[12];
-uint32_t reading_timestamp_us; // timestamp in arduino micros() time
+float accelScales = 0;   /* NOTE：与上一行重复声明 accelScales（初始化一次），归属见 QMI8658_Init。 */
+uint8_t readings[12];    /* NOTE：遗留缓冲，本驱动未使用（保留未动）。 */
+uint32_t reading_timestamp_us; /* NOTE：遗留时间戳（原 Arduino micros() 域），本驱动未使用。 */
 /**
- * Inialize Wire and send default configs
- * @param addr I2C address of sensor, typically 0x6A or 0x6B
+ * 初始化 QMI8658 并写入默认配置。
+ *
+ * 流程：读 WHO_AM_I（REVISION_ID）校验 → 置 sensor_running → 配置加速度（量程/ODR/LPF）
+ * → 计算 accelScales(g/LSB) → 配置陀螺仪（量程/ODR/LPF）→ 计算 gyroScales(dps/LSB)。
+ * 必须在 context_task 使用 IMU 之前调用。
+ * I2C 为阻塞式，须在任务上下文调用。
+ * @param addr I2C 地址（通常 0x6A 或 0x6B；这里固定用 QMI8658_L_SLAVE_ADDRESS）。
  */
 void QMI8658_Init(void)
 {
@@ -58,6 +86,7 @@ void QMI8658_Init(void)
         case GYR_RANGE_1024DPS: gyroScales = 1024.0 / 32768.0; break;
     }
 }
+/* 周期读取加速度（当前只刷新 Accel；陀螺仪由 julia_context 另行调用 getGyroscope()）。 */
 void QMI8658_Loop(void)
 {
   getAccelerometer();
@@ -86,8 +115,11 @@ uint8_t QMI8658_receive(uint8_t addr)
 }
 
 /**
- * Writes data to CTRL9 (command register) and waits for ACK.
- * @param command the command to be executed
+ * 向 CTRL9（主机命令寄存器）写命令并忙等命令完成。
+ * @param command 要执行的命令（如校准/锁定相关指令）。
+ * 实现：写命令后轮询 STATUSINT 寄存器的 bit7（命令忙标志），直到为 0。
+ * NOTE：这是阻塞式忙等（无超时），若 I2C 异常或命令未完成会卡死；仅用于
+ * 较罕见的加锁/校准命令，常规读取不经过这里。
  */
 void QMI8658_CTRL9_Write(uint8_t command)
 {
@@ -99,8 +131,10 @@ void QMI8658_CTRL9_Write(uint8_t command)
 }
 
 /**
- * Set output data rate (ODR) of accelerometer.
- * @param odr acc_odr_t variable representing new data rate
+ * 设置加速度输出率（ODR）。
+ * @param odr acc_odr_t 表示新的输出率。
+ * 实现：仅在非 sensor_default 状态写寄存器（QMI8658_Init 前后行为不同——出厂默认态
+ * 下只缓存，不写），写时读 CTRL2、清 AODR_MASK(0x0F) 再或入新值，保留其余位。
  */
 void setAccODR(acc_odr_t odr)
 {
@@ -115,8 +149,8 @@ void setAccODR(acc_odr_t odr)
 }
 
 /**
- * Set output data rate (ODR) of gyro.
- * @param odr gyro_odr_t variable representing new data rate
+ * 设置陀螺仪输出率（ODR），语义同 setAccODR（作用于 CTRL3，清 GODR_MASK 再或入）。
+ * @param odr gyro_odr_t 表示新的输出率。
  */
 void setGyroODR(gyro_odr_t odr)
 {
@@ -131,8 +165,11 @@ void setGyroODR(gyro_odr_t odr)
 }
 
 /**
- * Set scale of accelerometer output.
- * @param scale acc_scale_t variable representing new scale
+ * 设置加速度量程。
+ * @param scale acc_scale_t 表示新的量程（2/4/8/16g）。
+ * 实现：读 CTRL2、清 ASCALE_MASK(0x70) 再或入 (scale<<ASCALE_OFFSET(4))，保留其余位。
+ * 注意：这里只写寄存器并缓存 acc_scale，accelScales(g/LSB) 只在 QMI8658_Init 里按当前
+ * acc_scale 计算一次；若在 Init 之后改量程，需重新计算 accelScales 才能得到正确的 g 值。
  */
 void setAccScale(acc_scale_t scale)
 {
@@ -147,8 +184,9 @@ void setAccScale(acc_scale_t scale)
 }
 
 /**
- * Set scale of gyro output.
- * @param scale gyro_scale_t variable representing new scale
+ * 设置陀螺仪量程（作用于 CTRL3，清 GSCALE_MASK 再或入 scale<<GSCALE_OFFSET(4)）。
+ * 注意：与 setAccScale 相同，修改后 gyroScales 需在 Init 中重算；见 setAccScale 说明。
+ * @param scale gyro_scale_t 表示新的量程。
  */
 void setGyroScale(gyro_scale_t scale)
 {
@@ -163,8 +201,12 @@ void setGyroScale(gyro_scale_t scale)
 }
 
 /**
- * Set new low-pass filter value for accelerometer
- * @param lp lpf_t variable representing new low-pass filter value
+ * 设置加速度低通滤波档位（作用于 CTRL5）。
+ * @param lp lpf_t 表示低通比例（见 QMI8658.h 的 LPF_MODE_*）。
+ * NOTE：这里用 `!QMI8658_ALPF_MASK`（逻辑非）来“清掩码位”，其值为 0，会
+ * `ctrl5 &= 0` 把整个 CTRL5 清零——既清掉了保留位，也顺带清掉陀螺仪 LPF 位。
+ * 这看起来是笔误（应为按位取反 `~QMI8658_ALPF_MASK`）。由于只在初始化时调用一次，
+ * 且随后立即重新写入 acc LPF 位，实际影响有限，但存在破坏其他位的风险。
  */
 void setAccLPF(lpf_t lpf)
 {
@@ -180,8 +222,11 @@ void setAccLPF(lpf_t lpf)
 }
 
 /**
- * Set new low-pass filter value for gyro
- * @param lp lpf_t variable representing new low-pass filter value
+ * 设置陀螺仪低通滤波档位（作用于 CTRL5）。
+ * @param lp lpf_t 表示低通比例。
+ * NOTE：与 setAccLPF 相同，`!QMI8658_GLPF_MASK`（逻辑非）值为 0，会导致
+ * `ctrl5 &= 0` 清空整个 CTRL5（包括加速度 LPF 位），再写入陀螺仪 LPF 位。
+ * 这是与 setAccLPF 同源的笔误风险，建议改用按位取反 `~`。
  */
 void setGyroLPF(lpf_t lpf)
 {
@@ -196,8 +241,15 @@ void setGyroLPF(lpf_t lpf)
 }
 
 /**
- * Set new state of QMI8658.
- * @param state new state to transition to
+ * 设置 QMI8658 工作状态（运行/下电/锁定）。
+ *
+ * 三个分支对 CTRL1/CTRL7/CTRL6/CAL1_L 的不同写做：
+ *  - sensor_running：启用 2MHz 振荡器（CTRL1 bit0=0）、地址自增（bit6=1），CTRL7=0x43
+ *    （加速度+陀螺仪全速、启用高速内部时钟、关 syncSample），CTRL6=0x00（关 AttitudeEngine）。
+ *  - sensor_power_down：CTRL7=0x00（关闭加速/陀螺）、CTRL1 bit0=1（关 2MHz 振荡器）。
+ *  - sensor_locking：与 running 相似但 CTRL7=0x83（开 syncSample），并对 CAL1_L 做
+ *    “关 AHB 时钟门控 → CTRL9 指令(0x12) → 恢复时钟门控”的锁定握手。
+ * @param state 新状态；sensor_default 不处理（保持现状）。
  */
 void setState(sensor_state_t state)
 {
@@ -260,6 +312,11 @@ void setState(sensor_state_t state)
 }
 
 
+/**
+ * 读取加速度并换算成 g，写入全局 Accel。
+ * @note 从 AX_L(0x35) 起连续读 6 字节（每轴低字节在前，16-bit 有符号），组合后再乘
+ * accelScales（g/LSB）。会直接改写全局 Accel，调用方读取即可。I2C 为阻塞式。
+ */
 void getAccelerometer(void)
 {
 
@@ -273,6 +330,11 @@ void getAccelerometer(void)
     Accel.z = Accel.z * accelScales;
 
 }
+/**
+ * 读取陀螺仪并换算成 dps，写入全局 Gyro。
+ * @note 从 GX_L(0x3B) 起连续读 6 字节（低字节在前，16-bit 有符号），乘以 gyroScales
+ * （dps/LSB）。会改写全局 Gyro；与 getAccelerometer 一起供 julia_context 做姿态/活动判断。
+ */
 void getGyroscope(void)
 {
     uint8_t buf[6];

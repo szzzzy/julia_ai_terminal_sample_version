@@ -1,5 +1,15 @@
 #pragma once
 
+/*
+ * PCF85063 RTC 完整驱动头（Waveshare 移植，见 PCF85063.c）。
+ * 本头依赖外部 I2C_Driver 组件提供 I2C_Write/I2C_Read（阻塞式），从机地址 0x51。
+ * 约定：
+ * - datetime_t 字段均为十进制（非 BCD）；year 为完整公历年份。
+ * - 时间寄存器只存 0~99 的年份，真实年份 = 1970 + YEAR_OFFSET。
+ * - weekday 取值 0=周日 … 6=周六（见文件末尾注释）。
+ * 与 main/hardware/pcf85063_shared.c 是两套并存实现，操作同一颗 0x51 芯片。
+ */
+
 #include "I2C_Driver.h"
 
 

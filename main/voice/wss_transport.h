@@ -17,6 +17,11 @@
  *
  * 证书复用构建内嵌的 server_certs/ca_cert.pem 信任锚；本模块不访问 OTA 分区、
  * 不写 NVS、不打开文件。
+ *
+ * 职责边界澄清：下行二进制 PCM 在收到 SPKS 命令前应被丢弃，但"是否需要丢弃"
+ * 属业务语义，本层不实现；本层只负责把完整重组的二进制消息交给 on_binary，
+ * 由上层 voice_service 的 on_binary 回调执行该规则。同理，上行 FILE_SEND 的
+ * BEGIN FILE/END 文本帧与分块字节数也是上层拼装，本层只保证按帧不超限发送。
  */
 #pragma once
 

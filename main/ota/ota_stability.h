@@ -4,6 +4,18 @@
  *
  * 基于 ESP-IDF 官方 native OTA 流程，提供恢复记录、HTTP Range 一致性、镜像头
  * 预检、分区摘要和提交前条件检查。
+ *
+ * 模块边界（上游 ota_engine.c 调用、下游 ota_state_store.c 持久化）：
+ * - 只做“纯计算/Flash/校验/NVS 记录”侧的操作：初始化/保存恢复记录、解析 Content-Range、
+ *   校验镜像头、计算分区摘要、执行提交前资源检查；
+ * - 不创建任务、不访问 MQTT、不设置启动分区、不重启——切换启动分区与重启由
+ *   ota_engine 在返回 NATIVE_OTA_FAILURE_NONE 后自行完成；
+ * - 所有读取/校验都可能阻塞（Flash、PSA Crypto、NVS），只能在普通任务上下文调用。
+ *
+ * 可覆盖钩子（弱符号，产品固件可提供强符号覆盖）：
+ * - native_ota_check_power()       提交前电源状态；失败令提交被推迟(按 DEFERRED 上报)。
+ * - native_ota_check_business_state() 提交前关键业务状态；失败同样推迟提交。
+ * 两个钩子只读状态，不修改本模块或 OTA 恢复记录。
  */
 #pragma once
 
@@ -34,6 +46,10 @@ esp_err_t native_ota_check_business_state(void);
 
 /**
  * 单次完整镜像头预检所需的最小字节数：镜像头、首个 segment 头和应用描述符的总和。
+ *
+ * 应用描述符（esp_app_desc_t）在 ESP 镜像中紧随 image_header 与第一个 segment_header
+ * 之后，因此要一次性拷贝出可校验的 app_desc，必须至少覆盖这一长度。上位调用方
+ * 用它来决定“收齐多少字节后才做镜像头校验”，并为内存中的原始前缀留出精确缓冲。
  */
 #define OTA_STABILITY_IMAGE_HEADER_SIZE (sizeof(esp_image_header_t) + \
                                          sizeof(esp_image_segment_header_t) + \

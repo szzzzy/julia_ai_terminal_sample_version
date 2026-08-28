@@ -29,6 +29,51 @@
  *
  * 业务协议（文件推送、MIC 流等）由上层 voice_service 通过回调注入，本文件不含
  * 任何业务语义。
+ *
+ * ------------------------------------------------------------------
+ * 连接状态机（只由唯一会话任务驱动）
+ * ------------------------------------------------------------------
+ * 状态由 wss_session_task() 这一个任务推进，其它任务只能观察其副作用，绝不修改：
+ *
+ *   [未连接] --wss_connect() 成功--> [已连接/会话中]
+ *       ^                              |
+ *       | wss_connect() 失败          wss_run_session() 内任一失败路径：
+ *       |                              · 帧写失败（含 PING/应答/CLOSE 应答）
+ *       |                              · 非法/超长/掩码/UTF-8/CLOSE 帧（1002/1007）
+ *       |                              · 对端 CLOSE（回送后退出）
+ *       |                              · PING 后 CONFIG_WSS_PONG_TIMEOUT_SECONDS
+ *       |                                内无任何下行帧（判死）
+ *       |                              v
+ *       +-----[重连等待 vTaskDelay(RECONNECT_INTERVAL)]---→ 重新 wss_connect()
+ *
+ * 状态归属：
+ * - 未连接：wss_transport_start() 刚创建任务，或上一次会话销毁句柄之后。
+ * - 连接中：wss_connect() 内执行 esp_tls 同步握手 + HTTP 升级；失败会销毁
+ *   会话句柄并落到重连等待，绝不留半开句柄。
+ * - 已连接：进入 wss_run_session()，循环"排空命令队列 → 收一帧 → 保活/分派"。
+ * - 重连等待：固定 CONFIG_WSS_RECONNECT_INTERVAL_SECONDS 退避后无条件重试；
+ *   计数永不累加、永不放弃，因此链路中断无需外部干预即可自愈。
+ *
+ * 数据流（本模块只做字节与帧，不做业务语义）：
+ * - 上行：外部任务 wss_transport_enqueue() → s_cmd_queue → 会话任务
+ *   wss_drain_queue() → 上层的 on_queue_item 回调；上层决定发送何种帧，再在
+ *   回调内调用 wss_transport_send_now() → wss_ws_send()。会话任务还可能在
+ *   空闲时主动发 PING（0x9），并应答服务端 PING（PONG 0xA）与 CLOSE。
+ * - 下行：wss_ws_recv() 收帧 → 跨帧重组（FIN=0 续帧）→ on_text / on_binary
+ *   回调交给上层。上层不返回前，会话循环暂停，期间仍可再发帧。
+ * - FILE_SEND（上行推送）：BEGIN FILE/Binary/END 的字节含义在上层
+ *   voice_service.c；本模块只保证"作为若干连续且不超限的 WebSocket 帧写出去"，
+ *   不解释 URI、不分块文件。
+ *
+ * 并发模型：
+ * - s_tls、s_rx_extra*、s_msg_*（分片重组）、s_session_failed 只在会话任务
+ *   上下文中读写，天然无需锁。mbedTLS 会话句柄绝不跨任务共享，是"收发全部
+ *   收敛到会话任务"的根本原因。
+ * - s_started / s_starting / s_start_lock 专门保护 wss_transport_start() 的
+ *   幂等启动，允许任意普通任务调用（如 IP 就绪回调）。
+ * - s_cmd_queue 是跨任务的有界通道：外部任务入队（非阻塞），会话任务出队。
+ * - 除入队外没有任何会阻塞任务的操作；会话任务只在 recv/send 上受 20ms/5s
+ *   套接字超时约束，其余全部有界。
  */
 
 #include <errno.h>
@@ -299,6 +344,10 @@ static esp_err_t wss_ws_send(uint8_t opcode, const uint8_t *payload, size_t len)
         return ESP_FAIL;
     }
     if (len > 0) {
+        /* 掩码缓冲为静态复用，避免每帧在栈上分配 1200 B。安全前提：所有调用方
+         * 都在会话任务上下文中（未连前 s_tls 为空直接失败，会话仅由该任务推进；
+         * 公共 send_now 也只允许在回调内调用），故无需加锁；任何跨任务直接调用
+         * wss_ws_send 都会破坏这一假定。 */
         static uint8_t masked[WSS_TRANSPORT_MAX_PAYLOAD];
         for (size_t i = 0; i < len; i++) {
             masked[i] = payload[i] ^ mask_key[i % 4];
@@ -1066,6 +1115,9 @@ static void wss_run_session(void)
     s_tls = NULL;
     s_msg_active = false;
     s_msg_len = 0;
+    /* 会话结束通知：在销毁句柄、s_tls 置空之后、重连等待之前调用，仍处于会话任务
+     * 上下文。上层借此复位会话级业务状态（如关闭 MIC 流、停止扬声器）；此时网络
+     * 已不可用，任何基于"会话仍健康"的发送都会失败，属预期。 */
     if (s_config.on_session_end != NULL) {
         s_config.on_session_end();
     }
@@ -1075,6 +1127,11 @@ static void wss_run_session(void)
 
 /**
  * @brief 会话任务主体：连接 -> 会话 -> 退避 -> 重连，永不退出。
+ *
+ * 这是连接状态机的驱动器：wss_connect() 对应"连接中"阶段，wss_run_session() 对应
+ * "已连接/会话中"阶段，两者之间与每次会话结束之后的 vTaskDelay(RECONNECT_INTERVAL)
+ * 对应"重连等待"阶段。循环无退出条件，也无需退出条件——客户端生命周期与设备一致；
+ * 参数未使用。
  *
  * @param[in] parameter FreeRTOS 任务参数，本实现未使用。
  */
@@ -1093,6 +1150,22 @@ static void wss_session_task(void *parameter)
 /* 公共接口                                                            */
 /* ------------------------------------------------------------------ */
 
+/**
+ * @brief 一次性启动 WSS 客户端：分配条目缓冲、命令队列，并创建唯一会话任务。
+ *
+ * 资源（s_queue_item、s_cmd_queue、s_session_task）只在首次成功时分配；之后无论
+ * 网络生命周期如何重试，重复调用都直接返回 ESP_OK 复用既有实例，绝不会出现第二
+ * 份任务或队列——这正是参数校验之后立刻就做幂等判定的原因。
+ *
+ * 任务创建成功后不再等待连接结果：wss_session_task() 自行连接并在失败/会话结束后
+ * 按配置退避重连。本函数不阻塞，可被任意普通任务（如 IP 就绪回调）在取得 IPv4 后
+ * 调用；不允许在中断上下文调用。
+ *
+ * @return ESP_OK 已启动或已处于启动完成态。
+ * @return ESP_ERR_INVALID_ARG 配置为空，或缺 on_queue_item / 空尺寸 / 空深度。
+ * @return ESP_ERR_INVALID_STATE 已有一次启动仍在进行中（尚未到达 finish）。
+ * @return ESP_ERR_NO_MEM 条目缓冲、队列或任务创建失败。
+ */
 esp_err_t wss_transport_start(const wss_transport_config_t *config)
 {
     if (config == NULL || config->on_queue_item == NULL ||
@@ -1154,6 +1227,17 @@ finish:
     return err;
 }
 
+/**
+ * @brief 把一条不透明命令的"副本"放入有界命令队列，非阻塞。
+ *
+ * 任意普通任务可调用（MQTT 事件任务、MIC 采集等）；xQueueSend 内部按
+ * queue_item_size 整块复制条目，因此入队后调用方的本地缓冲即可复用。队列满时
+ * 返回 ESP_ERR_NO_MEM，由调用方决定丢弃策略（如 MIC 帧被丢弃并记日志）；绝不在
+ * 队列上阻塞等待空间，避免阻塞住采集任务。
+ *
+ * @return 见头文件 wss_transport.h：ESP_OK/ESP_ERR_INVALID_ARG/
+ *         ESP_ERR_INVALID_SIZE/ESP_ERR_NO_MEM/ESP_ERR_INVALID_STATE。
+ */
 esp_err_t wss_transport_enqueue(const void *item, size_t item_size)
 {
     if (item == NULL) {
@@ -1171,6 +1255,18 @@ esp_err_t wss_transport_enqueue(const void *item, size_t item_size)
     return ESP_OK;
 }
 
+/**
+ * @brief 在会话任务上下文中直接发送一帧 WebSocket 消息（封装 wss_ws_send）。
+ *
+ * 设计上只允许在 on_text / on_queue_item 回调内调用：这两类回调本身就是会话任务
+ * 驱动的，因此与 wss_ws_send 内部的静态掩码缓冲、以及 s_tls 句柄的访问天然串行，
+ * 无需额外加锁。多任务并发直接调用 wss_ws_send 不是线程安全的（违背上面约定）。
+ *
+ * 错误语义区分两类：参数非法（ESP_ERR_INVALID_ARG，由 wss_ws_send 校验返回）不
+ * 影响链路；只有会话级写失败（ESP_FAIL，含 s_tls 为空或写超时）才置位
+ * s_session_failed，让会话循环据此关闭并重连。上层因此在推送文件失败时只需返回
+ * 失败，纠错交给传输层。
+ */
 esp_err_t wss_transport_send_now(uint8_t opcode, const uint8_t *payload, size_t len)
 {
     esp_err_t err = wss_ws_send(opcode, payload, len);

@@ -1,3 +1,29 @@
+/**
+ * @file    julia_display_theme.c
+ * @brief   显示功率/主题策略（fused 移植；当前未纳入构建）。
+ *
+ * 模块职责与边界：
+ *   - 用"显示功率状态机"管理 LCD 背光与画面：完整亮度 → 自动调暗 → 进入 doze
+ *     （低亮度呼吸 + 睡眠立绘）→ 唤醒回落。同时提供主题（背景色/呼吸灯色）的加载
+ *     与切换，并支持从 SD 卡 /sdcard/julia/themes/<name>/theme.json 读取自定义主题。
+ *   - 上游：julia_ui（状态迁移时回调 julia_display_theme_on_state_transition）、
+ *     交互事件（julia_display_theme_on_interaction）、以及一个周期更新回调
+ *     julia_display_theme_update()（调用方按帧率/固定节奏驱动）。
+ *
+ * 构建状态（重要）：
+ *   - main/CMakeLists.txt 的 srcs 未纳入本文件；运行时实际生效的息屏/功率策略由
+ *     app/julia_idle_display.c 承担（更精简的三态 ACTIVE/QUIET/SLEEP）。因此本文件为
+ *     遗留/备用实现，可能由另一条链路或未来版本启用。
+ *   NOTE：需结合调用方确认——是否仍被引用；否则本文件可整体裁剪。
+ *
+ * 关键设计：
+ *   - 显示降功耗：24/7 居家伙伴不宜让背光/全彩面板常亮（过热/耗电/缩短续航），因此
+ *     空闲时把显示功率分级下压，保留 WS2812 呼吸灯作为低功耗状态指示，语音/状态处理
+ *     不受影响（见文件头部注释）。
+ *   - 亮度渐变：每个折向都从硬件当前值出发，用二次缓动（ease-out）插值，避免跳变。
+ *   - doze 进入/退出：进入时暂停微动、切睡眠立绘、起低亮度呼吸；退出时先淡入再恢复，
+ *     并用 lvgl_port 的 flush 计数探测"首帧已出"，避免唤醒闪黑。
+ */
 #include "julia_display_theme.h"
 
 #include <dirent.h>
@@ -25,6 +51,8 @@
  * unplugged runtime, and increase long-term plugged-in risk. Idle display
  * power is therefore staged down while the existing WS2812 remains the sole
  * low-power status indicator; voice/state processing continues unchanged. */
+/* 可调策略参数（#ifndef 以便编译期覆盖）：屏保超时、调暗/夜间亮度、夜间时段、
+ * doze 背光百分比、doze 开关、doze 进入/退出渐变时长等全部集中在此，避免散落魔法数。 */
 #define THEME_MAX 12
 #define THEME_NAME 24
 #ifndef SCREEN_OFF_TIMEOUT_S
@@ -77,15 +105,18 @@
 #define BACKLIGHT_FADE_MS 800U
 #define WAKE_FADE_MS DOZE_WAKE_FADE_MS
 
+/* 显示功率状态机：ON 完整亮度 → FADE_IN/DIM/FADE_OUT → OFF（doze 低亮度呼吸），
+ * 以及 WAKE_WAIT_FLUSH（等首帧刷完再提升亮度，避免唤醒闪黑）。 */
 typedef enum {
-    DISPLAY_POWER_ON = 0,
-    DISPLAY_POWER_FADE_IN,
-    DISPLAY_POWER_DIM,
-    DISPLAY_POWER_FADE_OUT,
-    DISPLAY_POWER_OFF,
-    DISPLAY_POWER_WAKE_WAIT_FLUSH,
+    DISPLAY_POWER_ON = 0,       ///< 全亮。
+    DISPLAY_POWER_FADE_IN,      ///< 正在回升到全亮。
+    DISPLAY_POWER_DIM,          ///< 已调暗（半亮度）。
+    DISPLAY_POWER_FADE_OUT,     ///< 正在降到熄灭（进入 doze）。
+    DISPLAY_POWER_OFF,          ///< 已熄灭（doze 低亮度呼吸中）。
+    DISPLAY_POWER_WAKE_WAIT_FLUSH, ///< 等待唤醒后首帧刷出，再回升亮度。
 } display_power_state_t;
 
+/* 主题：内建 3 个，SD 卡上可扩展（s_themes 数组，最多 THEME_MAX）。 */
 typedef struct { char name[THEME_NAME]; uint32_t background; uint32_t led; bool sd; } theme_t;
 static theme_t s_themes[THEME_MAX] = {
     {"default", 0xf3f5f7, 0xffd7b0, false},
@@ -95,24 +126,25 @@ static theme_t s_themes[THEME_MAX] = {
 static size_t s_count = 3, s_current;
 static julia_backlight_setter_t s_setter;
 static uint32_t s_last_interaction, s_idle_timeout = DEFAULT_IDLE_MS;
-static bool s_rendering = true;
+static bool s_rendering = true;                 /* 是否允许正常渲染（doze 时置 false）。 */
 static bool s_doze_asset_loaded;
 static display_power_state_t s_power_state = DISPLAY_POWER_ON;
-static uint8_t s_backlight_current = 10;
-static uint8_t s_backlight_from = 10;
-static uint8_t s_backlight_target = 10;
+static uint8_t s_backlight_current = 10;        /* 当前亮度（从硬件读回）。 */
+static uint8_t s_backlight_from = 10;           /* 本次渐变的起点亮度。 */
+static uint8_t s_backlight_target = 10;         /* 本次渐变的终点亮度。 */
 static uint32_t s_fade_started_ms;
 static uint32_t s_fade_duration_ms = BACKLIGHT_FADE_MS;
 static bool s_fading;
-static bool s_boot_brightness_hold;
-static uint64_t s_wake_flush_baseline;
+static bool s_boot_brightness_hold;             /* 开机升亮期间的保持（避免被调暗抢占）。 */
+static uint64_t s_wake_flush_baseline;          /* 唤醒前 flush 计数基线。 */
 static uint32_t s_wake_started_ms;
-static uint8_t s_restore_brightness = 100;
+static uint8_t s_restore_brightness = 100;      /* doze 退出后要恢复到的亮度。 */
 static julia_sub_state_t s_state = JULIA_SUB_STATE_S1_1_NEAR_STANDBY;
-static bool s_doze_transitioning;
-static uint32_t s_doze_transition_finished_ms;
+static bool s_doze_transitioning;               /* doze 进入/退出进行中（自旋锁原子量）。 */
+static uint32_t s_doze_transition_finished_ms;  /* doze 切换完成时刻（用于防抖）。 */
 static const char *TAG = "DISPLAY_THEME";
 
+/* 由当前 FSM 子状态推导目标亮度：待机/主动 100%，陪伴 40%，其余（睡眠/静默）10%。 */
 static uint8_t state_brightness(void)
 {
     if (s_state >= JULIA_SUB_STATE_S1_1_NEAR_STANDBY &&
@@ -124,6 +156,8 @@ static uint8_t state_brightness(void)
     return 10;
 }
 
+/* 启动一次亮度渐变：每次从硬件当前值出发（不是上一次目标值），
+ * 记录起点/终点/起算时刻/时长，并判断是否确实需要渐变。 */
 static void start_fade_for(uint8_t target, uint32_t now_ms, uint32_t duration_ms)
 {
     /* 每次折向都从硬件当前值出发，不能从上一次目标值起跳。 */
@@ -135,6 +169,8 @@ static void start_fade_for(uint8_t target, uint32_t now_ms, uint32_t duration_ms
     s_fading = s_backlight_from != target;
 }
 
+/* 逐帧推进亮度渐变：用 ease-out 二次缓动插值，调用 s_setter 写入背光；
+ * 结束后夹到目标值并清 fading，返回是否已完成。 */
 static bool update_fade(uint32_t now_ms)
 {
     if (!s_fading) return true;
@@ -159,6 +195,7 @@ static void start_fade(uint8_t target, uint32_t now_ms)
     start_fade_for(target, now_ms, BACKLIGHT_FADE_MS);
 }
 
+/* 是否处于夜间时段（跨 23:00..次日 07:00）。时间未同步（epoch 过小）视为非夜间。 */
 static bool night_time(void)
 {
     time_t now = time(NULL);
@@ -168,6 +205,8 @@ static bool night_time(void)
     return local.tm_hour >= SCREEN_NIGHT_START_HOUR || local.tm_hour < SCREEN_NIGHT_END_HOUR;
 }
 
+/* 从 theme.json 读取一个 24bit 颜色字段：支持数字(0xRRGGBB)或 "#RRGGBB" 字符串，
+ * 缺省回退 fallback。 */
 static uint32_t json_color(const cJSON *root, const char *key, uint32_t fallback)
 {
     cJSON *value = cJSON_GetObjectItemCaseSensitive(root, key);
@@ -180,6 +219,8 @@ static uint32_t json_color(const cJSON *root, const char *key, uint32_t fallback
     return fallback;
 }
 
+/* 扫描 SD 卡 /sdcard/julia/themes 下的每个主题目录，读取 theme.json 并注册到
+ * s_themes（最多 THEME_MAX 个）。名称过长/JSON 非法则跳过。整个读取在 SD 锁内。 */
 static void scan_sd_themes(void)
 {
     if (!julia_sd_is_mounted() || !julia_sd_lock(pdMS_TO_TICKS(1500))) return;
@@ -210,6 +251,8 @@ static void scan_sd_themes(void)
     julia_sd_unlock();
 }
 
+/* 应用当前主题：设背景色 + 呼吸灯颜色；remember=true 时把主题名写入 NVS 并记一条
+ * 记忆事件（下次开机恢复）。 */
 static void apply_current(bool remember)
 {
     theme_t *theme = &s_themes[s_current];
@@ -226,6 +269,8 @@ static void apply_current(bool remember)
     ESP_LOGI(TAG, "theme=%s source=%s", theme->name, theme->sd ? "sd" : "builtin");
 }
 
+/* 初始化：登记 setter、扫描 SD 主题、从 NVS 恢复上次主题，并把背光/渐变状态清零。
+ * 注意把亮度设为 0（背光保持灭），由调用方后续 display_fade_in 点亮。 */
 esp_err_t julia_display_theme_init(julia_backlight_setter_t setter)
 {
     if (!setter) return ESP_ERR_INVALID_ARG;
@@ -242,6 +287,7 @@ esp_err_t julia_display_theme_init(julia_backlight_setter_t setter)
     return ESP_OK;
 }
 
+/* 开机淡入：从 0% 升到 100%。期间置 boot_brightness_hold，防止空闲调暗抢占。 */
 void display_fade_in(uint16_t duration_ms)
 {
     if (!s_setter) return;
@@ -255,11 +301,18 @@ void display_fade_in(uint16_t duration_ms)
     ESP_LOGI(TAG, "boot fade-in start from=0 target=100 duration_ms=%u", duration_ms);
 }
 
+/* 状态迁移入口的快捷包装：默认用 BACKLIGHT_FADE_MS 做渐变。 */
 void julia_display_theme_on_state(julia_sub_state_t state)
 {
     julia_display_theme_on_state_transition(state, BACKLIGHT_FADE_MS);
 }
 
+/* 状态迁移：更新当前状态并依据目标子状态决定亮暗策略——
+ *   睡眠(S0)      → 进入呼吸（doze）；
+ *   已在呼吸/doze → 复位空闲计时（表示要醒了）；
+ *   主动/对话     → 复位空闲计时；
+ *   其余且全亮    → 按 state_brightness() 渐变。
+ * 开机淡入期间不打断较亮动作。 */
 void julia_display_theme_on_state_transition(julia_sub_state_t state, uint16_t duration_ms)
 {
     s_state = state;
@@ -277,6 +330,9 @@ void julia_display_theme_on_state_transition(julia_sub_state_t state, uint16_t d
     }
 }
 
+/* 进入 doze：先通过原子标志防止重入（s_doze_transitioning），带 800ms 防抖忽略刚
+ * 切换完的请求；暂停微动、切睡眠立绘、起低亮度呼吸，关闭渲染与呼吸灯进入睡眠态。
+ * avatar_face_set_doze 失败则回滚并告警。 */
 void display_breathing_start(void)
 {
     if (!JULIA_DOZE_BREATH_ENABLE || !s_setter || s_power_state == DISPLAY_POWER_OFF ||
@@ -318,11 +374,13 @@ void display_breathing_start(void)
 #endif
 }
 
+/* 停止呼吸 = 复位空闲计时（等价于一次"唤醒"）。 */
 void display_breathing_stop(void)
 {
     reset_idle_timer();
 }
 
+/* 是否处于 doze 相关状态（含切换进行中、退出中、等待首帧）。 */
 bool display_breathing_active(void)
 {
     return __atomic_load_n(&s_doze_transitioning, __ATOMIC_ACQUIRE) ||
@@ -331,6 +389,13 @@ bool display_breathing_active(void)
            s_power_state == DISPLAY_POWER_WAKE_WAIT_FLUSH;
 }
 
+/* 空闲计时复位（"有用户交互/要醒来"）。
+ *   - 若在 doze(OFF)：执行唤醒——先淡入到 100% 并等待完成，再切回非睡眠立绘、
+ *     恢复微动，回到 ON。用原子标志 + 800ms 防抖避免重复。
+ *   - 若在 FADE_OUT（正在降下去）：撤销：记录 flush 基线、恢复渲染、显示立绘、
+ *     等首帧刷出后进入 WAKE_WAIT_FLUSH。
+ *   - 其余：按 state_brightness() 回升到全亮（FADE_IN）。
+ */
 void reset_idle_timer(void)
 {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
@@ -380,8 +445,14 @@ void reset_idle_timer(void)
     s_power_state = DISPLAY_POWER_FADE_IN;
 }
 
+/* 交互回调：等价于一次"空闲计时复位"。 */
 void julia_display_theme_on_interaction(void) { reset_idle_timer(); }
 
+/* 周期驱动（调用方按固定节奏/帧率调用）：根据空闲时长与状态机决定——
+ *   OFF → 不动；WAKE_WAIT_FLUSH → 等首帧刷完再回升；FADE_OUT → 推进渐变到完全熄灭；
+ *   空闲超时且处于待机/全亮 → 进入 doze；FADE_IN → 推进到全亮；
+ *   否则按 state_brightness() 或 dim（空闲过半）决定目标，必要时启动渐变。
+ * 夜间把超时折半、调暗亮度更暗。 */
 void julia_display_theme_update(uint32_t now_ms)
 {
     if (!s_setter) return;
@@ -453,6 +524,7 @@ bool julia_display_theme_rendering(void) { return s_rendering; }
 const char *julia_theme_current(void) { return s_themes[s_current].name; }
 size_t julia_theme_count(void) { return s_count; }
 
+/* 按名称切换主题；找不到返回 NOT_FOUND。 */
 esp_err_t julia_theme_select(const char *name)
 {
     if (!name) return ESP_ERR_INVALID_ARG;
@@ -462,6 +534,7 @@ esp_err_t julia_theme_select(const char *name)
     return ESP_ERR_NOT_FOUND;
 }
 
+/* 循环切换到下一个主题。 */
 esp_err_t julia_theme_next(void)
 {
     s_current = (s_current + 1U) % s_count; apply_current(true); return ESP_OK;

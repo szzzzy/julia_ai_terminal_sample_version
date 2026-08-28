@@ -1,3 +1,32 @@
+/**
+ * @file    julia_led.c
+ * @brief   WS2812 可寻址 LED 的低层驱动：RMT 发送 + 独立的“呼吸/常亮”刷新任务。
+ *
+ * 职责边界（与 breathing_led.c 的分工）：
+ * - 本模块是“原语”：只负责把一根 WS2812 灯珠按给定的颜色/亮度曲线点亮，
+ *   它自己带一个 led_task 周期计算亮度并写入 RMT。它不关心“灯应该表示什么
+ *   状态”——只关心“这个瞬间该亮多少、什么颜色”。
+ * - breathing_led.c 是“上层状态机”：它根据 UI 状态挑选一个 led_profile_t
+ *   （基础/过渡），在状态间做平滑插值，然后调用本模块的 julia_led_set_*
+ *   只把最终结果交给本模块输出。因此本模块只被 breathing_led.c 使用。
+ *
+ * 硬件连接：
+ * - 单颗 WS2812，数据脚固定在 GPIO21（JULIA_LED_GPIO，见 julia_led.h）。
+ * - 用 ESP32-S3 的 RMT 外设发时序（10 MHz 时钟分辨率），不用 PWM。
+ * - 灯珠上电即点亮；这里在发送期间持有 ESP_PM_NO_LIGHT_SLEEP 功率锁，
+ *   防止进入 Light-sleep 打断 RMT 传送。
+ *
+ * 上游调用方（仅起示意，见源码中用点）：
+ * - julia_led_init()：系统启动时初始化一次（RMT 通道 + 编码器 + 后台任务）。
+ * - julia_led_set_breathing()/set_solid()/set_off()：由 breathing_led.c 的
+ *   apply_profile() 调用，是唯一对外输出入口。
+ * - julia_led_set_emotion()/hsv_to_rgb()：供肤色/表情配色使用。
+ *
+ * 备注：julia_led_init() 目前在本工程未见其直接调用点（见 julia_led.c
+ * 与 breathing_led.cpp/UI 的引用关系），若 RMT 通道未初始化，则 output()
+ * 因 s_channel 为空会在首次发送时报错并置 output_failed，之后 LED 静默。
+ */
+
 #include "julia_led.h"
 
 #include <math.h>
@@ -11,16 +40,30 @@
 #include "freertos/task.h"
 
 #define TAG "JULIA_LED"
+
+/** RMT 时钟源分辨率：10 MHz，即每个 tick = 0.1 us。WS2812 的 bit 占空比都用它换算。 */
 #define RMT_RESOLUTION_HZ 10000000
+/** LED 刷新周期（ms）：任务每 80 ms 采样一次亮度并发送。 */
 #define UPDATE_MS 80
 
+/* led_task 使用的三种输出模式。 */
 typedef enum { LED_OFF, LED_SOLID, LED_BREATHING } led_mode_t;
+
+/**
+ * @brief 自定义 RMT 编码器：把 3 字节 GRB 数据编码成 WS2812 帧。
+ *
+ * 结构上它“组合”两个子编码器，按固定顺序在每一帧里依次触发：
+ *   bytes —— rmt_bytes_encoder，负责把 3 字节像素编成高/低电平片段；
+ *   copy  —— rmt_copy_encoder，负责把 reset（帧尾低电平）原样地追加在后面。
+ * 编码器自身的 state 机保证“每次 restart 只发一个字节序列 + 一个 reset”。
+ * 这个组合通过 RMT 的 encoder 链反射机制（先调用 bytes，再调用 copy）拼接输出。
+ */
 typedef struct {
-    rmt_encoder_t base;
-    rmt_encoder_t *bytes;
-    rmt_encoder_t *copy;
-    rmt_symbol_word_t reset;
-    int state;
+    rmt_encoder_t base;        /* RMT 编码器基类（必须放在第一个成员）。 */
+    rmt_encoder_t *bytes;      /* 比特编码器：把 GB 像素数据编成高低位。 */
+    rmt_encoder_t *copy;       /* 拷贝编码器：追加帧尾 reset 符号。 */
+    rmt_symbol_word_t reset;   /* 帧尾低电平符号（WS2812 复位）。 */
+    int state;                 /* 0 = 待发数据；1 = 数据已发、待发 reset。 */
 } ws2812_encoder_t;
 
 static rmt_channel_handle_t s_channel;
@@ -33,6 +76,15 @@ static uint16_t s_period;
 static uint32_t s_color;
 static emotion_t s_emotion = JULIA_EMOTION_CALM;
 
+/**
+ * @brief RMT 编码回调（每次 DMA 搬运一帧时被调用）。
+ *
+ * 一次完整的 WS2812 帧 = 3 个字节的位序列 + 一个帧尾 reset。state 机解释：
+ *   state 0：先把 3 字节数据交给 bytes 子编码器；若一次性编完则置 state=1 准备发 reset。
+ *   state 1：把 reset 符号交给 copy 子编码器；发完即复位 state=0。
+ * RMT_ENCODING_MEM_FULL 表示 RMT 内存已满需要等下轮继续编，此时不置 COMPLETE 位，
+ * 交由 RMT 驱动在下一轮继续调用。
+ */
 static size_t IRAM_ATTR ws2812_encode(rmt_encoder_t *encoder, rmt_channel_handle_t channel,
                                       const void *data, size_t size, rmt_encode_state_t *ret_state)
 {
@@ -66,6 +118,16 @@ static esp_err_t IRAM_ATTR ws2812_reset(rmt_encoder_t *encoder)
     return ESP_OK;
 }
 
+/**
+ * @brief 初始化 WS2812 专用编码器并分配其子编码器。
+ *
+ * WS2812 时序（以 RMT_RESOLUTION_HZ=10MHz、1 tick=0.1us 为单位）：
+ *   bit0 = 高 3 tick（0.3us） + 低 9 tick（0.9us）；
+ *   bit1 = 高 9 tick（0.9us） + 低 3 tick（0.3us）；
+ *   先发高有效位（msb_first）。
+ * 帧尾 reset 为 250 tick 低 + 250 tick 低（合计 50us 低电平，满足 >24us 复位要求）。
+ * 失败时逐个释放已分配的子编码器并释放本结构。
+ */
 static esp_err_t new_ws2812_encoder(rmt_encoder_handle_t *result)
 {
     ws2812_encoder_t *ws = rmt_alloc_encoder_mem(sizeof(*ws));
@@ -84,6 +146,21 @@ static esp_err_t new_ws2812_encoder(rmt_encoder_handle_t *result)
     return ESP_OK;
 }
 
+/**
+ * @brief 把一次亮度/颜色输出写入 RMT（核心发送例程，阻塞等待发送完成）。
+ *
+ * 处理流程：
+ *  - 先把颜色按 brightness（0~100）缩放到 r/g/b（都是 0~255），再按 WS2812 的
+ *    像素格式拼成 {g, r, b} —— 注意是 GRB 而非常见的 RGB，顺序写错会颜色错位。
+ *  - 发送前取 ESP_PM_NO_LIGHT_SLEEP 功率锁，发送完成后再释放，避免 Light-sleep
+ *    在发送中途切入而打断 DMA。
+ *  - 用 rmt_tx_wait_all_done 阻塞至多 100ms 等通道发完。
+ *
+ * @param[in] brightness 亮度百分比（0~100），会作用到三个颜色通道上。
+ * @param[in] color      颜色 0xRRGGBB。
+ * 失败路径：一旦 RMT 发送出错就置 output_failed 并永久停用输出（避免每 80ms 反复
+ * 报错刷日志）；此后本函数直接返回。
+ */
 static void output(uint8_t brightness, uint32_t color)
 {
     static bool output_failed;
@@ -103,6 +180,18 @@ static void output(uint8_t brightness, uint32_t color)
     }
 }
 
+/**
+ * @brief LED 刷新任务主体（FreeRTOS 任务，频率 = UPDATE_MS=80ms 一个周期）。
+ *
+ * 每次循环先在锁内快照一份当前配置（mode/lo/hi/period/color），拿到配置后才释放锁，
+ * 之后在本地计算亮度，配置对象不会被别的任务修改，因此无需全程持锁：
+ *   - LED_OFF：亮度 0；
+ *   - LED_SOLID：固定 brightness=solid；
+ *   - LED_BREATHING：沿 period 做三角波，并用二次缓动（ease-in/out）得到
+ *     更柔和的“呼吸”亮度曲线——q10 是 0~1024 的相位系数，brightness = lo + (hi-lo)*q10/1024。
+ * 中途调用 output() 会阻塞至多 100ms（RMT 等待完成），因此本任务可以被抢占，
+ * 但不应在中断上下文里调用。
+ */
 static void led_task(void *arg)
 {
     (void)arg; uint32_t elapsed = 0;
@@ -126,6 +215,14 @@ static void led_task(void *arg)
     }
 }
 
+/**
+ * @brief 初始化 LED（RMT 通道 + 编码器 + 功率锁 + 后台刷新任务）。
+ *
+ * 一次性初始化，成功后即可调用 julia_led_set_*。初始化失败会返回 esp_err_t，
+ * 且每一段失败都会提前返回（不继续执行，避免半初始化状态被使用）。
+ * 注意：本函数须在任务上下文调用（内部会创建互斥锁、创建任务），不要在中断里调用。
+ * 后续所有 julia_led_set_* 都通过 led_task 输出，因此调用方无需再手动触发发送。
+ */
 esp_err_t julia_led_init(void)
 {
     rmt_tx_channel_config_t cfg = {.clk_src = RMT_CLK_SRC_DEFAULT, .gpio_num = JULIA_LED_GPIO,
@@ -143,14 +240,46 @@ esp_err_t julia_led_init(void)
     return ESP_OK;
 }
 
+/**
+ * @brief 在锁内写入一组 LED 参数（配置的单一写入口）。
+ *
+ * 所有 julia_led_set_* 最终都汇聚到此，通过 s_lock 串行化写配置，
+ * 避免与 led_task 快照配置竞争。这里只存参数；真正的亮度计算/发送由 led_task
+ * 在下一个周期完成，因此调用方得到的是“已请求”，不是“已输出”。
+ */
 static void configure(led_mode_t mode, uint8_t lo, uint8_t hi, uint16_t period, uint32_t color)
 { xSemaphoreTake(s_lock, portMAX_DELAY); s_mode=mode; s_min=lo; s_max=hi; s_solid=hi; s_period=period; s_color=color; xSemaphoreGive(s_lock); }
+
+/**
+ * @brief 请求“呼吸灯”效果（周期 0 表示立刻按 hi 常亮，见 led_task）。
+ *
+ * @param[in] lo     亮度下限 0~100（超界会被钳到 100）。
+ * @param[in] hi     亮度上限 0~100。
+ * @param[in] ms     呼吸周期（ms）。
+ * @param[in] color  颜色 0xRRGGBB。
+ * 若 lo>hi 会自动交换，保证曲线区间合法。
+ */
 void julia_led_set_breathing(uint8_t lo, uint8_t hi, uint16_t ms, uint32_t color)
 { if (lo > 100) lo=100; if (hi > 100) hi=100; if (lo > hi) { uint8_t t=lo; lo=hi; hi=t; } configure(LED_BREATHING,lo,hi,ms,color); }
+
+/**
+ * @brief 请求固定亮度常量亮（period 为 0，呼吸曲线退化为常亮）。
+ * @param[in] brightness 0~100（超界钳到 100）。
+ * @param[in] color      颜色 0xRRGGBB。
+ */
 void julia_led_set_solid(uint8_t brightness, uint32_t color)
 { if (brightness > 100) brightness=100; configure(LED_SOLID,brightness,brightness,0,color); }
+
+/** 请求关闭 LED（亮度为 0）。 */
 void julia_led_set_off(void) { configure(LED_OFF,0,0,0,0); }
 
+/**
+ * @brief 按情感枚举设置对应常亮配色（内部映射到固定颜色表，亮度固定 70%）。
+ *
+ * @param[in] emotion 情感枚举，范围 [JULIA_EMOTION_HAPPY, JULIA_EMOTION_WORRIED]，
+ *                    超出范围会被忽略（保持当前设定不变）。这是 UI/状态机用来
+ *                    表达“当前情绪”的快捷入口，颜色值与字母一一对应。
+ */
 void julia_led_set_emotion(emotion_t emotion)
 {
     static const uint32_t colors[] = {0xFFEE00,0x0088FF,0xFF0000,0xFFAA88,0xFF8A35,0xC8A8FF};
@@ -161,6 +290,16 @@ void julia_led_set_emotion(emotion_t emotion)
     julia_led_set_solid(70, colors[emotion]);
 }
 
+/**
+ * @brief HSV → RGB 转换（供配色计算）。
+ *
+ * @param[in] h 色相 0~360（超出按 360 取模）。
+ * @param[in] s 饱和度 0~100 百分比（超界钳到 100）。
+ * @param[in] v 明度 0~100 百分比（超界钳到 100）。
+ * @return 颜色 0xRRGGBB。
+ * 注意 HSV 的 v 是“百分比”，内部先换算成 0~255 通道值再插值，避免整数溢出。
+ * 这是纯计算函数，无副作用、可重入。
+ */
 uint32_t julia_led_hsv_to_rgb(uint16_t h, uint8_t s, uint8_t v)
 {
     h %= 360; if (s > 100) s=100; if (v > 100) v=100;
