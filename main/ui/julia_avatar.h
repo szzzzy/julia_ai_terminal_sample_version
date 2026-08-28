@@ -26,6 +26,13 @@ typedef enum {
 /** Build the static Julia portrait and start the L1 micro-motion task. */
 esp_err_t julia_avatar_init(void);
 
+/**
+ * Play the one-shot power-on eye sequence while the first portrait is ready:
+ * closed-eye fade-in, then about three seconds of rapid blinking. The sequence is
+ * idempotent and leaves the avatar awake with normal random blinking enabled.
+ */
+esp_err_t julia_avatar_play_boot_sequence(void);
+
 /** Mark the beginning/end of downlink speech. Safe before UI initialization. */
 void julia_avatar_talking_start(void);
 void julia_avatar_talking_stop(void);

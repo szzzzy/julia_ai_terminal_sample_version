@@ -184,7 +184,7 @@ void avatar_eyes_set_state(uint8_t main_state)
 {
     s_main_state = main_state;
     ++s_generation;
-    if (!s_transition_active) avatar_eyes_show(AVATAR_EYES_OPEN);
+    if (!s_transition_active && !s_idle_closed) avatar_eyes_show(AVATAR_EYES_OPEN);
 }
 
 /* 请求持续闭眼/恢复睁眼，并作废进行中的眨眼（供微动引擎在睡眠等场景下保持闭眼）。 */

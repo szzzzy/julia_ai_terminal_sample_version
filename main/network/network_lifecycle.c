@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -60,6 +61,7 @@ static bool s_wifi_driver_started;
 static bool s_ip_ready;
 static uint32_t s_retry_attempt;
 static int64_t s_next_retry_us = INT64_MAX;
+static bool s_initial_scan_logged;
 
 /** IP 就绪服务启动回调注册表；注册只发生在 network_lifecycle_start() 之前。 */
 static network_service_slot_t s_slots[NETWORK_MAX_IP_READY_CALLBACKS];
@@ -178,6 +180,50 @@ static uint32_t network_schedule_retry_locked(void)
     uint32_t delay_ms = network_next_retry_delay_ms();
     s_next_retry_us = esp_timer_get_time() + (int64_t)delay_ms * 1000LL;
     return delay_ms;
+}
+
+/** Run one blocking startup scan so reason=201 can be diagnosed unambiguously. */
+static void network_log_initial_scan(void)
+{
+    if (s_initial_scan_logged) return;
+    s_initial_scan_logged = true;
+
+    wifi_scan_config_t scan = {
+        .show_hidden = true,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+    };
+    esp_err_t err = esp_wifi_scan_start(&scan, true);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "diagnostic scan failed: %s", esp_err_to_name(err));
+        return;
+    }
+    uint16_t count = 0;
+    if (esp_wifi_scan_get_ap_num(&count) != ESP_OK) return;
+    uint16_t capacity = count > 32U ? 32U : count;
+    wifi_ap_record_t *records = capacity ? calloc(capacity, sizeof(*records)) : NULL;
+    if (capacity && records == NULL) {
+        ESP_LOGW(TAG, "diagnostic scan found %u APs but allocation failed", count);
+        return;
+    }
+    uint16_t returned = capacity;
+    err = capacity ? esp_wifi_scan_get_ap_records(&returned, records) : ESP_OK;
+    bool target_found = false;
+    if (err == ESP_OK) {
+        for (uint16_t i = 0; i < returned; ++i) {
+            const char *ssid = (const char *)records[i].ssid;
+            if (strcmp(ssid, CONFIG_EXAMPLE_WIFI_SSID) == 0) {
+                target_found = true;
+                ESP_LOGI(TAG, "scan target found ssid=\"%s\" channel=%u rssi=%d auth=%d",
+                         ssid, records[i].primary, records[i].rssi, records[i].authmode);
+            } else if (i < 10U) {
+                ESP_LOGI(TAG, "scan AP[%u] ssid=\"%s\" channel=%u rssi=%d auth=%d",
+                         i, ssid, records[i].primary, records[i].rssi, records[i].authmode);
+            }
+        }
+    }
+    ESP_LOGI(TAG, "diagnostic scan complete total=%u returned=%u target=%s",
+             count, returned, target_found ? "found" : "missing");
+    free(records);
 }
 
 /**
@@ -402,6 +448,7 @@ static void network_lifecycle_task(void *parameter)
 
         if (!ip_ready && next_retry_us != INT64_MAX &&
             esp_timer_get_time() >= next_retry_us) {
+            network_log_initial_scan();
             esp_err_t err = esp_wifi_connect();
             if (err == ESP_OK || err == ESP_ERR_WIFI_STATE) {
                 /* A completed association failure emits STA_DISCONNECTED, which
@@ -501,7 +548,18 @@ esp_err_t network_lifecycle_start(void)
             .scan_method = EXAMPLE_WIFI_SCAN_METHOD,
             .sort_method = EXAMPLE_WIFI_CONNECT_AP_SORT_METHOD,
             .threshold.rssi = CONFIG_EXAMPLE_WIFI_SCAN_RSSI_THRESHOLD,
-            .threshold.authmode = EXAMPLE_WIFI_SCAN_AUTH_MODE_THRESHOLD,
+            /* Do not hide Windows transition-mode hotspots at scan time. The
+             * non-empty password and AP RSN IE still negotiate encrypted WPA. */
+            .threshold.authmode = WIFI_AUTH_OPEN,
+            /* Windows Mobile Hotspot advertises WPA2/WPA3 transition mode.
+             * Zero-initializing these fields leaves SAE in hunt-and-peck-only
+             * mode and does not advertise PMF capability; use the ESP-IDF
+             * station example defaults so either WPA2 or WPA3 can negotiate. */
+            .pmf_cfg = {
+                .capable = true,
+                .required = false,
+            },
+            .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
         },
     };
     err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
@@ -528,7 +586,8 @@ esp_err_t network_lifecycle_start(void)
         goto failed;
     }
     s_wifi_driver_started = true;
-    ESP_LOGI(TAG, "Wi-Fi lifecycle started; local application continues while offline");
+    ESP_LOGI(TAG, "Wi-Fi lifecycle started target=\"%s\" scan=all auth_filter=open; local application continues while offline",
+             CONFIG_EXAMPLE_WIFI_SSID);
     return ESP_OK;
 
 failed:

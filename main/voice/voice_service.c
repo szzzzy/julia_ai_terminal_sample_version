@@ -15,7 +15,8 @@
  *   voice_service_send_chunk() 入队；
  * - WSS 会话任务（唯一"执行"上下文）：on_text / on_binary / on_queue_item /
  *   on_session_end 同步执行；传输层在该任务中收敛全部 socket/TLS 读写。
- * - 会话级状态 s_mic_active 仅由 WSS 会话任务上下文读写（无锁、靠任务内串行）。
+ * - 对话阶段只由 WSS 会话任务推进；陪伴上传超时由 esp_timer 回调关闭，
+ *   因而上传/对话标志由 s_mic_state_lock 保护。
  */
 
 #include "voice_service.h"
@@ -28,13 +29,17 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
 
 #include "board_audio.h"
 #include "julia_avatar.h"
 #include "julia_idle_display.h"
+#include "julia_fsm_runtime.h"
 #include "mqtt_comm.h"
 #include "voice_uri.h"
 #include "wss_transport.h"
+#include "sdkconfig.h"
 
 /* SD 文件访问锁钩子（融合方案 §9.6）：底座工程由 sd_card.c 提供强符号
  * julia_wireless_sd_lock/unlock；组件内弱默认实现允许未接线时无锁退化。 */
@@ -48,8 +53,20 @@ __attribute__((weak)) void julia_wireless_sd_unlock(void) {}
 /** 本模块统一使用的日志标签。 */
 static const char *TAG = "voice_service";
 
-/** 命令队列深度：与云端基准实现保持一致。 */
-#define VOICE_QUEUE_DEPTH 4
+static void post_fsm_event(fsm_event_t event)
+{
+    esp_err_t err = julia_fsm_runtime_post(event);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "FSM event %s rejected: %s", julia_fsm_event_name(event),
+                 esp_err_to_name(err));
+    }
+}
+
+/**
+ * WSS 作业队列深度。MIC 每 20 ms 产生一帧，16 槽可吸收约 320 ms 的
+ * 短时网络/调度抖动；队列仍保持有界，避免弱网时无限占用内部 RAM。
+ */
+#define VOICE_QUEUE_DEPTH 16
 
 /**
  * @brief 命令队列中的一条作业：文件 URI（含 NUL）或一块 MIC 数据。
@@ -58,8 +75,8 @@ static const char *TAG = "voice_service";
  */
 typedef enum {
     VOICE_JOB_SEND_FILE = 0, /**< FILE_SEND：推送一个音频文件。 */
-    VOICE_JOB_MIC_START,     /**< MIC_START：开启流式发送状态。 */
-    VOICE_JOB_MIC_STOP,      /**< MIC_STOP：关闭流式发送状态。 */
+    VOICE_JOB_MIC_START,     /**< MIC_START：确认用户开始一轮说话。 */
+    VOICE_JOB_MIC_STOP,      /**< MIC_STOP：确认本轮用户说话结束。 */
     VOICE_JOB_SEND_CHUNK,    /**< 发送一个 MIC 音频块。 */
 } voice_job_type_t;
 
@@ -69,11 +86,94 @@ typedef struct {
     uint8_t data[WSS_TRANSPORT_MAX_PAYLOAD]; /**< URI 或音频块内容。 */
 } voice_job_t;
 
-/** MIC 流式发送状态，仅由 WSS 会话任务上下文读写。 */
-static bool s_mic_active;
+/** 上传与语义监听解耦：陪伴期可 streaming=true、listening=false。 */
+static portMUX_TYPE s_mic_state_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_mic_streaming;
+static bool s_dialog_listening;
+static bool s_companion_timer_armed;
+static esp_timer_handle_t s_companion_timer;
 
 /** FILE_SEND 允许的最大文件大小（8 MiB，融合方案 §9.6 二次限制）。 */
 #define VOICE_SEND_MAX_FILE_BYTES (8 * 1024 * 1024)
+
+static bool voice_service_mic_is_streaming(void)
+{
+    bool streaming;
+    portENTER_CRITICAL(&s_mic_state_lock);
+    streaming = s_mic_streaming;
+    portEXIT_CRITICAL(&s_mic_state_lock);
+    return streaming;
+}
+
+static void voice_service_disarm_companion_timer(void)
+{
+    portENTER_CRITICAL(&s_mic_state_lock);
+    s_companion_timer_armed = false;
+    portEXIT_CRITICAL(&s_mic_state_lock);
+
+    if (s_companion_timer != NULL) {
+        esp_err_t err = esp_timer_stop(s_companion_timer);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "Companion timer stop failed: %s", esp_err_to_name(err));
+        }
+    }
+}
+
+/** Five idle companion minutes close PCM upload; idle_display independently enters S1.2. */
+static void voice_service_companion_timeout(void *arg)
+{
+    (void)arg;
+    bool stopped = false;
+
+    portENTER_CRITICAL(&s_mic_state_lock);
+    if (s_companion_timer_armed) {
+        s_companion_timer_armed = false;
+        s_mic_streaming = false;
+        s_dialog_listening = false;
+        board_audio_enable_wss_mic(false);
+        stopped = true;
+    }
+    portEXIT_CRITICAL(&s_mic_state_lock);
+
+    if (stopped) {
+        ESP_LOGI(TAG, "Companion MIC upload stopped after %d idle seconds",
+                 CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS);
+    }
+}
+
+static void voice_service_arm_companion_timer(void)
+{
+    if (s_companion_timer == NULL) {
+        ESP_LOGE(TAG, "Companion timer unavailable; stopping MIC upload");
+        portENTER_CRITICAL(&s_mic_state_lock);
+        s_mic_streaming = false;
+        s_dialog_listening = false;
+        board_audio_enable_wss_mic(false);
+        portEXIT_CRITICAL(&s_mic_state_lock);
+        return;
+    }
+
+    voice_service_disarm_companion_timer();
+    esp_err_t err = esp_timer_start_once(
+        s_companion_timer,
+        (uint64_t)CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS * 1000000ULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Companion timer start failed: %s; stopping MIC upload",
+                 esp_err_to_name(err));
+        portENTER_CRITICAL(&s_mic_state_lock);
+        s_mic_streaming = false;
+        s_dialog_listening = false;
+        board_audio_enable_wss_mic(false);
+        portEXIT_CRITICAL(&s_mic_state_lock);
+        return;
+    }
+
+    portENTER_CRITICAL(&s_mic_state_lock);
+    s_companion_timer_armed = true;
+    portEXIT_CRITICAL(&s_mic_state_lock);
+    ESP_LOGI(TAG, "Companion MIC upload armed for %d seconds",
+             CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS);
+}
 
 /**
  * @brief board_audio 的 WSS sink 适配器：完整 PCM1 帧（16 B 头 + PCM）
@@ -220,28 +320,60 @@ static esp_err_t voice_service_push_file(const char *uri)
     return ESP_OK;
 }
 
-/**
- * Apply the session-local microphone state from the WSS session task.
- *
- * MQTT callers request this through the command queue, but a server text
- * command is already executing in the owning session task.  Applying it here
- * bypasses queued PCM1 frames, so a full audio queue cannot delay or lose
- * MIC_STOP.  Both routes share this one state transition and its UI effects.
- */
-static void voice_service_apply_mic_state(bool enabled)
+/** MIC_START is a semantic utterance start; it also opens PCM upload if needed. */
+static void voice_service_apply_mic_start(void)
+{
+    voice_service_disarm_companion_timer();
+    julia_idle_display_note_activity();
+
+    bool already_listening;
+    bool started_streaming = false;
+    portENTER_CRITICAL(&s_mic_state_lock);
+    already_listening = s_dialog_listening;
+    s_dialog_listening = true;
+    if (!s_mic_streaming) {
+        s_mic_streaming = true;
+        board_audio_mic_wake();
+        board_audio_enable_wss_mic(true);
+        started_streaming = true;
+    }
+    portEXIT_CRITICAL(&s_mic_state_lock);
+
+    julia_idle_display_set_busy(true);
+    if (!already_listening) {
+        /* A wake while S0 first returns to S1.1, then enters S3.3 LISTEN.
+         * This path is intentionally executed even when PCM was already being
+         * uploaded by the companion window. */
+        post_fsm_event(EVT_WAKEUP);
+        post_fsm_event(EVT_USER_CALL);
+    }
+    ESP_LOGI(TAG, "MIC_START: listening%s",
+             started_streaming ? ", PCM upload started" : ", PCM upload already active");
+}
+
+/** MIC_STOP ends the utterance but leaves PCM upload available for the companion window. */
+static void voice_service_apply_mic_stop(void)
 {
     julia_idle_display_note_activity();
-    julia_idle_display_set_busy(enabled);
-    if (s_mic_active == enabled) {
-        ESP_LOGD(TAG, "MIC streaming already %s", enabled ? "enabled" : "disabled");
+
+    bool was_listening;
+    portENTER_CRITICAL(&s_mic_state_lock);
+    was_listening = s_dialog_listening;
+    s_dialog_listening = false;
+    portEXIT_CRITICAL(&s_mic_state_lock);
+
+    if (!was_listening) {
+        ESP_LOGD(TAG, "MIC_STOP ignored: no active utterance");
         return;
     }
 
-    s_mic_active = enabled;
-    board_audio_enable_wss_mic(enabled);
-    julia_avatar_set_dialog_phase(enabled ? JULIA_AVATAR_DIALOG_LISTENING
-                                          : JULIA_AVATAR_DIALOG_THINKING);
-    ESP_LOGI(TAG, "MIC streaming %s", enabled ? "enabled" : "disabled");
+    /* THINK remains busy, while the transport stays open for the eventual
+     * SPKE -> IDLE companion window and server-side dynamic-noise VAD. */
+    julia_idle_display_set_busy(true);
+    if (was_listening) {
+        post_fsm_event(EVT_START_DIALOG);
+    }
+    ESP_LOGI(TAG, "MIC_STOP: utterance ended; PCM upload retained");
 }
 
 /**
@@ -270,11 +402,11 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
     }
 
     if (len == strlen("MIC_START") && memcmp(text, "MIC_START", len) == 0) {
-        voice_service_apply_mic_state(true);
+        voice_service_apply_mic_start();
         return;
     }
     if (len == strlen("MIC_STOP") && memcmp(text, "MIC_STOP", len) == 0) {
-        voice_service_apply_mic_state(false);
+        voice_service_apply_mic_stop();
         return;
     }
 
@@ -287,11 +419,22 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
     if (len == 4 && memcmp(text, "SPKE", 4) == 0) {
         (void)board_audio_speaker_stop();
         julia_avatar_talking_stop();
-        julia_avatar_set_dialog_phase(s_mic_active ? JULIA_AVATAR_DIALOG_LISTENING
-                                                    : JULIA_AVATAR_DIALOG_IDLE);
+        /* End SPEAK semantically but keep continuous PCM available while IDLE.
+         * The server performs dynamic-noise/VAD analysis and sends MIC_START
+         * only after it confirms a new utterance. */
+        portENTER_CRITICAL(&s_mic_state_lock);
+        s_dialog_listening = false;
+        if (s_mic_streaming) {
+            board_audio_mic_wake();
+        }
+        portEXIT_CRITICAL(&s_mic_state_lock);
+        post_fsm_event(EVT_SILENCE_TIMEOUT);
         julia_idle_display_note_activity();
-        julia_idle_display_set_busy(s_mic_active);
-        ESP_LOGI(TAG, "SPKE: speaker stop");
+        julia_idle_display_set_busy(false);
+        if (voice_service_mic_is_streaming()) {
+            voice_service_arm_companion_timer();
+        }
+        ESP_LOGI(TAG, "SPKE: speaker stop, IDLE companion upload retained");
     } else if (len == 4 && memcmp(text, "SPKT", 4) == 0) {
         (void)board_audio_speaker_self_test();
         ESP_LOGI(TAG, "SPKT: local tone test");
@@ -305,7 +448,10 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
         long rate = strtol(buf, &end, 10);
         if (end != buf && board_audio_speaker_start((uint32_t)rate) == ESP_OK) {
             julia_avatar_talking_start();
-            julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_SPEAKING);
+            /* Normal flow is S3.3 -> S4.1 -> S4.3. START_DIALOG is harmless
+             * when MIC_STOP has already advanced the FSM to S4.1. */
+            post_fsm_event(EVT_START_DIALOG);
+            post_fsm_event(EVT_MULTI_TURN_DETECTED);
             julia_idle_display_note_activity();
             julia_idle_display_set_busy(true);
             ESP_LOGI(TAG, "SPKS: speaker start rate=%ld", rate);
@@ -395,13 +541,13 @@ static void voice_service_on_queue_item(void *item, size_t item_size)
         (void)voice_service_push_file((const char *)job->data);
         break;
     case VOICE_JOB_MIC_START:
-        voice_service_apply_mic_state(true);
+        voice_service_apply_mic_start();
         break;
     case VOICE_JOB_MIC_STOP:
-        voice_service_apply_mic_state(false);
+        voice_service_apply_mic_stop();
         break;
     case VOICE_JOB_SEND_CHUNK:
-        if (!s_mic_active) {
+        if (!voice_service_mic_is_streaming()) {
             ESP_LOGW(TAG, "Dropping %u-byte MIC chunk: streaming is not active",
                      (unsigned)job->len);
         } else if (wss_transport_send_now(0x2, job->data, job->len) != ESP_OK) {
@@ -419,11 +565,15 @@ static void voice_service_on_queue_item(void *item, size_t item_size)
  */
 static void voice_service_on_session_end(void)
 {
-    s_mic_active = false;
+    voice_service_disarm_companion_timer();
+    portENTER_CRITICAL(&s_mic_state_lock);
+    s_mic_streaming = false;
+    s_dialog_listening = false;
     board_audio_enable_wss_mic(false);
+    portEXIT_CRITICAL(&s_mic_state_lock);
     (void)board_audio_speaker_stop();
     julia_avatar_talking_stop();
-    julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_IDLE);
+    post_fsm_event(EVT_SILENCE_TIMEOUT);
     julia_idle_display_note_activity();
     julia_idle_display_set_busy(false);
 }
@@ -512,6 +662,17 @@ static void voice_service_on_mqtt_command(const char *cmd, size_t cmd_len)
 
 esp_err_t voice_service_init(void)
 {
+    if (s_companion_timer == NULL) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = voice_service_companion_timeout,
+            .arg = NULL,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "voice_companion",
+            .skip_unhandled_events = true,
+        };
+        ESP_RETURN_ON_ERROR(esp_timer_create(&timer_args, &s_companion_timer),
+                            TAG, "create companion timer");
+    }
     /* 语音 topic 非 critical：语音订阅失败不影响 OTA 连接就绪判定。 */
     return mqtt_comm_register_topic(CONFIG_COMM_MQTT_VOICE_CMD_TOPIC,
                                     VOICE_SERVICE_CMD_MAX_LEN, false,

@@ -220,7 +220,7 @@ menu "Example Configuration"
 
     choice COMM_DEVICE_AUTH_MODE
         prompt "Device authentication mode"
-        default COMM_DEVICE_AUTH_USERNAME_PASSWORD
+        default COMM_DEVICE_AUTH_NONE
         help
             Select the credential carried by the MQTT control connection. Token mode uses
             MQTT username/password fields.
@@ -273,7 +273,7 @@ menu "Example Configuration"
 
     config COMM_MQTT_BROKER_URI
         string "MQTT broker URI"
-        default "mqtt://172.20.10.2:1883"
+        default "mqtt://192.168.137.1:1883"
         help
             MQTT broker URI. Production devices should use mqtts:// and a broker
             certificate trusted by the ESP-IDF certificate bundle.
@@ -350,7 +350,7 @@ menu "Example Configuration"
 
         config WSS_SERVER_HOST
             string "WSS voice server host"
-            default "172.20.10.2"
+            default "192.168.137.1"
             help
                 Host name or IP address of the WSS (WebSocket over TLS) voice streaming
                 server. The server certificate must chain to server_certs/ca_cert.pem.
@@ -533,21 +533,13 @@ menu "Example Configuration"
 
     menu "Julia idle display and wall clock"
 
-        config JULIA_DISPLAY_QUIET_TIMEOUT_SECONDS
-            int "Seconds before quiet display"
-            range 1 3600
-            default 10
-            help
-                Continuous idle time before the breathing backlight fades to the
-                quiet brightness. Voice activity resets this timer.
-
         config JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS
-            int "Seconds before closed-eye breathing"
+            int "Seconds before far standby"
             range 10 86400
             default 300
             help
-                Continuous idle time before the already-closed eyes remain closed and
-                the LCD backlight begins breathing. WakeNet remains active.
+                Continuous idle time before the companion display closes its eyes,
+                begins backlight breathing, and enters S1.2. WakeNet remains active.
 
         config JULIA_DISPLAY_ACTIVITY_POLL_MS
             int "Idle policy polling period (ms)"
@@ -575,6 +567,36 @@ menu "Example Configuration"
             help
                 Restore wall time from PCF85063 at boot and update it after SNTP sync.
                 The RTC shares the existing GPIO10/GPIO11 I2C bus with TCA9554.
+
+        config JULIA_NIGHT_SLEEP_ENABLE
+            bool "Enable RTC-backed night sleep schedule"
+            default y
+            depends on JULIA_RTC_ENABLE
+            help
+                Enter S0.1 night sleep during the configured local-time window and
+                return to S1.1 standby when the window ends. Active dialogue is never
+                interrupted; after a night interaction returns to standby, the schedule
+                re-enters night sleep on its next poll.
+
+        config JULIA_NIGHT_SLEEP_START_HOUR
+            int "Night sleep start hour (local time)"
+            range 0 23
+            default 23
+            depends on JULIA_NIGHT_SLEEP_ENABLE
+
+        config JULIA_NIGHT_SLEEP_END_HOUR
+            int "Night sleep end hour (local time)"
+            range 0 23
+            default 7
+            depends on JULIA_NIGHT_SLEEP_ENABLE
+
+        config JULIA_IMU_MOTION_ENABLE
+            bool "Enable QMI8658 motion wake"
+            default y
+            help
+                Reuse the old project's adjacent-sample acceleration and gyro
+                magnitude detector. Three consecutive motion samples wake far
+                standby or sleep through EVT_USER_RETURN. No SD card is required.
 
         config JULIA_TIMEZONE
             string "POSIX timezone"

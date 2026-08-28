@@ -578,7 +578,7 @@ static julia_sub_state_t handle_state_s3_4(julia_fsm_t *fsm, fsm_event_t evt, vo
  * S4.1 浅对话：对话强度的起步档。
  *   - EVT_DEEP_TALK_DETECTED -> S4_2：对话加深 -> 深谈。
  *   - EVT_MULTI_TURN_DETECTED -> S4_3：进入多轮 -> 多轮对话。
- *   - EVT_INTERRUPT -> S4_4：被打断 -> 打断处理。
+ *   - EVT_INTERRUPT -> S3_3：用户打断后直接让出播报并回到监听。
  *   其余交给 dialog_common（对话如何结束）。
  */
 static julia_sub_state_t handle_state_s4_1(julia_fsm_t *fsm, fsm_event_t evt, void *data)
@@ -592,7 +592,7 @@ static julia_sub_state_t handle_state_s4_1(julia_fsm_t *fsm, fsm_event_t evt, vo
     case EVT_MULTI_TURN_DETECTED:
         return JULIA_SUB_STATE_S4_3_MULTI_TURN;
     case EVT_INTERRUPT:
-        return JULIA_SUB_STATE_S4_4_INTERRUPT_HANDLE;
+        return JULIA_SUB_STATE_S3_3_USER_CALL;
     default:
         return handle_dialog_common(evt);
     }
@@ -601,7 +601,7 @@ static julia_sub_state_t handle_state_s4_1(julia_fsm_t *fsm, fsm_event_t evt, vo
 /*
  * S4.2 深谈：对话已进入较深入的话题。
  *   - EVT_MULTI_TURN_DETECTED -> S4_3：继续加轮次 -> 多轮对话。
- *   - EVT_INTERRUPT -> S4_4：被打断 -> 打断处理。
+ *   - EVT_INTERRUPT -> S3_3：用户打断后直接回到监听。
  *   其余交给 dialog_common。这里不再支持"降回浅对话"（无对应事件），
  *   说明一旦深谈只能顺着走或结束，不会自行变浅。
  */
@@ -614,7 +614,7 @@ static julia_sub_state_t handle_state_s4_2(julia_fsm_t *fsm, fsm_event_t evt, vo
     case EVT_MULTI_TURN_DETECTED:
         return JULIA_SUB_STATE_S4_3_MULTI_TURN;
     case EVT_INTERRUPT:
-        return JULIA_SUB_STATE_S4_4_INTERRUPT_HANDLE;
+        return JULIA_SUB_STATE_S3_3_USER_CALL;
     default:
         return handle_dialog_common(evt);
     }
@@ -623,7 +623,8 @@ static julia_sub_state_t handle_state_s4_2(julia_fsm_t *fsm, fsm_event_t evt, vo
 /*
  * S4.3 多轮对话：对话的"最活跃"档，除了被打断不再升级，其余交给 dialog_common
  * （用户离开/拒绝/敷衍/静默都是结束路径）。DEEP_TALK/MULTI_TURN 在此被忽略，
- * 因为已经是最深档，重复触发没有意义。
+ * 因为已经是最深档，重复触发没有意义。打断作为瞬时事件直接进入 S3.3 LISTEN，
+ * 不在 S4.4 停留；停止扬声器、取消旧回答等动作由语音层在投递事件前完成。
  */
 static julia_sub_state_t handle_state_s4_3(julia_fsm_t *fsm, fsm_event_t evt, void *data)
 {
@@ -632,14 +633,15 @@ static julia_sub_state_t handle_state_s4_3(julia_fsm_t *fsm, fsm_event_t evt, vo
 
     switch (evt) {
     case EVT_INTERRUPT:
-        return JULIA_SUB_STATE_S4_4_INTERRUPT_HANDLE;
+        return JULIA_SUB_STATE_S3_3_USER_CALL;
     default:
         return handle_dialog_common(evt);
     }
 }
 
 /*
- * S4.4 打断处理：对话被中途打断后的恢复档。
+ * S4.4 打断处理：为以后需要等待服务端取消确认等异步恢复过程保留。
+ * 当前最小打断链路不进入此状态，而是由 S4.1~S4.3 直接转到 S3.3。
  *   - EVT_START_DIALOG -> S4_1：用户重新开始 -> 回到浅对话。
  *   其余交给 dialog_common（若用户顺势离开/拒绝/静默则退出对话）。
  */

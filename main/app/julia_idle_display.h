@@ -1,10 +1,10 @@
 /**
  * @file    julia_idle_display.h
- * @brief   Julia 待机显示策略：立绘进入"闭眼 -> 闭眼呼吸"的闲置降级策略。
+ * @brief   Julia 待机显示策略：陪伴常驻，长时间无交互后进入闭眼呼吸。
  *
  * 职责边界：
- *   - 按"距上次用户/语音交互的时长"把显示在 活跃(立绘睁眼) / 安静(闭眼) / 睡眠(闭眼+背光呼吸)
- *     三档之间切换，并驱动屏幕背光进行"呼吸"动画，同时保证 LVGL/背光配合不打扰正在进行的
+ *   - 日常保持活跃陪伴显示；达到长休阈值后一次性切换到睡眠(闭眼+背光呼吸)，
+ *     同时保证 LVGL/背光配合不打扰正在进行的
  *     对话播放。它只处理"屏幕该显示什么闲置状态"，不负责立绘内容本身（那是 julia_avatar/
  *     julia_ui 的职责）。
  *   - 注意与 FSM 的"设备行为状态"解耦：本模块只依据"交互活跃度 + busy 标志"，
@@ -25,7 +25,7 @@
 extern "C" {
 #endif
 
-/** Start the open -> closed-eyes -> closed-eye breathing policy task. */
+/** Start the companion -> far-standby policy task. */
 esp_err_t julia_idle_display_init(void);
 
 /** Record a valid user or voice interaction and wake the display if needed. */

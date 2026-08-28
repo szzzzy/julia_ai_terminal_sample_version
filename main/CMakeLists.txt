@@ -40,9 +40,12 @@ set(srcs
     "hardware/breathing_led.c"
     "hardware/julia_led.c"
     "hardware/pcf85063_shared.c"
+    "hardware/qmi8658_shared.c"
 
     # Local wall-clock restore and SNTP-to-RTC synchronization.
     "context/julia_time.c"
+    "context/julia_night_schedule.c"
+    "context/julia_motion.c"
 
     # L0/L1 display: ST77916 + LVGL + static layered avatar.
     "display/esp_lcd_st77916.c"
@@ -76,6 +79,7 @@ set(srcs
     "audio/audio_service.c"
 
     "fsm/julia_fsm.c"
+    "fsm/julia_fsm_runtime.c"
 
 )
 set(priv_requires

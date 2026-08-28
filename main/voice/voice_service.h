@@ -19,7 +19,8 @@
  *   wss_transport_send_now()；
  * - MIC 上行 PCM1 帧由 board_audio 的 mic_task 经 voice_service_send_chunk() 入队，
  *   实际发送也在会话任务。
- * 会话级状态 s_mic_active 仅由 WSS 会话任务上下文读写。
+ * MIC上传状态与LISTEN语义分离：SPKE后可在IDLE继续上传，服务器确认新一轮
+ * 说话后再以MIC_START驱动LISTEN。
  */
 #pragma once
 
@@ -91,8 +92,8 @@ esp_err_t voice_service_send_file(const char *uri);
 /**
  * @brief 发送一个 MIC 音频块（流式预留接口）。
  *
- * 每个块封装为一个二进制 WebSocket 帧；仅在 WSS 会话已建立且
- * voice_service_mic_start() 已生效时真正发送，否则该块被丢弃并记录日志。
+ * 每个块封装为一个二进制 WebSocket 帧；仅在 WSS 会话已建立且PCM上传窗口
+ * 已开启时真正发送，否则该块被丢弃并记录日志。
  *
  * @param[in] buf 音频数据首地址，不允许为 NULL。
  * @param[in] len 数据长度，1～1200 字节。
@@ -106,21 +107,20 @@ esp_err_t voice_service_send_file(const char *uri);
 esp_err_t voice_service_send_chunk(const uint8_t *buf, size_t len);
 
 /**
- * @brief 开启 MIC 流式发送状态（对应 MIC_START 语音命令）。
+ * @brief 确认用户开始一轮说话（对应 MIC_START 语音命令）。
  *
- * 命令仅入队，真正生效在 WSS 会话任务（voice_service_apply_mic_state）。
- * 该状态转换幂等：s_mic_active 已为 true 时重复 MIC_START 为无操作。
- * 生效后 board_audio 的 MIC 上行被启用，UI 切到 LISTENING。
+ * 命令仅入队，真正生效在 WSS 会话任务。若PCM尚未上传则同时开启；若已处于
+ * SPKE后的陪伴上传窗口，也仍会驱动UI/FSM进入LISTEN，而不是因上传已开启而忽略。
  *
  * @return ESP_OK 命令已入队；ESP_ERR_NO_MEM 命令队列已满；ESP_ERR_INVALID_STATE 尚未启动。
  */
 esp_err_t voice_service_mic_start(void);
 
 /**
- * @brief 关闭 MIC 流式发送状态（对应 MIC_STOP 语音命令）。
+ * @brief 确认当前一轮用户说话结束（对应 MIC_STOP 语音命令）。
  *
- * 命令仅入队，真正生效在 WSS 会话任务（voice_service_apply_mic_state）。
- * 幂等：已为 false 时重复 MIC_STOP 为无操作。生效后 MIC 上行关闭，UI 切到 THINKING。
+ * 命令仅结束LISTEN并驱动THINK，不关闭PCM上传。SPKE后固件回到IDLE并维持
+ * 最多五分钟陪伴上传；超时后才关闭上传并由闲置策略进入S1.2。
  *
  * @return ESP_OK 命令已入队；ESP_ERR_NO_MEM 命令队列已满；ESP_ERR_INVALID_STATE 尚未启动。
  */

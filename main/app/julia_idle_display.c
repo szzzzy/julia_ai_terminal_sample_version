@@ -1,6 +1,6 @@
 /**
  * @file    julia_idle_display.c
- * @brief   待机显示策略实现：三档闲置降级（睁眼活跃 / 闭眼安静 / 闭眼+背光呼吸睡眠）。
+ * @brief   待机显示策略实现：陪伴常驻，五分钟无交互后进入远场待机。
  *
  * 职责边界：
  *   - 唯一职责是依据"距最近交互的时长 + busy 标志"推进显示档位，并在每档切换时
@@ -25,15 +25,15 @@
 #include "freertos/task.h"
 #include "julia_backlight.h"
 #include "julia_avatar.h"
+#include "julia_fsm_runtime.h"
 #include "sdkconfig.h"
 
 #define DISPLAY_THEME_TASK_STACK_SIZE 3072
 #define DISPLAY_THEME_TASK_PRIORITY   3
 
-/* 显示闲置三档：数值递增对应"越来越安静"，也是本模块的核心状态机。 */
+/* 显示闲置两档：日常保持陪伴显示，达到长休阈值才进入远场待机。 */
 typedef enum {
     DISPLAY_ACTIVITY_ACTIVE = 0,   ///< 活跃：立绘睁眼、背光 100%。
-    DISPLAY_ACTIVITY_QUIET,        ///< 安静：立绘闭眼（背光保持 100%）。
     DISPLAY_ACTIVITY_SLEEP,        ///< 睡眠：立绘闭眼 + 背光低暗呼吸。
 } display_activity_state_t;
 
@@ -44,6 +44,15 @@ static int64_t s_last_activity_us;                      /* 最近一次用户/�
 static bool s_busy;                                     /* 当前是否处于听-想-说的"占屏"期。 */
 static display_activity_state_t s_state = DISPLAY_ACTIVITY_ACTIVE; /* 当前显示档位。 */
 static uint32_t s_generation;                            /* 档位代次：每次状态变化自增，用于并发赶超校验。 */
+
+static void post_fsm_event(fsm_event_t event)
+{
+    esp_err_t err = julia_fsm_runtime_post(event);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "FSM event %s rejected: %s", julia_fsm_event_name(event),
+                 esp_err_to_name(err));
+    }
+}
 
 /*
  * 判断"要执行的某档推进是否仍是最新"。
@@ -72,24 +81,6 @@ static void display_restore(void)
 }
 
 /*
- * 进入"安静"档：令立绘闭眼，背光保持 100%（即只闭眼、不调背光）。
- * 两层 transition_is_current 校验：进入前先确认档位仍是最新，动作后再复查，
- * 若期间已被唤醒/置忙（state/generation 变了）则回滚到 restore，
- * 避免"闭眼动作覆盖了刚被唤醒的睁眼状态"。
- */
-static void display_enter_quiet(uint32_t generation)
-{
-    if (!transition_is_current(DISPLAY_ACTIVITY_QUIET, generation)) return;
-    julia_avatar_set_dozing(true);
-    if (!transition_is_current(DISPLAY_ACTIVITY_QUIET, generation)) {
-        display_restore();
-        return;
-    }
-    ESP_LOGI(TAG, "eyes closed after %d seconds",
-             CONFIG_JULIA_DISPLAY_QUIET_TIMEOUT_SECONDS);
-}
-
-/*
  * 进入"睡眠"档：立绘闭眼 + 背光进入低暗呼吸（用配置的最小/最大亮度与周期）。
  * 呼吸启动失败只打警告、不阻断进入睡眠（视觉上仍闭眼，只是没有呼吸动画）。
  * 同样带两层 generation 校验，捕获与唤醒的竞争。
@@ -109,6 +100,9 @@ static void display_enter_sleep(uint32_t generation)
         display_restore();
         return;
     }
+    /* Five ordinary idle minutes mean far standby (S1.2), not night sleep.
+     * The RTC-backed night scheduler is the only time-based S0.1 source. */
+    post_fsm_event(EVT_USER_LEAVE);
     ESP_LOGI(TAG, "closed-eye breathing after %d seconds",
              CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS);
 }
@@ -116,10 +110,9 @@ static void display_enter_sleep(uint32_t generation)
 /*
  * 后台轮询任务：周期性检查"闲置时长"，推动显示档位。优先级 3、栈 3072B。
  * 每次轮询先读一份共享快照（在锁内拷贝），再据此判断，避免长时间持锁。
- * 推进规则（两个 if 互斥，先判更深的 sleep）：
- *   - 空闲 >= sleep 阈值 且当前不是 sleep 且不忙 -> 进入 sleep（闭眼+呼吸）。
- *   - 否则若空闲 >= quiet 阈值 且当前是 ACTIVE 且不忙 -> 进入 quiet（闭眼）。
- *   处于 QUIT/SLEEP 时即使继续空闲也不重复推进（已是最安静档）。
+ * 推进规则：空闲 >= sleep 阈值 且当前不是 sleep 且不忙 -> 进入远场待机
+ * （闭眼+呼吸）。阈值前始终保持 ACTIVE 陪伴显示，不再经过短暂停档。
+ * 处于 SLEEP 时即使继续空闲也不重复推进。
  *   忙（busy）时一律不推进 —— 正在听/想/说，屏幕必须保持活跃。
  * 每次进入之前都在临界区内"按当前快照重新确认 + 更新 state + 提升 generation"，
  * 保证与并发 note_activity/set_busy 的竞态能被 generation 机制察觉。
@@ -127,8 +120,6 @@ static void display_enter_sleep(uint32_t generation)
 static void display_theme_task(void *argument)
 {
     (void)argument;
-    const int64_t quiet_us =
-        (int64_t)CONFIG_JULIA_DISPLAY_QUIET_TIMEOUT_SECONDS * 1000000LL;
     const int64_t sleep_us =
         (int64_t)CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS * 1000000LL;
 
@@ -160,20 +151,6 @@ static void display_theme_task(void *argument)
                 portEXIT_CRITICAL(&s_lock);
                 if (enter) {
                     display_enter_sleep(generation);
-                }
-            } else if (idle_us >= quiet_us && state == DISPLAY_ACTIVITY_ACTIVE) {
-                bool enter = false;
-                uint32_t generation = 0;
-                /* 申请进入 quiet：同样在锁内复核 + 更新。 */
-                portENTER_CRITICAL(&s_lock);
-                if (!s_busy && s_state == DISPLAY_ACTIVITY_ACTIVE) {
-                    s_state = DISPLAY_ACTIVITY_QUIET;
-                    generation = ++s_generation;
-                    enter = true;
-                }
-                portEXIT_CRITICAL(&s_lock);
-                if (enter) {
-                    display_enter_quiet(generation);
                 }
             }
         }
@@ -208,8 +185,7 @@ esp_err_t julia_idle_display_init(void)
         s_task = NULL;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "ready quiet=%ds sleep=%ds poll=%dms",
-             CONFIG_JULIA_DISPLAY_QUIET_TIMEOUT_SECONDS,
+    ESP_LOGI(TAG, "ready companion->far-standby=%ds poll=%dms",
              CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS,
              CONFIG_JULIA_DISPLAY_ACTIVITY_POLL_MS);
     return ESP_OK;
@@ -218,9 +194,9 @@ esp_err_t julia_idle_display_init(void)
 /*
  * @brief 记录一次有效交互，并把显示唤醒回 ACTIVE。
  * 调用上下文：任何用户/语音交互点（如唤醒词、语音会话、按键）。
- * 副作用：刷新 last_activity、置 ACTIVE、抬 generation；若之前处于 quiet/sleep
+ * 副作用：刷新 last_activity、置 ACTIVE、抬 generation；若之前处于 sleep
  *         则调用 display_restore() 恢复睁眼+满背光。
- * 并发：在锁内更新共享状态，抬 generation 使可能正在进行的"进入 sleep/quiet"推进失效。
+ * 并发：在锁内更新共享状态，抬 generation 使可能正在进行的"进入 sleep"推进失效。
  */
 void julia_idle_display_note_activity(void)
 {
@@ -234,8 +210,8 @@ void julia_idle_display_note_activity(void)
 
     if (previous != DISPLAY_ACTIVITY_ACTIVE) {
         display_restore();
-        ESP_LOGI(TAG, "activity restored display from %s",
-                 previous == DISPLAY_ACTIVITY_SLEEP ? "sleep" : "quiet");
+        post_fsm_event(EVT_WAKEUP);
+        ESP_LOGI(TAG, "activity restored display from far standby");
     }
 }
 
@@ -258,6 +234,7 @@ void julia_idle_display_set_busy(bool busy)
 
     if (previous != DISPLAY_ACTIVITY_ACTIVE) {
         display_restore();
+        post_fsm_event(EVT_WAKEUP);
     }
 }
 

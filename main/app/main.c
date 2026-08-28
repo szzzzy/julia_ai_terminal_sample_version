@@ -10,6 +10,8 @@
 #include "audio_service.h"
 #include "board_audio.h"
 #include "julia_avatar.h"
+#include "julia_night_schedule.h"
+#include "julia_motion.h"
 #include "julia_time.h"
 #include "julia_display.h"
 #include "julia_idle_display.h"
@@ -21,6 +23,7 @@
 #include "wake_detector.h"
 #include "julia_backlight.h"
 #include "julia_fsm.h"
+#include "julia_fsm_runtime.h"
 #if CONFIG_VOICE_PUSH_DEMO_ENABLE
 #include "voice_push_demo.h"
 #endif
@@ -40,6 +43,35 @@ void app_main(void)
     ota_boot_flow_run();
 
     esp_err_t err;
+    /* Boot presentation is deliberately outside the behaviour FSM. Only the
+     * minimum display stack is brought up first; all voice/network/context
+     * services start after the one-shot eye sequence has completed. */
+    err = julia_backlight_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Julia backlight init failed: %s", esp_err_to_name(err));
+    }
+    err = julia_display_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Julia display init failed: %s", esp_err_to_name(err));
+    } else {
+        err = julia_avatar_init();
+        if (err == ESP_OK) {
+            esp_err_t boot_err = julia_avatar_play_boot_sequence();
+            if (boot_err != ESP_OK) {
+                ESP_LOGW(TAG, "Julia boot eye sequence incomplete: %s",
+                         esp_err_to_name(boot_err));
+                julia_backlight_set(100);
+            }
+            err = julia_idle_display_init();
+            if (err != ESP_OK) {
+                julia_backlight_set(100);
+            }
+        }
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Julia avatar init failed: %s", esp_err_to_name(err));
+        }
+    }
+
     /* 语音服务装配：注册 MQTT 语音命令 topic（非 critical，不影响 OTA 就绪）。
      * WSS 客户端不在此启动：取得 IPv4 后由下方注册的 ip_ready 回调启动。 */
     err = voice_service_init();
@@ -56,27 +88,12 @@ void app_main(void)
             ESP_LOGW(TAG, "Voice-board audio wiring failed: %s", esp_err_to_name(err));
         }
     }
-    /* L0/L1 UI is local and non-critical: display failure must not regress
-     * voice, OTA, MQTT, or Wi-Fi startup.  The backlight is enabled only after
-     * the first complete portrait has been rendered. */
-    err = julia_backlight_init();
+
+    /* The existing 6-main/20-sub-state FSM is the sole behaviour-state owner.
+     * States without phase-one artwork safely fall back to the default portrait. */
+    err = julia_fsm_runtime_init();
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Julia backlight init failed: %s", esp_err_to_name(err));
-    }
-    err = julia_display_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Julia display init failed: %s", esp_err_to_name(err));
-    } else {
-        err = julia_avatar_init();
-        if (err == ESP_OK) {
-            err = julia_idle_display_init();
-            if (err != ESP_OK) {
-                julia_backlight_set(100);
-            }
-        }
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Julia avatar init failed: %s", esp_err_to_name(err));
-        }
+        ESP_LOGW(TAG, "Julia FSM runtime init failed: %s", esp_err_to_name(err));
     }
 
     /* 本地唤醒词（WakeNet "你好小智"）：检测到后自动 MIC_START 推流。
@@ -97,6 +114,18 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Julia time context init failed: %s", esp_err_to_name(err));
     }
+#if CONFIG_JULIA_NIGHT_SLEEP_ENABLE
+    err = julia_night_schedule_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Night sleep schedule init failed: %s", esp_err_to_name(err));
+    }
+#endif
+#if CONFIG_JULIA_IMU_MOTION_ENABLE
+    err = julia_motion_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "IMU motion detector init failed: %s", esp_err_to_name(err));
+    }
+#endif
 
     /* SD 卡（SPI，FAT 挂载到 /sdcard）：供 voice_service 的 "SD:/<name>" 文件
      * 推送与显式传输演示使用；不依赖网络，挂载失败会自动重试。 */

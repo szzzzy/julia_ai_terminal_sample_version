@@ -129,9 +129,11 @@ static void wake_detect_task(void *arg)
         int64_t now_us = esp_timer_get_time();
         /* 冷却判定：避免唤醒词-播放-回声形成无限自触发循环。 */
         if (result->wakeup_state == WAKENET_DETECTED &&
+            result->vad_state == AFE_VAD_SPEECH &&
             now_us >= s_wake_cooldown_until_us) {
             s_wake_cooldown_until_us = now_us + WAKE_COOLDOWN_US;
-            ESP_LOGI(TAG, "Wake word detected [%s]", WAKE_WORD_DISPLAY_TEXT);
+            ESP_LOGI(TAG, "Wake word detected [%s] vad=speech volume=%.1fdB",
+                     WAKE_WORD_DISPLAY_TEXT, (double)result->data_volume);
             julia_idle_display_note_activity();
             julia_idle_display_set_busy(true);
             /* 形态 1：本地唤醒 → 自动开麦推流，服务器负责 ASR/LLM/TTS。 */
@@ -171,15 +173,17 @@ esp_err_t wake_detector_init(void)
     char *wake_model = esp_srmodel_filter(models, ESP_WN_PREFIX, WAKE_WORD_MODEL_NAME);
     ESP_RETURN_ON_FALSE(wake_model, ESP_ERR_NOT_FOUND, TAG, "WakeNet model unavailable");
 
-    /* AFE 配置：单麦、无回声(AEC)/无分离(SE)，只保留 WakeNet + VAD；
-     * VAD 用较宽松的 mode 0，避免在特定壳子/外壳下把正常语音当噪声拒绝。 */
+    /* AFE 配置：单麦、无回声(AEC)/无分离(SE)，只保留 WakeNet + VAD。
+     * 实机上 VAD mode 2/3 会漏掉正常唤醒词，因此 VAD 保持最宽松的 mode 0；
+     * WakeNet 仍使用 normal DET_MODE_90，并在检测任务中要求二者同时命中，
+     * 比旧的 VAD_MODE_0 + aggressive DET_MODE_95 更能抑制环境噪声误唤醒。 */
     afe_config_t config = AFE_CONFIG_DEFAULT();
     config.aec_init = false; config.se_init = false;
     config.vad_init = true; config.wakenet_init = true;
     config.vad_mode = VAD_MODE_0;
     config.wakenet_model_name = wake_model;
     config.afe_ringbuf_size = 50;
-    config.wakenet_mode = DET_MODE_95;
+    config.wakenet_mode = DET_MODE_90;
     config.pcm_config.total_ch_num = 1;
     config.pcm_config.mic_num = 1;
     config.pcm_config.ref_num = 0;

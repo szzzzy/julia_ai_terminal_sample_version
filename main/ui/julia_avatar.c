@@ -5,7 +5,7 @@
  * 模块职责与边界：
  *   - 本模块是"当前运行时真正生效"的 L1 立绘链路（app_main 经 julia_display_init()+
  *     julia_avatar_init() 启动）。它构建 Julia 静态立绘，并按"对话相位"
- *     （IDLE/LISTENING/THINKING/SPEAKING）在底图上切换 LISTEN/THINK/SPEAK 相位帧，
+ *     （IDLE/LISTENING/THINKING/SPEAKING）使用统一稳定底图，以眼睛开合区分相位，
  *     同时用 RMS 驱动 4 档嘴型，并运行一个"微动"任务（眨眼/呼吸由微动层承担）。
  *   - 与之相对：julia_ui.c 是 fused 遗留的总控（不参与当前构建）；julia_backlight 管
  *     背光；julia_display_theme（或 app/julia_idle_display.c）管显示功率/息屏。
@@ -33,6 +33,7 @@
 #include <stdint.h>
 
 #include "avatar_rle.h"
+#include "esp_check.h"
 #include "esp_crc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -48,6 +49,7 @@
 #include "avatar_face_doze.h"
 #include "avatar_eyes.h"
 #include "avatar_mouth.h"
+#include "julia_backlight.h"
 #include "lvgl_port.h"
 
 #define AVATAR_UPDATE_MS          40U
@@ -59,6 +61,9 @@
 #define AVATAR_FRAME_HEIGHT        360U
 #define AVATAR_FRAME_PIXELS        (AVATAR_FRAME_WIDTH * AVATAR_FRAME_HEIGHT)
 #define AVATAR_FRAME_BYTES         (AVATAR_FRAME_PIXELS * sizeof(uint16_t))
+#define BOOT_BLINK_COUNT            8U
+#define BOOT_BLINK_OPEN_MS          255U
+#define BOOT_BLINK_CLOSED_MS        120U
 
 /* Transforming the 360x360 root invalidates the complete display on every
  * animation tick.  On the QSPI panel that frame is committed in ten strips,
@@ -84,6 +89,7 @@ static bool s_dozing;
 static julia_avatar_dialog_phase_t s_applied_dialog_phase =
     (julia_avatar_dialog_phase_t)(JULIA_AVATAR_DIALOG_SPEAKING + 1);
 static portMUX_TYPE s_phase_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_boot_sequence_played;
 
 /* 嵌入的相位帧二进制导出符号（链接器按 EMBED_FILES 生成 _binary_*_start/end）。
  * 每个相位一张 360x360 RGB565 帧，用项目自有 RLE 压缩后嵌入固件。 */
@@ -107,7 +113,7 @@ typedef struct {
     lv_img_dsc_t image;
 } avatar_phase_frame_t;
 
-static avatar_phase_frame_t s_phase_frames[] = {
+static avatar_phase_frame_t s_phase_frames[] __attribute__((unused)) = {
     [JULIA_AVATAR_DIALOG_LISTENING - 1] = {
         .name = "LISTEN", .compressed_start = LISTEN_bin_start, .compressed_end = LISTEN_bin_end,
         .expected_crc = 0x122fda66U,
@@ -146,7 +152,7 @@ static bool dialog_phase_is_current(julia_avatar_dialog_phase_t phase)
 /* 确保某相位帧已解码：首次调用时分配 PSRAM 缓冲并 RLE 解压、校验 CRC32；
  * 之后直接返回缓存。用 loading 标志防止并发重复解码。解码结果写入 frame->pixels/
  * image。失败时回退到静态立绘（返回值 false，由调用方决定替代源）。 */
-static bool avatar_phase_frame_ensure(avatar_phase_frame_t *frame)
+static bool __attribute__((unused)) avatar_phase_frame_ensure(avatar_phase_frame_t *frame)
 {
     if (frame == NULL) return false;
 
@@ -198,16 +204,25 @@ static bool avatar_phase_frame_ensure(avatar_phase_frame_t *frame)
     return true;
 }
 
-/* 取某相位对应的底图源：IDLE 或越界相位用静态待机立绘；其他相位用 RLE 相位帧
- * （解码失败回退静态立绘）。返回的 lv_img_dsc_t 不缓存到调用方，避免悬垂引用。 */
+/* 当前演示链统一使用与眼/嘴固定坐标严格对齐的 S1.1 稳定底图。
+ * 旧 LISTEN/THINK/SPEAK RLE 帧继续保留在项目内，后续重新校准五官坐标后可恢复。 */
 static const lv_img_dsc_t *avatar_source_for_phase(julia_avatar_dialog_phase_t phase)
 {
-    if (phase == JULIA_AVATAR_DIALOG_IDLE ||
-        phase < JULIA_AVATAR_DIALOG_IDLE || phase > JULIA_AVATAR_DIALOG_SPEAKING) {
-        return &avatar_asset_julia_s1_1_near_standby;
-    }
-    avatar_phase_frame_t *frame = &s_phase_frames[phase - 1];
-    return avatar_phase_frame_ensure(frame) ? &frame->image : &avatar_asset_julia_s1_1_near_standby;
+    (void)phase;
+    return &avatar_asset_julia_s1_1_near_standby;
+}
+
+/* Dialogue presentation expressed only through the calibrated eye layer:
+ * IDLE=random blink, LISTEN=held closed, THINK=held open, SPEAK=held closed.
+ * Mouth movement remains exclusively controlled by talking_start/feed_pcm. */
+static void avatar_apply_phase_eyes(julia_avatar_dialog_phase_t phase)
+{
+    bool closed = phase == JULIA_AVATAR_DIALOG_LISTENING ||
+                  phase == JULIA_AVATAR_DIALOG_SPEAKING;
+    uint8_t eye_main_state = phase == JULIA_AVATAR_DIALOG_IDLE ? 1U :
+                             phase == JULIA_AVATAR_DIALOG_LISTENING ? 3U : 4U;
+    avatar_eyes_set_idle_closed(closed);
+    avatar_eyes_set_state(eye_main_state);
 }
 
 /* 把某对话框相位应用到底图。解开锁后由 WSS 任务调用，也可能在 avatar_l1 任务中触发。
@@ -242,6 +257,9 @@ static bool avatar_apply_dialog_phase(julia_avatar_dialog_phase_t phase)
         portEXIT_CRITICAL(&s_phase_lock);
     }
     lvgl_port_unlock();
+    if (applied && dialog_phase_is_current(phase)) {
+        avatar_apply_phase_eyes(phase);
+    }
     return applied;
 }
 
@@ -282,6 +300,7 @@ void julia_avatar_set_dozing(bool active)
         portENTER_CRITICAL(&s_phase_lock);
         s_applied_dialog_phase = phase;
         portEXIT_CRITICAL(&s_phase_lock);
+        avatar_apply_phase_eyes(phase);
     }
     ESP_LOGI(TAG, "portrait=%s", active ? "sleep" : dialog_phase_name(phase));
 }
@@ -541,4 +560,65 @@ esp_err_t julia_avatar_init(void)
 bool julia_avatar_is_ready(void)
 {
     return s_ready;
+}
+
+static esp_err_t boot_eye_frame(avatar_eyes_frame_t frame, uint32_t hold_ms)
+{
+    avatar_eyes_show(frame);
+    esp_err_t err = lvgl_port_refr_now_sync(pdMS_TO_TICKS(500));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Boot eye frame %u refresh failed: %s", (unsigned)frame,
+                 esp_err_to_name(err));
+        return err;
+    }
+    if (hold_ms > 0U) {
+        vTaskDelay(pdMS_TO_TICKS(hold_ms));
+    }
+    return ESP_OK;
+}
+
+esp_err_t julia_avatar_play_boot_sequence(void)
+{
+    if (s_boot_sequence_played) {
+        return ESP_OK;
+    }
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Hold off the random blink task for the complete deterministic sequence.
+     * The backlight is still at 0 here, so the first visible frame is closed. */
+    avatar_eyes_set_idle_closed(true);
+    ESP_RETURN_ON_ERROR(lvgl_port_refr_now_sync(pdMS_TO_TICKS(500)),
+                        TAG, "refresh closed boot frame");
+
+    esp_err_t fade_err = julia_backlight_fade_to(100, 300);
+    if (fade_err == ESP_OK) {
+        fade_err = julia_backlight_wait_fade(500);
+    }
+    if (fade_err != ESP_OK) {
+        ESP_LOGW(TAG, "Boot backlight fade failed: %s; using full brightness",
+                 esp_err_to_name(fade_err));
+        julia_backlight_set(100);
+    }
+    esp_err_t sequence_err = ESP_OK;
+    for (unsigned i = 0; i < BOOT_BLINK_COUNT; ++i) {
+        if (boot_eye_frame(AVATAR_EYES_OPEN, BOOT_BLINK_OPEN_MS) != ESP_OK) {
+            sequence_err = ESP_FAIL;
+        }
+        if (boot_eye_frame(AVATAR_EYES_CLOSED, BOOT_BLINK_CLOSED_MS) != ESP_OK) {
+            sequence_err = ESP_FAIL;
+        }
+    }
+
+    /* Releasing idle_closed also applies the final open frame and lets the
+     * existing 3-8 second random blink task resume normally. */
+    avatar_eyes_set_idle_closed(false);
+    if (lvgl_port_refr_now_sync(pdMS_TO_TICKS(500)) != ESP_OK) {
+        sequence_err = ESP_FAIL;
+    }
+    s_boot_sequence_played = true;
+    ESP_LOGI(TAG, "Boot eye sequence complete: %u rapid blinks in about 3 seconds",
+             (unsigned)BOOT_BLINK_COUNT);
+    return sequence_err;
 }
