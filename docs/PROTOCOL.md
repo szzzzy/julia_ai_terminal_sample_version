@@ -1,226 +1,287 @@
-# Julia Fused-Base 通信协议（设备侧实际实现，服务器对接用）
+# 设备通信协议
 
-> 适用固件：`julia-fused-base`（模块化 OTA + 最小包音频 + 本地唤醒词）。
-> 本文件逐条对应设备代码实现，服务器按此收发即可联调。
-> 与旧版 GitHub 文档的差异（融合后）：**本地唤醒词触发 MIC_START**、WSS 下行 binary PCM 现已接通、AUTH 用 token。
+文档版本：V1.0。本文描述当前设备实现，供服务器联调使用。身份与版本基线见 [构建与发布](BUILD_AND_RELEASE.md)，限制与验证分别见 [工程边界](COMMENT_AUDIT_FINDINGS.md) 和 [验收清单](VALIDATION.md)。
 
----
+## 1. 通道与职责
 
-## 0. 架构总览
+| 通道 | 设备侧用途 | 当前连接方式 |
+| --- | --- | --- |
+| MQTT | OTA 检查、响应、通知、状态，以及三类语音作业命令 | `CONFIG_COMM_MQTT_BROKER_URI`；开发配置为 `mqtt://`，不加密 |
+| WSS | MIC PCM1 上行、PCM 下行、语音控制和 WAV 文件外发 | TLS + WebSocket，Bearer 认证头 |
+| HTTPS | 下载 OTA 镜像 | 清单中的 `url`，内嵌根证书 |
 
-```
-设备                                             服务器
-├─ WiFi STA → IPv4
-├─ MQTT 控制面 (mqtt://<addr>:1883, TLS)
-│    ├─ 主动规则检查/语音命令/状态上报
-│    └─ 接收 ota_notify / ota_check_response / voice 命令
-└─ WSS 语音面 (wss://<addr>:9443/voice, Bearer)
-     ├─ 上行: PCM1 帧 (16B头+640B PCM=656B/20ms)、FILE_SEND 文件推送
-     └─ 下行: 文本命令 (SPKS/SPKV/SPKE/SPKT/MICS/MICW/FILE_SEND/MIC_START/MIC_STOP)
-              + 二进制 PCM (先 SPKS 后写扬声器)
-```
+MQTT 与 WSS 各自配置地址，不存在统一的 `JULIA_SERVER_ADDR` 配置项。MQTT 语音命令集小于 WSS，二者不能互相替代。
 
----
+## 2. WSS 建连与消息
 
-## 1. WSS 语音面（重点）
+地址由 `CONFIG_WSS_SERVER_HOST`、`CONFIG_WSS_SERVER_PORT`、`CONFIG_WSS_PATH` 组成，端口默认 9443，路径默认 `/voice`。
 
-### 1.1 连接
+设备发送 `Authorization: Bearer <token>`，token 优先取 `CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE`，为空时取 `CONFIG_WSS_TOKEN`。该选择独立于 MQTT 的认证模式；空 token 不在本地拒绝，服务器应负责拒绝无效认证。
 
-| 项 | 值 |
-|---|---|
-| URL | `wss://<JULIA_SERVER_ADDR>:<WSS_SERVER_PORT>/<WSS_PATH>`；默认端口 `9443`、路径 `/voice` |
-| 鉴权 | HTTP 升级请求头 `Authorization: Bearer <token>` ；token 取值：`COMM_DEVICE_AUTH_TOKEN_VALUE` 优先，空则 `WSS_TOKEN` |
-| 保活 | 客户端每 **15s** 发 PING 帧；10s 未收到 PONG → 判死重连（重连间隔 **5s**） |
-| 帧 | RFC 6455；单帧载荷 **≤1200B**；opcode 0x1=文本、0x2=二进制 |
+WSS 使用 `server_certs/ca_cert.pem` 验证证书链；当前传输实现设置 `skip_common_name=true`，跳过服务器名称校验。此行为属于开发安全限制，不应描述为完整服务器身份校验。
 
-### 1.2 设备 → 服务器（WSS 上行 binary）
+| 项目 | 实现约束 |
+| --- | --- |
+| 文本／二进制 opcode | `0x1`／`0x2` |
+| 单帧载荷 | 最多 1200 字节 |
+| 分片消息 | 支持 continuation 重组；完整消息合计也最多 1200 字节 |
+| 控制帧 | 不得分片，载荷最多 125 字节 |
+| 服务端帧 | 不带掩码，不使用未协商的扩展位 |
+| 文本编码 | UTF-8；每条文本消息只放一个命令，建议不带行尾换行 |
+| 保活 | 空闲接收时检查 PING；默认间隔 15 秒 |
+| 断链判定 | 发出 PING 后默认 10 秒未收到下行帧；任意合法下行帧均可清除等待状态，不限 PONG |
+| 重连 | 默认等待 5 秒后再次连接 |
 
-**① MIC 音频流（PCM1 帧）**——`MIC_START` 命令生效后每 20ms 一帧：
+连接、传输和业务回调在单一会话任务内串行执行，阻塞业务可能延迟保活处理。TCP／TLS 在线不表示 ASR 或回答生成仍正常。
 
-```
-长度：16B 头 + 640B PCM = 656B（一个 WSS binary 帧，恒定）
-头（全部小端）：
-  [0..3]   "PCM1"                     魔数
-  [4..7]   seq,    uint32 LE          帧序号（每开麦递增，不断帧）
-  [8..9]   bytes,  uint16 LE          本帧 PCM 字节数（恒 640）
-  [10..11] level,  int16  LE          dBFS×100（如 -6000 = -60.00dBFS）
-  [12..14] 保留 = 0
-  [15]     sum8,   uint8              PCM 数据逐字节和 mod 256
-正文：320 × int16 LE = mono PCM16 @ 16kHz
-```
+## 3. MIC 上行与对话语义
 
-服务器校验建议：`seq` 连续、`[15]` 求和一致、`level` 随环境变化；异常可丢弃该帧不断链。
+### 3.1 唤醒模式
 
-**② FILE_SEND 文件推送（服务器先发 `FILE_SEND <uri>` 触发）**：
+`CONFIG_JULIA_SERVER_WAKE_ENABLE=y` 为默认模式：WSS 会话建立后立即打开持续上传，界面保持待机。服务器检测唤醒或确认新的用户话语后发送 `MIC_START`。
 
-```
-设备发送序列：
-  文本帧(0x1): "BEGIN FILE <size> <name>"
-  二进制帧 ×N(0x2): 文件内容，每帧 ≤1200B
-  文本帧(0x1): "END <bytes>"            —— 总字节数确认
-失败状态（文本帧 0x1）:
-  "ERROR bad_uri" | "ERROR bad_extension" | "ERROR file_open_failed"
-  | "ERROR sd_busy" | "ERROR file_size_failed" | "ERROR file_name_too_long"
-```
+关闭该开关时，设备编译本地 WakeNet，模型名称为 `wn9_nihaoxiaozhi_tts`、显示唤醒词为“你好小智”。本地命中后请求打开上传；该动作不是向服务器发送一条 `MIC_START` 文本。模型是否已正确烧入 `model` 分区必须单独验证。两种模式是编译选择，没有自动断网切换。
 
-规则：URI `SD:/x/y` → `/sdcard/x/y`、`SPIFFS:/x/y` → `/spiffs/x/y`；**仅 `.wav`**；单文件 ≤ **8MiB**；中途任何失败→断链重连（**绝不发截断的 END**）。
+语义边界：
 
-### 1.3 服务器 → 设备（WSS 下行）
+- `MIC_START`：确认进入听音，必要时打开上传，并停止当前扬声器播放。
+- `MIC_STOP`：确认当前话语结束，进入思考；保留音频上传。
+- `SPKE`：结束播放，正常对话回到待机；默认服务器唤醒模式继续上传。
+- 本地唤醒模式在 `SPKE` 后启动陪伴上传计时，默认 300 秒无后续对话时停止上传。
+- `MIC_STOP`、闭眼表情、夜间状态均不是隐私静音命令。
+- 会话结束时关闭上传、停止播放并清除监听／忙碌状态；新的会话按所选唤醒模式启动。
 
-**文本命令**（0x1，与 MQTT `vcmd` 同一语法）：
+### 3.2 PCM1 格式
 
-| 命令 | 作用 | 设备行为 |
-|---|---|---|
-| `FILE_SEND <uri>` | 让设备把 `<uri>` 的 wav 推回服务器 | 见 1.2-② |
-| `MIC_START` | 开 MIC 流式上传 | WSS 会话任务直接执行与 MQTT 作业共用的状态转换，不与 PCM1 队列竞争；实际启用后 UI → `LISTENING`（重复命令幂等） |
-| `MIC_STOP` | 关 MIC 流式上传 | WSS 会话任务直接执行与 MQTT 作业共用的状态转换，不与 PCM1 队列竞争；实际关闭后 UI → `THINKING`（重复命令幂等） |
-| `MICS <bg>` | 休眠触发上传（bg=-10000~0，dBFS×100） | 仅电平>背景+5dB 才发帧（带预录缓冲） |
-| `MICW` | 恢复持续上传 | 退出休眠模式 |
-| `SPKS <rate>` | 扬声器开始播放（rate 采样率，如 16000/24000） | **必须最先发**，否则下行 PCM 被丢弃；成功后 UI → `SPEAKING` |
-| `SPKV <0-100>` | 音量 | 即时生效，越界钳位 |
-| `SPKE` | 停止播放 | 写静音+清标志+闭合嘴型；MIC 仍开启则 UI → `LISTENING`，否则 → `IDLE` |
-| `SPKT` | 扬声器本地自检（440/660/880Hz） | 纯本地测试用 |
+每条上行 binary 消息包含 16 字节头和 PCM 正文。常规采集块为 320 个采样点，即 640 字节 PCM、656 字节完整消息，周期约 20ms。服务器以头部 `bytes` 校验实际载荷，不应仅凭固定长度解析。
 
-**二进制 PCM（0x2）**：mono PCM16，长度偶数、**≤1200B/帧**、采样率 16k/24k（与 SPKS rate 一致）。
-**关键**：未收到 `SPKS` 前下发的 PCM 全部丢弃（日志 `Dropping x-byte downlink PCM: speaker not started`）。
-建议服务器推流顺序：`SPKS 24000`（或16000）→ PCM 帧×N → `SPKE`。
+| 字节偏移 | 类型 | 内容 |
+| --- | --- | --- |
+| 0–3 | 4 字节 ASCII | `PCM1` |
+| 4–7 | uint32，小端 | `seq`，MIC 任务的发送序号 |
+| 8–9 | uint16，小端 | PCM 正文字节数，常规为 640 |
+| 10–11 | int16，小端 | dBFS × 100，例如 −6000 表示 −60dBFS |
+| 12–14 | 3 字节 | 保留，当前为 0 |
+| 15 | uint8 | PCM 正文字节和模 256 |
+| 16 起 | int16，小端数组 | 单声道、16kHz、PCM16 |
 
----
+序号在 MIC 任务内递增，不在每次 `MIC_START` 或 WSS 重连时清零；考虑 uint32 回绕。队列满时可能产生序号缺口，没有音频重传。校验和只用于载荷一致性检查，不是密码学完整性机制。
 
-## 2. MQTT 控制面
+PCM1 不包含会话编号、话语编号或采样时间戳。服务器应把连接状态、控制命令和帧序号结合使用，不能把序号当作对话轮次。
 
-### 2.1 Topic 表
+## 4. WSS 下行命令与 PCM
 
-| 方向 | Topic | QoS | 说明 |
-|---|---|---|---|
-| 设备→服务器 | `/device/ota/check` | 1 非保留 | 版本检查 |
-| 服务器→设备 | `/device/ota/response/<device_id>` | 1 | 检查响应（设备订阅） |
-| 服务器→设备 | `/device/ota/notify/<device_id>` | 1 | 轻量通知 |
-| 设备→服务器 | `/device/ota/status/<device_id>` | 1 | 生命周期状态+进度 |
-| 服务器→设备 | `voice/esp32s3/vcmd` | 1 | 语音文本命令（同 1.3 表，不含 SPKS/SPKE/SPKT——那些走 WSS） |
-| 设备→服务器 | `voice/esp32s3/vstatus` | 1 best-effort | 语音命令回执 |
+| 命令 | 设备行为 |
+| --- | --- |
+| `MIC_START` | 同步执行听音状态转换；若正在播放，先停止扬声器 |
+| `MIC_STOP` | 结束当前监听并进入思考；没有活动话语时忽略；不关闭 streaming |
+| `SPKS <rate>` | 配置扬声器并开播；正常对话中发送 FSM 事件进入 SPEAK；联调使用 16000 或 24000 |
+| `SPKV <n>` | 设置音量，合法整数范围 0–100；越界值被拒绝，文本入口不做钳位 |
+| `SPKE` | 停播、闭嘴、清除监听和忙碌标志，请求回到待机 |
+| `SPKT` | 本地 440／660／880Hz 音调自检；同步占用会话任务 |
+| `MICS <bg>` | 仅本地唤醒配置生效；背景值范围 −10000–0，启用门限触发上传；服务器唤醒模式明确忽略 |
+| `MICW` | 退出门限触发模式；不单独改变 streaming 开关或发起新一轮听音 |
+| `FILE_SEND <uri>` | 同步外发 WAV 文件，格式见第 5 节 |
 
-### 2.2 MQTT 语音命令（服务器→设备 `vcmd`）
+命令区分大小写。参数发送端应使用完整十进制整数；不要依赖 `strtol` 对尾随内容的宽松解析。`SPKS` 当前没有明确的采样率白名单，其最终可用性取决于底层驱动；不能据此承诺任意采样率。
 
-纯文本行，可含换行：
-```
-FILE_SEND <uri> | MIC_START | MIC_STOP | MICW | MICS <bg> | SPKV <n>
+下行 binary 是不带 PCM1 头的单声道、小端 PCM16，非空、长度为偶数、完整消息最多 1200 字节。采样率与前面的 `SPKS` 一致。
+
+正常对话顺序：
+
+```text
+WSS 建立       设备 → 服务器：连续 PCM1（默认模式）
+唤醒确认       服务器 → 设备：MIC_START
+用户话语结束   服务器 → 设备：MIC_STOP
+回答开播       服务器 → 设备：SPKS 24000
+回答音频       服务器 → 设备：binary PCM × N
+回答结束       服务器 → 设备：SPKE
+待机           设备 → 服务器：继续 PCM1（默认模式）
 ```
 
-### 2.3 MQTT 语音回执（设备→服务器 `vstatus`）
+不要把裸 `SPKS` 当作任意 FSM 状态下的完整对话启动命令。播放期间服务端确认用户插话时可发送 `MIC_START`，同时应停止发送旧回答。设备没有轮次编号过滤，迟到的 `SPKS`／`SPKE` 可能影响正在进行的新一轮对话。
 
-纯文本，取值：
+播放限制：未开播的 PCM 会丢弃；首包或中途间隔约超过 750ms 时，播放活动标志可能被清除，之后的 PCM 会丢弃直至再次开播。I2S 写入直接发生在 WSS 回调中，没有独立播放抖动缓冲。服务器应避免大突发、长间隔和与文件外发同时进行实时对话。
+
+## 5. WAV 文件外发
+
+URI 前缀区分大小写：`SD:/x.wav` 对应 `/sdcard/x.wav`，`SPIFFS:/x.wav` 对应 `/spiffs/x.wav`。映射支持不表示相应文件系统已挂载；当前应用只接通 SD 挂载。路径检查拒绝 `.`／`..` 路径段，扩展名仅允许 `.wav`，单文件最多 8MiB。
+
+```text
+服务器 → 设备：FILE_SEND SD:/sample.wav
+设备 → 服务器：BEGIN FILE <size> <name>     文本
+设备 → 服务器：文件字节 × N                binary，每帧最多 1200 字节
+设备 → 服务器：END <bytes>                 文本
 ```
-mic_started | mic_stopped | mic_wake | mic_sleep | volume_set
-| file_send_queued
-| error file_send_rejected | error mic_start_rejected | error mic_stop_rejected
-| error mic_sleep_invalid | error volume_invalid
+
+`BEGIN FILE` 与 `END` 之间的 binary 属于文件传输，不按 PCM1 解析。文件推送在 WSS 会话内同步执行，期间 MIC 队列可能溢出。
+
+前置拒绝可返回：`ERROR bad_uri`、`ERROR bad_extension`、`ERROR file_open_failed`、`ERROR sd_busy`、`ERROR file_size_failed`、`ERROR file_name_too_long`。
+
+仅在完整读取且全部写出后发送 `END`。网络发送失败会标记会话故障；本地读取失败或实际长度不符虽然返回失败，但调用者没有传播该返回值，因此不保证断链。服务器必须给文件接收设置超时，缺少正确 `END` 时丢弃不完整文件。
+
+## 6. MQTT 控制面
+
+### 6.1 主题
+
+设备 ID 从 eFuse 基础 MAC 生成，格式为 `esp-` 加 12 位小写十六进制字符。
+
+| 方向 | 默认主题 | 语义 |
+| --- | --- | --- |
+| 设备 → 服务器 | `/device/ota/check` | OTA 检查，QoS 1，非保留 |
+| 服务器 → 设备 | `/device/ota/response/<device_id>` | OTA 响应，订阅 QoS 1 |
+| 服务器 → 设备 | `/device/ota/notify/<device_id>` | 检查通知，订阅 QoS 1 |
+| 设备 → 服务器 | `/device/ota/status/<device_id>` | OTA 生命周期／进度，QoS 1 |
+| 服务器 → 设备 | `voice/esp32s3/vcmd` | 语音作业，订阅 QoS 1，非 critical |
+
+语音主题是配置中的完整字符串，不自动拼接 device_id。多设备使用同一主题会收到相同命令，需在部署与权限设计中隔离。
+
+### 6.2 语音命令
+
+每条 MQTT 消息只包含以下一种命令：
+
+```text
+MIC_START
+MIC_STOP
+FILE_SEND SD:/sample.wav
 ```
 
----
+当前处理器只支持这三类，允许末尾空白和换行，不支持一条消息中的多行命令列表。注册载荷上限为 128 字节，FILE_SEND URI 缓冲区含 NUL 共 128 字节。
 
-## 3. OTA（MQTT + HTTPS，快速对照）
+这些命令只入 WSS 队列，须由 WSS 会话执行；未启动或队列已满时记录拒绝日志。当前没有 `vstatus` 发布，也没有 `mic_started`／`mic_stopped` 等应用层回执。MQTT PUBACK 不表示命令已执行。
 
-### 3.1 设备→服务器 `ota_check`
+## 7. OTA 检查、清单与通知
+
+### 7.1 设备检查请求
+
+MQTT 连接并收到 critical 主题的 SUBACK 后执行检查；默认周期为 21600 秒，附加 0–1800 秒抖动。默认响应等待 15 秒，后续重试与恢复由配置控制。
 
 ```json
 {
   "type": "ota_check",
-  "request_id": "8位小写hex",
-  "device_id": "esp-xxxxxxxxxxxx",
+  "request_id": "12ab34cd",
+  "device_id": "esp-001122334455",
   "product": "julia-ai-device",
   "hardware_version": "1.0",
-  "current_version": "0.0.1"
+  "current_version": "0.1.0"
 }
 ```
-触发：MQTT 连接+SUBACK 后立即；之后每 21600s+随机抖动；收到合法 `ota_notify` 立即补发。
 
-### 3.2 服务器→设备 `ota_check_response`
+`request_id` 由设备生成，当前为 8 位十六进制。服务器回显最近一次请求；较早响应可能被后续请求覆盖后判为过期。
+
+### 7.2 无需升级
+
+即使 `update=false`，身份与请求关联字段仍必填：
+
+```json
+{
+  "type": "ota_check_response",
+  "update": false,
+  "request_id": "12ab34cd",
+  "device_id": "esp-001122334455",
+  "product": "julia-ai-device",
+  "hardware_version": "1.0"
+}
+```
+
+### 7.3 升级清单
+
+以下为字段示例，不是可直接发布的清单；版本、大小、摘要、URL、时间和安全版本必须由真实产物生成。
 
 ```json
 {
   "type": "ota_check_response",
   "update": true,
-  "request_id": "<原样回显>",
-  "device_id": "<原样>",
-  "product": "<原样>",
-  "hardware_version": "<原样>",
-  "job_id": "job-001",
-  "artifact_id": "release-2025-01",
-  "version": "0.0.2",
-  "url": "https://<JULIA_SERVER_ADDR>/fw/app.bin",
-  "sha256": "64位hex",
-  "image_size": 1048576,
-  "security_version": 1,
+  "request_id": "12ab34cd",
+  "device_id": "esp-001122334455",
+  "product": "julia-ai-device",
+  "hardware_version": "1.0",
+  "job_id": "job-example-001",
+  "artifact_id": "julia-example-0.1.1",
+  "version": "0.1.1",
+  "url": "https://firmware.example.com/julia/0.1.1/app.bin",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "image_size": 1940000,
+  "security_version": 0,
   "expires_at": 1893456000,
   "force_update": false
 }
 ```
-`update=false` 合法（无清单字段）。`update=true` 时清单字段全必填；`request_id/device_id/product/hardware_version` 必须回显；`url` 主机名须命中白名单（默认 `JULIA_SERVER_ADDR`）；`version` 须高于当前除非 `force_update=true`；`sha256` 恰好 64hex。
 
-### 3.3 服务器→设备 `ota_notify`
+`job_id` 和 `force_update` 可省略；其他所示字段在 `update=true` 时必填。解析器同时接受 `type="ota"`，对接统一使用 `ota_check_response`。
+
+主要校验：
+
+- JSON 不超过 1024 字节；字段类型正确，不隐式转换数字字符串。
+- request_id、device_id、product、hardware_version 与设备／最近请求匹配。
+- `artifact_id` 非空且最多 95 字节，版本最多 31 字节，URL 最多 255 字节。
+- `version` 为三段数字，并与镜像内版本一致；默认要求高于当前版本。
+- `url` 使用 HTTPS；非空主机允许列表按名称精确匹配。当前允许列表为空时放行，不自动绑定 WSS 主机。
+- `sha256` 恰好 64 个十六进制字符，`image_size` 为正 uint32 且不能超过目标分区。
+- `security_version` 为非负 uint32，镜像内 secure_version 不低于它。
+- `expires_at` 为非负 Unix 秒整数；设备时间大于 0 时，必须晚于设备当前时间。
+- 镜像 `project_name` 必须为 `julia_fused_base`；它不同于 `product=julia-ai-device`。
+
+`force_update=true` 只放宽目标版本高低判断，不关闭其他校验。
+
+### 7.4 检查通知
 
 ```json
-{ "type": "ota_notify", "job_id": "job-001" }
+{
+  "type": "ota_notify",
+  "schema_version": 1,
+  "job_id": "job-example-001"
+}
 ```
 
-### 3.4 设备→服务器 `ota_status`（生命周期，持久化到 PUBACK）
+`schema_version` 必须是数值 1，`job_id` 可省略。通知最多 512 字节，默认节流 5 秒；通过校验后唤醒检查任务，不直接执行下载。
+
+## 8. HTTPS 下载与状态
+
+### 8.1 下载行为
+
+首次完整下载要求 HTTP 200；有正 Content-Length 时必须与清单长度一致，无 Content-Length 时仍按清单大小、完整响应和摘要校验。
+
+存在恢复偏移时发送 `Range: bytes=<offset>-`。服务器返回 200 或 416 时，设备可放弃断点从零下载。206 的恢复路径依赖 ETag／Content-Range 处理。
+
+**当前构建限制：** 生效配置没有 `CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS`，ESP-IDF 5.5.4 对应头文件／Kconfig 也未提供代码引用的开关／取头接口，206 分支会进入 `RANGE_MISMATCH`。当前不能向服务端承诺已具备可用的 Range 续传；保留断点数据不等于恢复路径已经验收。
+
+下载后检查镜像头、芯片、项目名、版本、安全版本、SHA-256 与镜像有效性；只有满足提交条件才设置启动分区。双 OTA 分区、启动确认和回滚流程与网络是否在线分开处理。
+
+### 8.2 状态示例
 
 ```json
 {
   "type": "ota_status",
   "schema_version": 1,
-  "event_id": "32位hex幂等ID",
-  "device_id": "esp-...",
-  "request_id": "8hex",
-  "artifact_id": "release-2025-01",
+  "event_id": "0123456789abcdef0123456789abcdef",
+  "device_id": "esp-001122334455",
+  "request_id": "12ab34cd",
+  "artifact_id": "julia-example-0.1.1",
   "product": "julia-ai-device",
   "hardware_version": "1.0",
-  "current_version": "0.0.1",
-  "target_version": "0.0.2",
+  "current_version": "0.1.0",
+  "target_version": "0.1.1",
   "state": "accepted",
   "attempt": 1,
   "error_code": "NONE",
   "uptime_ms": 123456,
-  "job_id": "job-001"
+  "job_id": "job-example-001"
 }
 ```
-`state`: `accepted|downloading|verifying|rebooting|booted_pending_verify|succeeded|failed|rolled_back|deferred`
-`error_code`（**字符串**）: `NONE|PRECONDITION_LOW_POWER|NETWORK_TIMEOUT|TLS_VERIFY_FAILED|HTTP_STATUS_INVALID|RANGE_MISMATCH|IMAGE_TOO_LARGE|IMAGE_HEADER_INVALID|HASH_MISMATCH|IMAGE_VALIDATE_FAILED|BOOT_SELF_TEST_FAILED|ROLLBACK_UNAVAILABLE|MANIFEST_INVALID|ARTIFACT_QUARANTINED|BOOT_PARTITION_SET_FAILED|NVS_WRITE_FAILED|STORAGE_UNAVAILABLE`
-进度事件（仅 `state=downloading`，best-effort）：追加
-`"bytes_downloaded": 524288, "image_size": 1048576, "progress_percent": 50`
 
-### 3.5 HTTPS 固件下载
+状态值：`accepted`、`downloading`、`verifying`、`rebooting`、`booted_pending_verify`、`succeeded`、`failed`、`rolled_back`、`deferred`。
 
-| 场景 | 服务器要求 |
-|---|---|
-| 首次 | `GET <url>` → 200，`Content-Length == image_size` |
-| 断点续传 | `GET` + `Range: bytes=<offset>-` → 206 + `Content-Range: bytes start-end/total`；**ETag 稳定**（变化→设备从零重下，只允许一次 200 回退） |
-| 校验 | SHA-256==清单；镜像头 project_name=`julia-ai` |
+下载状态可带 `bytes_downloaded`、`image_size`、`progress_percent`；默认按 5% 进度步长或 10 秒间隔节流。关键事件正常情况下先持久化到 NVS，收到对应 PUBACK 后删除；进度为尽力发送。
 
----
+关键队列容量有界：队满时部分中间状态不再持久化，终态／重启事件可挤出最早记录。因此服务器应按 event_id 去重，并容忍重复及缺失的中间状态，不要求每次看到完整状态序列。
 
-## 4. 公共常量（Kconfig 默认值）
+当前错误名称包括：`NONE`、`PRECONDITION_LOW_POWER`、`NETWORK_TIMEOUT`、`TLS_VERIFY_FAILED`、`HTTP_STATUS_INVALID`、`RANGE_MISMATCH`、`IMAGE_TOO_LARGE`、`IMAGE_HEADER_INVALID`、`HASH_MISMATCH`、`IMAGE_VALIDATE_FAILED`、`BOOT_SELF_TEST_FAILED`、`ROLLBACK_UNAVAILABLE`、`MANIFEST_INVALID`、`ARTIFACT_QUARANTINED`、`BOOT_PARTITION_SET_FAILED`、`NVS_WRITE_FAILED`、`UNKNOWN`。
 
-| 项 | 默认 |
-|---|---|
-| `JULIA_SERVER_ADDR` | 必须配置真实域名（空/占位符时 MQTT/WSS 拒绝启动） |
-| `COMM_MQTT_OTA_CHECK_TOPIC` | `/device/ota/check` |
-| `COMM_MQTT_OTA_RESPONSE_NOTIFY_STATUS_PREFIX` | `/device/ota/{response,notify,status}` |
-| `COMM_MQTT_VOICE_CMD_TOPIC` / `VOICE_STATUS_TOPIC` | `voice/esp32s3/vcmd` / `voice/esp32s3/vstatus` |
-| `WSS_SERVER_PORT` / `WSS_PATH` | 9443 / `/voice` |
-| `WSS_KEEPALIVE_INTERVAL_SECONDS` | 15 |
-| `WSS_PONG_TIMEOUT_SECONDS` | 10 |
-| `WSS_RECONNECT_INTERVAL_SECONDS` | 5 |
-| `OTA_CHECK_INTERVAL_SECONDS` | 21600（抖动 0~1800s） |
-| `OTA_CHECK_RESPONSE_TIMEOUT_SECONDS` | 15 |
+`STORAGE_UNAVAILABLE` 枚举尚未映射为同名字符串，当前落为 `UNKNOWN`。`PRECONDITION_LOW_POWER` 也可能表示提交时空闲堆不足，不是可靠的电池电量测量结果。
 
----
+## 9. 未接通的协议范围
 
-## 5. 服务器最小验证顺序（联调指引）
+音频素材模块有 `audio_check`／`audio_check_response` 结构和下载入口，但当前没有检查请求调度，也未注册 MQTT 响应分发；`native_audio_on_ready()` 仍为弱默认钩子。不能把向某个音频主题发布清单视为设备可执行的功能。
 
-1. **WSS 建连**：验证 Bearer 鉴权 → PING→PONG；
-2. **语音上行**：发 `MIC_START` → 设备回 `mic_started` → 收 PCM1 帧流（校验魔数/seq/sum8）→ `MIC_STOP` → `mic_stopped`；
-3. **语音下行**：`SPKS 24000` + PCM 帧 → 设备出声；`SPKV`/`SPKE` 生效；
-4. **本地唤醒**（设备自触发）：喊"你好小智" → 设备日志 Wake word detected → 设备自动发 MIC_START 效果（PCM1 开始）——服务器无需主动发 MIC_START 也能收到流；
-5. **OTA**：`ota_check`→`ota_check_response`→`ota_status` 序列 + HTTPS 下载（Range/ETag）。
+服务器端的 ASR／LLM／TTS 内部 API、情感标签、用户记忆、App 配置、设备会话轮次和命令应用回执，不属于本版已实现的设备协议。

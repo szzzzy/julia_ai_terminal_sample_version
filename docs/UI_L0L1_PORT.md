@@ -1,158 +1,109 @@
-# L0/L1 UI 移植执行文档（julia-fused-base）
-> 时间：周二晚间。目标：**周三-Fri（3 天）交付 L0/L1**（立绘显示 + RMS嘴型 + 眨眼/呼吸/微动）。
-> L2（相位剪辑）、L3（转场/待机 .trn）**不做**。本文档基于已核实的代码事实，直接照做。
+# 显示与交互
 
----
+文档版本：V1.0。本文描述当前 ST77916／LVGL／Avatar 显示链路，不包含完整转场播放器或相位视频引擎。返回 [项目入口](../README.md)。
 
-## 0. 现状（已核实）
+## 1. 显示链路
 
-- **已完成**（本次已复制到 `julia-fused-base`）：
-  - `main/lvgl_port/lvgl_port.c/.h`
-  - `main/ui/avatar_parts/{avatar_face, avatar_eyes, avatar_mouth}.c/.h`
-  - `main/ui/avatar_micro_motion.c/.h`、`main/ui/avatar_micro_action.h`
-  - `main/ui/julia_ui.c/.h`（⚠️ 需裁剪，见 §2）
-  - `main/speech/julia_lipsync.c/.h`（RMS→嘴型核心）
-  - `main/display/st77916_qspi.c`（LCD 驱动）
-  - `main/ui/generated/`（`avatar_layers/*.bin+.c` 全资源 + `julia_rig_assets.c/.h` + `julia_ui_assets.c/.h/.bin` + `julia_blink_assets.c/.h`）
-- **base 已有**：`components/{espressif__esp-sr, espressif__esp-dsp, julia_board_audio}`；语音链路已跑通。
-- **base 没有**：lvgl 组件、`esp_lcd_st77916` 驱动、`julia_ui_showcase`/`avatar_anim_engine`/`avatar_clip_map`/`transition_*`/`idle_player`/`julia_display_theme`/`breathing_led`。
+```text
+app_main
+  → julia_backlight_init
+  → julia_display_init → ST77916 panel + lvgl_port
+  → julia_avatar_init → 底图 + 眼睛／嘴型部件
+  → julia_avatar_play_boot_sequence
+  → julia_idle_display_init
 
----
-
-## 1. 复制 LVGL 组件与 LCD 依赖（未做，需执行）
-
-```powershell
-# LVGL 组件（fused 用 waveshare_demo 路径）
-Copy-Item 'D:\Espressif\projects\julia-esp32s3-ai-terminal-fused\waveshare_demo\ESP-IDF\ESP32-S3-LCD-1.85-Test\components\lvgl__lvgl' `
-          'D:\Espressif\projects\julia-fused-base\components\lvgl__lvgl' -Recurse -Force
-
-# ST77916 LCD 驱动（fused 的 esp_lcd_st77916 组件目录）
-Copy-Item 'D:\Espressif\projects\julia-esp32s3-ai-terminal-fused\waveshare_demo\ESP-IDF\ESP32-S3-LCD-1.85-Test\main\LCD_Driver\esp_lcd_st77916' `
-          'D:\Espressif\projects\julia-fused-base\components\esp_lcd_st77916' -Recurse -Force -ErrorAction SilentlyContinue
-# 若上面路径不存在：从 fused 的 main.c 摘 LCD 初始化代码（见 §3.1）
+语音／时钟／运动事件 → julia_fsm_runtime → Avatar 相位与背光
+下行 PCM → julia_avatar_feed_pcm → Avatar 周期任务 → 嘴型
 ```
 
-> ⚠️ LVGL 组件很大（含示例），如果复制慢可用 fused 的 `EXTRA_COMPONENT_DIRS` 方式：
-> 在 base 顶层 `CMakeLists.txt` 的 `include()` 前加：
-> ```cmake
-> set(EXTRA_COMPONENT_DIRS
->     "${CMAKE_SOURCE_DIR}/components/lvgl__lvgl")
-> ```
+实际文件是 `main/display/julia_display.c`、`main/display/esp_lcd_st77916.c`、`main/lvgl_port/lvgl_port.c`、`main/ui/julia_avatar.c` 和 `main/ui/julia_backlight.c`。`julia_ui.c`、`st77916_qspi.c`、`julia_display_theme.c` 不参与当前构建。
 
----
+## 2. 板级参数与刷新
 
-## 2. 裁剪 `main/ui/julia_ui.c`（关键，否则链接失败）
+| 项目 | 当前值／来源 |
+| --- | --- |
+| 分辨率 | 360×360；驱动、LVGL 和 Avatar 中均有对应常量 |
+| 接口 | SPI2 QSPI，像素时钟 40MHz |
+| QSPI 引脚 | SCK=40，D0=46，D1=45，D2=42，D3=41，CS=21 |
+| 背光 | GPIO 5，LEDC，由 `julia_backlight.c` 管理 |
+| 像素格式 | RGB565，`LV_COLOR_16_SWAP=y` |
+| LVGL 缓冲 | 两个 12960 像素绘制缓冲，各为整屏的 1/10 |
+| LVGL 周期 | tick 2ms，handler 循环间隔 10ms |
+| Avatar 周期 | 40ms，处理嘴型、相位重试等 |
 
-**必须删除的 include**（L2/L3 依赖，base 无对应文件）：
-```c
-#include "julia_ui_showcase.h"
-#include "avatar_anim_engine.h"
-#include "avatar_clip_map.h"
-#include "transition_director.h"
-#include "transition_player.h"
-#include "idle_player.h"
-#include "julia_display_theme.h"
-#include "breathing_led.h"
-```
+任务周期不是屏幕实测帧率。整屏传输会拆分为多条带，刷新受总线、DMA、锁竞争和重绘面积影响。
 
-**对应删除/替换的函数调用**（在 `julia_ui.c` 内搜索并处理）：
-| 原调用 | 处理 |
-|---|---|
-| `julia_ui_showcase_allows_state_change()` | 改为 `return true;`（或删函数，改为空实现） |
-| `transition_director_*` / `transition_player_*` / `transition_target_commit()` | 删除 `state_transition_apply()` 里的转场分支，改为**直接立绘切换**：`avatar_face_set_state(to_main)` + `julia_ui_set_idle_frame_mode(false)` 简化 |
-| `idle_player_*` | 删除（或空实现） |
-| `avatar_clip_map_*` / `avatar_anim_engine_*` | 删除 |
-| `breathing_led_*` / `julia_display_theme_*` | 删除 |
-| `led_transition_to` | 删除（无 LED 桥） |
+所有 LVGL 对象访问应使用 `lvgl_port_lock()`／`unlock()`。音频入口只维护嘴型目标数据，不在 PCM 回调中绘制图像。具体同步与刷新完成处理见 [lvgl_port.c](../main/lvgl_port/lvgl_port.c)。
 
-**必须保留**（L0/L1 核心）：
-- `julia_ui_init()` —— 建 LVGL 资源、`avatar_face_init`、立绘加载、`avatar_micro_motion_init()`
-- `julia_ui_set_mouth_openness()` / `julia_ui_talking_start/stop()`
-- `julia_ui_set_dialog_phase()` —— 只保留调 `avatar_micro_motion_set_dialog_phase` 部分，删 clip_map 部分
-- `avatar_show_all()`、`julia_ui_get_avatar_slot()`、`julia_ui_current_state()`
-- `apply_expression()`（有 `return;` 死代码，可不动）
+## 3. 开机呈现
 
----
+背光与最小显示链路先初始化，再执行一次眨眼序列：8 次睁眼／闭眼，时长分别为 255ms／120ms，眨眼部分合计约 3 秒，另有背光渐变与刷新等待。
 
-## 3. 接线（base 侧）
+动画返回后才初始化语音、行为、情境和网络服务。因此“首屏可见”与“可以对话”是两个时间点，应分别测量。当前没有由应用接通的开机语音提示流程。
 
-### 3.1 `main/app/main.c`（应用入口与顶层初始化）
-在初始化序列（`board_audio_init()` 后、网络前）加入：
-```c
-/* L0/L1：LCD + LVGL + 立绘 */
-lcd_init_panel();                       /* st77916_qspi.c / 或从 fused main.c 摘 */
-lvgl_port_init(s_panel_handle);
-julia_ui_init();
-avatar_show_all();
-```
-主循环（现有 `while(1)` 或独立任务，每 ~40ms）：
-```c
-update_avatar((uint32_t)(esp_timer_get_time() / 1000ULL));
-```
-> `s_panel_handle` 来自 `st77916_qspi.c` 或 fused `main.c` 的 LCD 初始化（`esp_lcd_new_panel_st77916`）。若摘 fused main.c：复制 `lcd_reset_via_exio/lcd_new_io/lcd_init_panel` 及 `vendor_specific_init_new[]`（main.c:107-425 段）+ 引脚宏（105-99）。
+## 4. 对话呈现
 
-### 3.2 `main/voice/voice_service.c` → 下行 PCM 驱动嘴型（**L1 关键**）
-`voice_service_on_binary()` 中，在 `board_audio_speaker_write()` 后追加：
-```c
-/* L1：下行音频 RMS → 嘴型开合（方案 B：不复制整个 lipsync 模块） */
-extern void julia_ui_talking_start(void);
-extern void julia_ui_set_mouth_openness(uint16_t openness_q8);
-extern void julia_ui_talking_stop(void);
-/* 在 begin/end 之间，逐帧计算 RMS：
- * rms = sqrt(mean(sample^2)); level = rms 分档 (0/30/65/95);
- * openness = level * 256; julia_ui_set_mouth_openness(openness);
- * 帧周期 = len / 16000；用 vTaskDelay 保持节奏（可选）。
- */
-```
-> 提示：`julia_lipsync.c` 里有现成的 `mouth_level_for_frame()`（RMS→档位）可抄逻辑；不引入 `julia_audio_play_start` 依赖（base 用 board_audio 直连）。
+| 相位 | 当前画面 | 眼睛／嘴型 |
+| --- | --- | --- |
+| IDLE | S1.1 基础立绘 | 随机眨眼，非说话时嘴型闭合 |
+| LISTENING | 完整闭眼立绘 | 独立眼睛和嘴型层隐藏 |
+| THINKING | S1.1 基础立绘 | 保持睁眼；不播放回答嘴型 |
+| SPEAKING | S1.1 基础立绘 | 保持睁眼；由下行 PCM 能量驱动嘴型 |
+| Dozing | 闭眼立绘覆盖 | 与背光策略组合，不等于芯片睡眠 |
 
-### 3.3 CMake（`main/CMakeLists.txt`）
-- `SRCS` 增加：
-  ```cmake
-  "lvgl_port/lvgl_port.c"
-  "ui/julia_ui.c"
-  "ui/avatar_parts/avatar_face.c" "ui/avatar_parts/avatar_eyes.c" "ui/avatar_parts/avatar_mouth.c"
-  "ui/avatar_micro_motion.c"
-  "speech/julia_lipsync.c"
-  "display/st77916_qspi.c"
-  "ui/generated/julia_ui_assets.c" "ui/generated/julia_rig_assets.c"
-  "ui/generated/avatar_layers/avatar_layer_assets.c" "ui/generated/avatar_layers/avatar_chroma_assets.c"
-  "ui/generated/avatar_layers/avatar_face_base.c" "ui/generated/avatar_layers/avatar_face_doze.c"
-  "ui/generated/julia_blink_assets.c"
-  ```
-- `PRIV_REQUIRES` 增加：`lvgl__lvgl esp_lcd esp_driver_spi esp_driver_i2s`
-- `EMBED_FILES` 增加（立绘/嘴型 bin）：
-  ```cmake
-  "ui/generated/avatar_layers/eye_left_open.bin" "ui/generated/avatar_layers/eye_left_half.bin"
-  "ui/generated/avatar_layers/eye_left_closed.bin" "ui/generated/avatar_layers/eye_right_open.bin"
-  "ui/generated/avatar_layers/eye_right_half.bin" "ui/generated/avatar_layers/eye_right_closed.bin"
-  "ui/generated/avatar_layers/avatar_pupil_left.bin" "ui/generated/avatar_layers/avatar_pupil_right.bin"
-  "ui/generated/avatar_layers/mouth_closed.bin" "ui/generated/avatar_layers/mouth_half.bin"
-  "ui/generated/avatar_layers/mouth_open.bin" "ui/generated/avatar_layers/hair_tip.bin"
-  "ui/generated/julia_ui_assets.bin"
-  ```
+相位选图以 `avatar_source_for_phase()` 为准。`main/ui/generated/clips/LISTEN.bin`、`THINK.bin`、`SPEAK.bin` 列入嵌入文件，但当前选图路径不调用其 RLE 解码器，不能把这些文件视为正在播放的相位动画。
 
----
+`AVATAR_ENABLE_FULL_FRAME_MOTION=0`，整幅立绘的缩放呼吸和点头不执行。背光呼吸、眼睛局部动画和整幅画面微动是不同能力。
 
-## 4. 禁止改动（防回归）
-- ❌ 不动 `board_audio.c`/`wss_transport.c`/`mqtt_comm.c`（语音地基）；
-- ❌ 不引入 L2/L3（`avatar_anim_engine`、`avatar_clip_map`、`transition_*`、`idle_player`、`julia_ui_showcase`、`breathing_led`、`julia_display_theme`）；
-- ❌ 不改 fused 源工程；
-- ❌ 不把 `julia_ui_set_state` 的完整转场搬过来（那是 L3）。
+## 5. 嘴型
 
----
+`voice_service_on_binary()` 在 PCM 写入扬声器成功后调用 `julia_avatar_feed_pcm()`。后者计算 RMS 并进行平滑及迟滞判断，得到四档嘴型目标。
 
-## 5. 三天进度表（对齐目标）
+- 上升门限：300、950、2300；下降门限：180、650、1650。
+- Avatar 每 40ms 消费目标档位。
+- PCM 保持时间为 180ms，超时或非 talking 状态时闭嘴。
+- `SPKE`、会话结束和语音打断调用 talking stop，清除嘴型状态。
 
-| 天 | 交付 | 验收 |
-|---|---|---|
-| 周三 | §1 LVGL/LCD 组件 + §2 裁剪 julia_ui.c + §3.3 CMake | `idf.py build` 通过 |
-| 周四 | §3.1 接线（LCD/LVGL/init/update_avatar）+ §3.2 RMS→嘴型 | 烧录 → LCD 亮 + 立绘 + 眨眼/呼吸 + 说话动嘴 |
-| 周五 | 联调：唤醒→说话→嘴动→回待机，串口日志 | 老师演示：设备说话会动、会眨眼 |
+这里是按 PCM 能量同步的嘴型，不是音素／口型识别。驱动写入成功不等于声音已在物理扬声器上播放到同一时刻，音画偏移应上板测量。
 
-## 6. 常见坑（提前避）
-1. **立绘不显示** → 检查 `EMBED_FILES` 是否声明了 `julia_ui_assets.bin` + `avatar_layers/*.bin`（§3.3 已列）；
-2. **`julia_ui.c` 链接错误** → 一定是 L2/L3 include 或函数调用没删干净（§2 清单）；
-3. **LVGL 初始化卡死** → 确认 `lvgl_port_init` 前 LCD panel 已建（§3.1 顺序）；
-4. **嘴型不动** → 确认 `julia_ui_talking_start()` 先调（否则 `set_mouth_openness` 有 `s_talking` 守卫）；
-5. **`update_avatar` 不动** → 确认 `avatar_micro_motion_init()` 在 `julia_ui_init` 里被调用了（fused 的 julia_ui.c 有）。
+## 6. FSM 映射
+
+状态机定义在 [julia_fsm.h](../main/fsm/julia_fsm.h)，呈现由 [julia_fsm_runtime.c](../main/fsm/julia_fsm_runtime.c) 绑定。
+
+| 行为状态 | 呈现 |
+| --- | --- |
+| S0.1 夜间休眠、S0.3 手动休眠 | SLEEP：闭眼与背光呼吸 |
+| S0.2 日间离开、S2.3 睡前陪伴 | QUIET：闭眼，背光 100% |
+| S1.2 远场待机 | FAR_STANDBY：闭眼与背光呼吸 |
+| S3.3 用户呼唤 | LISTEN |
+| S4.1 浅层对话、S4.2 深层对话、S4.4 打断处理 | THINK |
+| S4.3 多轮对话 | SPEAK |
+| 其余状态 | DEFAULT 基础立绘 |
+
+这是当前呈现映射，不代表代码已具备深层情感识别或多轮理解算法。正常语音命令通过事件驱动这些状态，实际异常路径仍受转换规则约束。
+
+## 7. 待机、夜间与运动
+
+### 活动时间
+
+`julia_idle_display.c` 每 500ms 检查活动时间。非 busy 且连续 300 秒无交互时，闭眼、启动背光呼吸并投递 `EVT_USER_LEAVE`，正常待机进入 S1.2。听音／思考／说话期间 busy 为真，普通闲置逻辑不降档。
+
+默认背光呼吸范围为 5%–100%，周期 4000ms。该亮度范围不等于已经达到待机功耗目标。
+
+### 墙钟调度
+
+`julia_time.c` 从 PCF85063 恢复有效时间，在获得 IP 后进行 SNTP 同步并写回 RTC；默认时区 `CST-8`。
+
+`julia_night_schedule.c` 每 5 秒检查有效墙钟：默认夜间为 23:00–07:00；22 点有睡前陪伴分支。满足条件的空闲状态先经过约 5 分钟宽限，活动对话会延后夜间进入。白天只释放调度持有的夜间休眠，不自动释放手动休眠。时间无效时不执行这些时间判定。
+
+### 运动输入
+
+`julia_motion.c` 每 100ms 读取 QMI8658；加速度差门限 0.20g、陀螺仪幅值门限 25°/s，连续 4 次命中后触发，冷却 3 秒。适用夜间休眠、日间离开与远场待机，播放时不触发运动唤醒。
+
+运动检测是短时活动判断，不是姿态解算、用户定位或有人／无人识别。
+
+## 8. 显示验证
+
+执行 [验收清单](VALIDATION.md) 中的开机、相位、嘴型、闲置、时钟和打断场景。重点观察颜色／字节序、整屏撕裂、相位不一致、音画偏移和断流后嘴型复位。
+
+更换面板前应统一尺寸、像素格式、资源坐标、驱动时序和缓冲预算。单张 360×360 RGB565 全帧为 259200 字节；这只是像素数据，不包含 LVGL 对象、双绘制缓冲和其他资源。摄像头扩展需另行核算总线、GPIO、内存、带宽及电源需求。
