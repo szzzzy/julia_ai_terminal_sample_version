@@ -63,6 +63,64 @@ Git 报告仓库所有权不一致时，先确认目录归属和可信性，再�
 
 编译数据库由实际 CMake 构建生成，路径为 `build/compile_commands.json`。`scripts/gen_compile_commands.ps1` 依赖另一工程的数据库且只枚举 `main` 根层源码，不适合作为本项目的权威编译数据库生成流程。
 
+### 3.1 构建目录约定
+
+| 目录 | 用途 | 产物含义 |
+| --- | --- | --- |
+| `build/` | 日常固件开发及 VS Code IntelliSense | reconfigure 生成编译数据库／配置头；build 才完成固件编译 |
+| `build-ota-name/` | 独立固件验证目录 | 已记录的镜像检查来自此目录，不能直接当作 `build/` 的验证结果 |
+| `build-host/` | 原生 C 编译器运行的主机测试 | 测试 EXE／CTest 记录，不是 ESP32 固件 |
+
+本机 2026-08-31 已为 `build/` 执行 reconfigure 并核对编译条目；该操作不代表该目录已有可烧录镜像。烧录和镜像检查命令中的 `-B`／文件路径必须与实际构建目录一致。
+
+### 3.2 VS Code 与 IntelliSense
+
+ESP-IDF 和 C/C++ 扩展必须使用同一份固件构建配置。本机 `.vscode/settings.json` 的目录设置为：
+
+```json
+{
+  "idf.buildPath": "${workspaceFolder}/build",
+  "idf.buildPathWin": "${workspaceFolder}\\build"
+}
+```
+
+`.vscode/c_cpp_properties.json` 的有效配置包含：
+
+```json
+{
+  "configurations": [
+    {
+      "name": "ESP-IDF (julia-fused-base)",
+      "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+      "compilerPath": "D:/Espressif/tools/xtensa-esp-elf/esp-14.2.0_20260121/xtensa-esp-elf/bin/xtensa-esp32s3-elf-gcc.exe",
+      "intelliSenseMode": "gcc-x64",
+      "cStandard": "gnu17",
+      "cppStandard": "gnu++17"
+    }
+  ],
+  "version": 4
+}
+```
+
+这是本机工具路径示例，不应覆盖其他配置字段；其他机器按工具安装位置调整。`.vscode/` 被 `.gitignore` 排除，克隆仓库后需要本地配置，不能只依靠 Git 提交传递这些设置。
+
+在已激活 SDK 的终端生成索引所需文件：
+
+```powershell
+idf.py -B build reconfigure
+```
+
+如果工具未被定位，使用本节 Windows 示例的 `-D` 参数，将末尾 `build` 换成 `reconfigure`。依次确认：
+
+1. `build/compile_commands.json` 和 `build/config/sdkconfig.h` 存在。
+2. 新增或移动的源文件在编译数据库中有对应条目，且包含当前构建目录的配置头路径。
+3. C/C++ 的 compilerPath 指向 Xtensa 编译器，不能把主机测试编译器作为固件编译器。
+4. 文件就绪后若仍显示缓存诊断，在命令面板执行 `C/C++: Reset IntelliSense Database`。
+
+不要把其他构建目录的 JSON 直接复制到 `build/`：其中仍可能引用原目录的头文件和工作目录。若主动使用其他 `-B` 目录，应同步编辑器路径或为标准 `build/` 重新配置。
+
+未参与构建的参考源码没有当前编译条目；其缺失依赖不一定是索引缓存问题。主机测试使用另一套 stub 头文件，不能把 `tests/host/stubs` 加入固件全局 includePath 来消除报错。
+
 ## 4. 镜像标识与版本
 
 | 名称 | 当前值 | 使用位置 |

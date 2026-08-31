@@ -2,15 +2,16 @@
 
 Julia Fused-Base 是面向 ESP32-S3 陪伴终端的设备固件，提供麦克风采集、WSS 语音传输、扬声器播放、屏幕表情、行为状态机、RTC／IMU 情境输入和 MQTT／HTTPS 固件 OTA。
 
-文档版本：V1.0。适用对象：当前工作区的实际构建配置。固件版本由根目录 `CMakeLists.txt` 的 `PROJECT_VER` 定义，当前为 `0.1.0`；文档版本与固件版本独立。
+文档版本：V1.0。实现核对日期：2026-08-31。适用对象：当前工作区的实际构建配置。固件版本由根目录 `CMakeLists.txt` 的 `PROJECT_VER` 定义，当前为 `0.1.0`；文档版本与固件版本独立。
 
 ## 能力范围
 
 | 能力 | 当前实现 |
 | --- | --- |
+| 开机编排 | 显示基础设施就绪后，动画任务与音频、RTC、SD、Wi-Fi 初始化并行；汇合后放行交互 |
 | 语音采集与上传 | 单声道 PCM16、16kHz，常规帧为 20ms；通过 WSS 发送 PCM1 消息 |
 | 语音唤醒 | 默认由服务器检测，WSS 会话建立后持续上传；本地 WakeNet 是另一种编译配置 |
-| 播放与打断 | WSS 文本命令控制原始 PCM 播放；`MIC_START` 可停止当前扬声器播放并进入听音 |
+| 播放与打断 | WSS 向 64KiB PSRAM 缓冲投递 PCM；独立播放任务驱动 I2S，正常结束排空尾音，`MIC_START` 取消待播数据 |
 | 显示 | 360×360 ST77916 QSPI 屏、LVGL、静态立绘、眨眼、PCM 能量驱动嘴型、背光呼吸 |
 | 行为与情境 | 六个主状态、二十个子状态；RTC／SNTP 校时、夜间策略、IMU 运动唤醒 |
 | 固件 OTA | 请求关联、清单和镜像校验、双应用分区、启动确认／回滚、状态持久化与上报 |
@@ -38,6 +39,46 @@ Julia Fused-Base 是面向 ESP32-S3 陪伴终端的设备固件，提供麦克�
 
 实际编译范围以 [main/CMakeLists.txt](main/CMakeLists.txt) 为准。源文件存在、位于包含路径内或组件参与链接，都不表示对应业务已经由应用入口启动。
 
+## 目录结构
+
+```text
+julia-fused-base/
+├─ main/                        应用源码，按功能域组织
+│  ├─ app/                      应用入口、并行开机、闲置显示策略
+│  ├─ voice/                    WSS 语音业务、播放任务、PCM 缓冲、唤醒
+│  ├─ network/                  Wi-Fi 生命周期、MQTT、HTTP 下载
+│  ├─ ota/                      固件清单、下载、校验、启动确认与上报
+│  ├─ fsm/                      行为状态转换与运行实例
+│  ├─ context/                  时间同步、夜间策略、运动检测
+│  ├─ display/                  LCD 面板驱动和板级配置
+│  ├─ lvgl_port/                LVGL 任务、绘制缓冲与刷新同步
+│  ├─ ui/                       立绘、眼睛／嘴型、背光与生成资源
+│  ├─ hardware/                 IO 扩展器、RTC、IMU 与 LED 接口
+│  ├─ storage/                  SDMMC 挂载与存储接口
+│  ├─ audio/                    音频素材下载模块，业务入口未接通
+│  ├─ memory/                   记忆／例行参考源码，未参与当前构建
+│  ├─ PCF85063/、QMI8658/        参考驱动，当前使用 hardware/ 下的共享接口
+│  ├─ CMakeLists.txt            实际源文件、依赖与资源注册
+│  └─ Kconfig.projbuild         应用配置项
+├─ components/
+│  ├─ julia_board_audio/        MIC／扬声器 I2S 驱动
+│  ├─ lvgl__lvgl/               LVGL 显示库
+│  ├─ espressif__esp-sr/        本地语音识别依赖，按配置启用
+│  └─ espressif__esp-dsp/       DSP 运算依赖
+├─ tests/host/                  PCM 缓冲与播放控制主机回归测试
+├─ docs/                        协议、显示、构建、验收及已知限制
+├─ scripts/                     开发辅助脚本
+├─ server_certs/                固件使用的证书材料
+├─ .vscode/                     本机编辑器设置，不纳入 Git
+├─ CMakeLists.txt               工程名、版本和顶层构建入口
+├─ sdkconfig                    当前固件配置
+├─ sdkconfig.defaults           项目默认配置
+├─ dependencies.lock            依赖版本记录
+└─ partitions_16mb.csv          Flash 分区布局
+```
+
+`build/`、`build-host/` 和 `build-ota-name/` 是生成目录，不属于源码。`voice/` 负责实时对话音频，`audio/` 负责音频素材下载，二者职责不同。模块详情及未参与编译的文件见 [源码组织](main/README.md)。
+
 ## 快速开始
 
 1. 准备 ESP-IDF 5.5.4 环境及与当前板卡匹配的工具链。
@@ -53,6 +94,8 @@ idf.py -B build build
 
 完整 Windows 工具路径示例、配置优先级、镜像检查及发布约束见构建文档。`sdkconfig.defaults.esp32h2` 不是本板卡可直接使用的适配方案。
 
+VS Code 的 ESP-IDF 构建路径与 IntelliSense 均使用 `build/`。只需生成编译数据库及 `sdkconfig.h` 时可运行 `idf.py -B build reconfigure`；这不生成完整固件。编辑器报错排查见 [构建与发布](docs/BUILD_AND_RELEASE.md)。
+
 ## 运行流程
 
 ```mermaid
@@ -60,9 +103,10 @@ flowchart LR
     MIC[麦克风 I2S] --> PCM[PCM1 有界队列]
     PCM --> WSS[WSS 会话]
     WSS <--> SERVER[外部语音服务]
-    WSS --> SPK[扬声器 I2S]
+    WSS --> PLAY[64KiB PCM 缓冲与播放任务]
+    PLAY --> SPK[扬声器 I2S]
     WSS --> FSM[行为 FSM]
-    SPK --> MOUTH[PCM 能量与嘴型]
+    PLAY --> MOUTH[PCM 能量与嘴型]
     FSM --> UI[Avatar 与背光]
     RTC[RTC / IMU] --> FSM
     MQTT[MQTT 控制面] --> OTA[OTA 引擎]
@@ -82,6 +126,7 @@ flowchart LR
 | [构建与发布](docs/BUILD_AND_RELEASE.md) | 环境、配置、镜像标识、烧录和发布门槛 |
 | [验证与验收](docs/VALIDATION.md) | 功能、故障、性能和发布验证清单 |
 | [工程边界与已知限制](docs/COMMENT_AUDIT_FINDINGS.md) | 当前限制、影响和待验证事项 |
+| [主机回归测试](tests/host/README.md) | 测试构建、覆盖范围及模拟硬件的边界 |
 
 ## 使用边界
 

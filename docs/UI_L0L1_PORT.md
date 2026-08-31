@@ -9,11 +9,12 @@ app_main
   → julia_backlight_init
   → julia_display_init → ST77916 panel + lvgl_port
   → julia_avatar_init → 底图 + 眼睛／嘴型部件
-  → julia_avatar_play_boot_sequence
-  → julia_idle_display_init
+  → boot_animation 任务执行眨眼
+  ├─ 主任务：音频 / RTC / SD / Wi-Fi 初始化
+  └─ 动画与初始化汇合 → idle / FSM / 情境输入 → 放行交互
 
 语音／时钟／运动事件 → julia_fsm_runtime → Avatar 相位与背光
-下行 PCM → julia_avatar_feed_pcm → Avatar 周期任务 → 嘴型
+下行 PCM → PSRAM 缓冲 → voice_playback / I2S → julia_avatar_feed_pcm → 嘴型
 ```
 
 实际文件是 `main/display/julia_display.c`、`main/display/esp_lcd_st77916.c`、`main/lvgl_port/lvgl_port.c`、`main/ui/julia_avatar.c` 和 `main/ui/julia_backlight.c`。`julia_ui.c`、`st77916_qspi.c`、`julia_display_theme.c` 不参与当前构建。
@@ -39,7 +40,18 @@ app_main
 
 背光与最小显示链路先初始化，再执行一次眨眼序列：8 次睁眼／闭眼，时长分别为 255ms／120ms，眨眼部分合计约 3 秒，另有背光渐变与刷新等待。
 
-动画返回后才初始化语音、行为、情境和网络服务。因此“首屏可见”与“可以对话”是两个时间点，应分别测量。当前没有由应用接通的开机语音提示流程。
+眨眼在独立任务中执行，音频、RTC、SD 和 Wi-Fi 初始化同时进行；网络服务和行为呈现受启动门槛保护，不覆盖动画。动画和初始化均完成后才启动闲置／FSM 呈现、夜间与运动输入，并放行 MQTT／WSS。动画任务创建失败时回退顺序执行，OTA 启动检查顺序不变。
+
+日志分别记录动画开始／结束、并行服务耗时和交互门槛开放耗时。“首屏可见”“初始化汇合”和“WSS 可以对话”应分别测量，当前没有开机语音提示流程。
+
+| 日志 | 计时含义 |
+| --- | --- |
+| `Boot animation start` | 动画任务开始执行 |
+| `Boot animation done in ...ms` | 该动画任务自身的执行时长，包含刷新／渐变等待 |
+| `Parallel services initialized in ...ms` | 从 OTA 启动流程返回后的计时点，到音频／RTC／SD／网络启动调用完成；不是联网成功时间 |
+| `Boot interaction gate open in ...ms (voice_ready=...)` | 从同一计时点到动画汇合及运行时初始化完成；voice_ready 还反映语音依赖是否就绪 |
+
+后两项包含显示基础设施初始化，但不包含更早的 bootloader 和 OTA 启动验收，不能当作上电总时长。WSS 会话建立发生在交互放行和取得 IP 之后，仍受网络与服务器响应影响。并行编排只重叠无画面争用的初始化，没有把所有初始化任意并发。
 
 ## 4. 对话呈现
 
@@ -57,12 +69,12 @@ app_main
 
 ## 5. 嘴型
 
-`voice_service_on_binary()` 在 PCM 写入扬声器成功后调用 `julia_avatar_feed_pcm()`。后者计算 RMS 并进行平滑及迟滞判断，得到四档嘴型目标。
+`voice_service_on_binary()` 只投递 PCM；独立播放任务每写入一个 160 样本块后调用 `julia_avatar_feed_pcm()`，避免网络突发直接推动嘴型。RMS 平滑与 talking start／stop 使用同一状态锁，非 talking 时忽略迟到 PCM。
 
 - 上升门限：300、950、2300；下降门限：180、650、1650。
 - Avatar 每 40ms 消费目标档位。
 - PCM 保持时间为 180ms，超时或非 talking 状态时闭嘴。
-- `SPKE`、会话结束和语音打断调用 talking stop，清除嘴型状态。
+- 正常 `SPKE` 在缓冲与尾音排空后清除嘴型；会话结束和语音打断立即取消嘴型。
 
 这里是按 PCM 能量同步的嘴型，不是音素／口型识别。驱动写入成功不等于声音已在物理扬声器上播放到同一时刻，音画偏移应上板测量。
 
