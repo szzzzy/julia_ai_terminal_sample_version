@@ -14,3 +14,8 @@ if(NOT WIN32)
     target_link_libraries(test_voice_playback PRIVATE m)
 endif()
 add_test(NAME voice_playback COMMAND test_voice_playback)
+
+add_executable(test_julia_fsm test_julia_fsm.c ../../main/fsm/julia_fsm.c)
+target_include_directories(test_julia_fsm PRIVATE stubs ../../main/fsm)
+set_property(TARGET test_julia_fsm PROPERTY C_STANDARD 99)
+add_test(NAME julia_fsm COMMAND test_julia_fsm)

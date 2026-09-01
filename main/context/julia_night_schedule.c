@@ -4,9 +4,8 @@
  *
  * The RTC is restored into the system wall clock by julia_time.  This module
  * therefore reads localtime() rather than touching the PCF85063 bus directly.
- * At night it only takes S1.1 DEFAULT or S0.2 QUIET into S0.1 NIGHT_SLEEP, so
- * an active dialogue is never interrupted.  If a user wakes and talks during
- * the night, returning to DEFAULT causes the next poll to re-enter S0.1.
+ * State transition semantics are intentionally deferred to julia_fsm.c. This
+ * module only emits the existing time events when an idle-class state is seen.
  */
 #include "julia_night_schedule.h"
 
@@ -72,29 +71,22 @@ static void night_schedule_task(void *argument)
         localtime_r(&now, &local);
         const bool night = hour_is_night(local.tm_hour);
         const bool bedtime = !night && local.tm_hour == 22;
-        julia_sub_state_t state = julia_fsm_runtime_get_state();
+        julia_main_state_t state = julia_fsm_runtime_get_state();
 
         if (!time_was_valid || local.tm_hour != last_hour) {
             ESP_LOGI(TAG, "local=%02d:%02d bedtime=%u night=%u state=%s", local.tm_hour,
                      local.tm_min, bedtime ? 1U : 0U, night ? 1U : 0U,
-                     julia_fsm_sub_state_name(state));
+                     julia_fsm_main_state_name(state));
             last_hour = local.tm_hour;
         }
         time_was_valid = true;
 
         if (night) {
-            if (state == JULIA_SUB_STATE_S0_1_NIGHT_SLEEP) {
-                /* It may have entered through the ordinary idle policy just
-                 * before 23:00. From now until 07:00 the schedule owns it. */
-                schedule_owns_sleep = true;
+            if (state == JULIA_MAIN_STATE_S6_SLEEP) {
                 sleep_deadline_us = 0;
-            } else if (state == JULIA_SUB_STATE_S0_3_MANUAL_SLEEP) {
-                /* Manual sleep has higher intent than the clock schedule. */
-                sleep_deadline_us = 0;
-            } else if (state == JULIA_SUB_STATE_S1_1_NEAR_STANDBY ||
-                       state == JULIA_SUB_STATE_S1_2_FAR_STANDBY ||
-                       state == JULIA_SUB_STATE_S0_2_DAY_AWAY ||
-                       state == JULIA_SUB_STATE_S2_3_BEDTIME_COMPANION) {
+            } else if (state == JULIA_MAIN_STATE_S1_COMPANION ||
+                       state == JULIA_MAIN_STATE_S3_STANDBY ||
+                       state == JULIA_MAIN_STATE_S5_SILENT) {
                 int64_t now_us = esp_timer_get_time();
                 if (sleep_deadline_us == 0) {
                     sleep_deadline_us = now_us + (int64_t)NIGHT_RESUME_DELAY_MS * 1000LL;
@@ -105,37 +97,26 @@ static void night_schedule_task(void *argument)
                     sleep_deadline_us = 0;
                 }
             } else {
-                /* Any active/future behaviour state outranks night sleep. Keep
-                 * extending the deadline; after it returns to DEFAULT/QUIET,
-                 * five idle minutes must pass before S0.1 is requested. */
+                /* Active states do not start the night-idle grace period. */
                 sleep_deadline_us = esp_timer_get_time() +
                                     (int64_t)NIGHT_RESUME_DELAY_MS * 1000LL;
             }
         } else if (schedule_owns_sleep) {
-            /* Never release S0.3 MANUAL_SLEEP: only the scheduled S0.1 state
-             * is eligible for the 07:00 automatic wake. */
-            if (state == JULIA_SUB_STATE_S0_1_NIGHT_SLEEP) {
+            if (state == JULIA_MAIN_STATE_S6_SLEEP) {
                 julia_idle_display_note_activity();
                 post_event(EVT_WAKEUP);
             }
             schedule_owns_sleep = false;
             sleep_deadline_us = 0;
         } else if (bedtime) {
-            if (state == JULIA_SUB_STATE_S2_3_BEDTIME_COMPANION) {
+            if (state == JULIA_MAIN_STATE_S1_COMPANION) {
                 sleep_deadline_us = 0;
-            } else if (state == JULIA_SUB_STATE_S1_1_NEAR_STANDBY ||
-                       state == JULIA_SUB_STATE_S1_2_FAR_STANDBY ||
-                       state == JULIA_SUB_STATE_S0_2_DAY_AWAY) {
+            } else if (state == JULIA_MAIN_STATE_S3_STANDBY ||
+                       state == JULIA_MAIN_STATE_S5_SILENT) {
                 int64_t now_us = esp_timer_get_time();
                 if (sleep_deadline_us == 0) {
                     sleep_deadline_us = now_us + (int64_t)NIGHT_RESUME_DELAY_MS * 1000LL;
                 } else if (now_us >= sleep_deadline_us) {
-                    /* BEDTIME is handled directly from S1.1. Normalize a far
-                     * standby first so the existing FSM rules remain unchanged. */
-                    if (state != JULIA_SUB_STATE_S1_1_NEAR_STANDBY) {
-                        julia_idle_display_note_activity();
-                        post_event(EVT_WAKEUP);
-                    }
                     post_event(EVT_BEDTIME);
                     sleep_deadline_us = 0;
                 }

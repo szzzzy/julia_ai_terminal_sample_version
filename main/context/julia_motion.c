@@ -30,11 +30,9 @@
 static const char *TAG = "JULIA_MOTION";
 static TaskHandle_t s_task;
 
-static bool motion_wake_state(julia_sub_state_t state)
+static bool motion_wake_state(julia_main_state_t state)
 {
-    return state == JULIA_SUB_STATE_S0_1_NIGHT_SLEEP ||
-           state == JULIA_SUB_STATE_S0_2_DAY_AWAY ||
-           state == JULIA_SUB_STATE_S1_2_FAR_STANDBY;
+    return state == JULIA_MAIN_STATE_S6_SLEEP;
 }
 
 static void motion_task(void *argument)
@@ -63,7 +61,7 @@ static void motion_task(void *argument)
                            current.gz_dps * current.gz_dps);
         previous = current;
 
-        julia_sub_state_t state = julia_fsm_runtime_get_state();
+        julia_main_state_t state = julia_fsm_runtime_get_state();
         TickType_t now = xTaskGetTickCount();
         if (!motion_wake_state(state) || board_audio_speaker_is_playing() ||
             (cooldown_until != 0 && now < cooldown_until)) {
@@ -76,7 +74,7 @@ static void motion_task(void *argument)
         if (consecutive < MOTION_CONFIRM_FRAMES) continue;
 
         ESP_LOGI(TAG, "motion wake state=%s accel_delta=%.3fg gyro=%.1fdps",
-                 julia_fsm_sub_state_name(state), (double)delta, (double)gyro);
+                 julia_fsm_main_state_name(state), (double)delta, (double)gyro);
         julia_idle_display_note_activity();
         esp_err_t err = julia_fsm_runtime_post(EVT_USER_RETURN);
         if (err != ESP_OK) {

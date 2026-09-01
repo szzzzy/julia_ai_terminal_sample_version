@@ -1,6 +1,6 @@
 /**
  * @file julia_fsm_runtime.h
- * @brief Owns the single application FSM instance and serializes events.
+ * @brief 持有应用唯一的 FSM 实例，并串行处理事件。
  */
 #pragma once
 
@@ -11,17 +11,12 @@
 extern "C" {
 #endif
 
-/** Create the sole FSM instance, apply its initial state, and start its event task. */
 esp_err_t julia_fsm_runtime_init(void);
-
-/**
- * Queue one event for the FSM task. This function never blocks the caller.
- * Events posted before initialization or while the queue is full are rejected.
- */
 esp_err_t julia_fsm_runtime_post(fsm_event_t event);
-
-/** Return the latest committed sub-state. */
-julia_sub_state_t julia_fsm_runtime_get_state(void);
+/** 返回当前新版本主状态。 */
+julia_main_state_t julia_fsm_runtime_get_state(void);
+/** 仅当主状态为 S2 时返回 S2.1/S2.2/S2.3，其他状态返回 NONE。 */
+julia_s2_sub_state_t julia_fsm_runtime_get_s2_sub_state(void);
 
 #ifdef __cplusplus
 }
