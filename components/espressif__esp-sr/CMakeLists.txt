@@ -1,3 +1,11 @@
+if(CONFIG_JULIA_SERVER_WAKE_ENABLE)
+    # Project-level server wake mode keeps this vendored component available
+    # for rollback/custom models, but deliberately omits its libraries and the
+    # srmodels.bin packing target from the active firmware build.
+    idf_component_register()
+    return()
+endif()
+
 if(IDF_TARGET STREQUAL "esp32")
     set(include_dirs
         src/include

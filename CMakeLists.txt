@@ -23,3 +23,10 @@ idf_build_set_property(EXTRA_CMAKE_ARGS
 idf_build_set_property(EXTRA_CMAKE_ARGS
     "-DCMAKE_PROGRAM_PATH=D:/Espressif/tools/xtensa-esp-elf/esp-14.2.0_20260121/xtensa-esp-elf/bin" APPEND)
 project(julia_fused_base LANGUAGES C CXX)
+
+# Reject stale configuration before producing firmware that cannot accept its own OTA images.
+if(NOT "${CONFIG_OTA_IMAGE_PROJECT_NAME}" STREQUAL "${PROJECT_NAME}")
+    message(FATAL_ERROR
+        "CONFIG_OTA_IMAGE_PROJECT_NAME must match project name '${PROJECT_NAME}' "
+        "(currently '${CONFIG_OTA_IMAGE_PROJECT_NAME}'). Update sdkconfig before building.")
+endif()

@@ -1,11 +1,9 @@
 /**
  * @file julia_night_schedule.c
- * @brief Turns trusted RTC/SNTP wall time into FSM night/wake events.
+ * @brief 把可信 RTC/SNTP 墙钟转换为夜间 FSM 事件。
  *
- * The RTC is restored into the system wall clock by julia_time.  This module
- * therefore reads localtime() rather than touching the PCF85063 bus directly.
- * State transition semantics are intentionally deferred to julia_fsm.c. This
- * module only emits the existing time events when an idle-class state is seen.
+ * julia_time 已把 RTC 时间恢复到系统墙钟，因此本模块只读取 localtime()，
+ * 不直接访问 PCF85063。模块负责判断时间窗口并投递既有事件，具体迁移由 FSM 决定。
  */
 #include "julia_night_schedule.h"
 
@@ -97,14 +95,14 @@ static void night_schedule_task(void *argument)
                     sleep_deadline_us = 0;
                 }
             } else {
-                /* Active states do not start the night-idle grace period. */
+                /* 活跃状态不开始夜间空闲宽限；返回空闲状态后重新完整计时。 */
                 sleep_deadline_us = esp_timer_get_time() +
                                     (int64_t)NIGHT_RESUME_DELAY_MS * 1000LL;
             }
         } else if (schedule_owns_sleep) {
             if (state == JULIA_MAIN_STATE_S6_SLEEP) {
                 julia_idle_display_note_activity();
-                post_event(EVT_WAKEUP);
+                /* 07:00 只恢复显示；S6 仍等待唤醒词后才进入 S4。 */
             }
             schedule_owns_sleep = false;
             sleep_deadline_us = 0;

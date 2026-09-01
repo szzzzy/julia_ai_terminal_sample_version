@@ -1,6 +1,17 @@
-# Julia Fused-Base Clangd 配置
-# 基于项目的 compile_commands.json（由 CMake 生成）做 IntelliSense。
-# 移除编译参数中的 -f* / -m*（Clang 与 GCC 配置参数不兼容，保留会误报）。
+# Julia Fused-Base clangd 配置。
+# 编译数据库位于 build 子目录；显式指定后，clangd 不再使用缺少 ESP-IDF
+# include/define 的回退命令。Xtensa GCC 只用于查询目标内建宏和系统头。
 
 CompileFlags:
+    CompilationDatabase: build
+    Compiler: D:/Espressif/tools/xtensa-esp-elf/esp-14.2.0_20260121/xtensa-esp-elf/bin/xtensa-esp32s3-elf-gcc.exe
     Remove: [-f*, -m*]
+
+---
+# 下列文件是仓库中的旧版参考实现，不在 main/CMakeLists.txt 的 srcs 中，
+# 并且仍依赖旧 FSM 类型。禁止对它们给出诊断，避免参考源码污染当前构建结果；
+# 参与构建的 app/voice/network/ota/fsm 等文件仍保持完整诊断。
+If:
+    PathMatch: main/(julia_voice\.c|context/julia_context\.c|memory/.*|ui/(julia_ui|julia_display_theme|avatar_micro_motion|avatar_micro_action)\.c|ui/avatar_parts/avatar_face\.c|voice/julia_lipsync\.c|display/st77916_qspi\.c|storage/julia_sd\.c)
+Diagnostics:
+    Suppress: '*'

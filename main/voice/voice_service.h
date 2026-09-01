@@ -79,7 +79,7 @@ esp_err_t voice_service_ip_ready(void *arg);
  * @param[in] uri 文件 URI："SD:/x/y" 映射到 /sdcard/x/y，"SPIFFS:/x/y" 映射到
  *                /spiffs/x/y；非法格式以 ERROR bad_uri 拒绝。
  *
- * @return ESP_OK 命令已入队，由会话任务在连接就绪后执行。
+ * @return ESP_OK 命令已入队，由当前 WSS 会话任务执行；断链时队列不重放。
  * @return ESP_ERR_INVALID_ARG uri 为空。
  * @return ESP_ERR_INVALID_SIZE uri 超出上限。
  * @return ESP_ERR_NO_MEM 命令队列已满。
@@ -109,8 +109,8 @@ esp_err_t voice_service_send_chunk(const uint8_t *buf, size_t len);
 /**
  * @brief 确认用户开始一轮说话（对应 MIC_START 语音命令）。
  *
- * 命令仅入队，真正生效在 WSS 会话任务。若PCM尚未上传则同时开启；若已处于
- * SPKE后的陪伴上传窗口，也仍会驱动UI/FSM进入LISTEN，而不是因上传已开启而忽略。
+ * 命令仅入队，真正生效在WSS会话任务。服务器唤醒模式下PCM从WSS认证成功起
+ * 已持续上传；MIC_START只确认唤醒/语句开始并驱动UI/FSM进入LISTEN。
  *
  * @return ESP_OK 命令已入队；ESP_ERR_NO_MEM 命令队列已满；ESP_ERR_INVALID_STATE 尚未启动。
  */
@@ -119,8 +119,8 @@ esp_err_t voice_service_mic_start(void);
 /**
  * @brief 确认当前一轮用户说话结束（对应 MIC_STOP 语音命令）。
  *
- * 命令仅结束LISTEN并驱动THINK，不关闭PCM上传。SPKE后固件回到IDLE并维持
- * 最多五分钟陪伴上传；超时后才关闭上传并由闲置策略进入S1.2。
+ * 命令仅结束LISTEN并驱动THINK，不关闭PCM上传。服务器唤醒模式下，SPKE和
+ * 十分钟进入 S3 待机只改变 UI/FSM，PCM 在 WSS 会话期间始终保持上传。
  *
  * @return ESP_OK 命令已入队；ESP_ERR_NO_MEM 命令队列已满；ESP_ERR_INVALID_STATE 尚未启动。
  */

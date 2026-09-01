@@ -62,6 +62,9 @@ esp_err_t network_lifecycle_register_ip_ready(network_ip_ready_cb_t callback, vo
  */
 esp_err_t network_lifecycle_start(void);
 
+/** Retry pending IP-ready callbacks promptly after a local startup dependency becomes ready. */
+void network_lifecycle_retry_services(void);
+
 #ifdef __cplusplus
 }
 #endif

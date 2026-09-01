@@ -67,6 +67,14 @@ typedef void (*wss_transport_binary_cb_t)(const uint8_t *data, size_t len);
 typedef void (*wss_transport_queue_item_cb_t)(void *item, size_t item_size);
 
 /**
+ * @brief 会话开始回调：TLS与WebSocket认证成功后、接收循环开始前调用。
+ *
+ * @note 在唯一WSS会话任务上下文中同步执行，可用于开启会话级PCM采集等
+ *       本地状态；如需发帧，可调用 wss_transport_send_now()。
+ */
+typedef void (*wss_transport_session_start_cb_t)(void);
+
+/**
  * @brief 会话结束回调：链路关闭、故障或保活超时后、重连等待之前调用。
  *
  * @note 在会话任务上下文中同步执行；供上层复位会话级业务状态（如 MIC 流）。
@@ -80,7 +88,9 @@ typedef struct {
     wss_transport_text_cb_t on_text; /**< 服务端文本消息回调，可为 NULL。 */
     wss_transport_binary_cb_t on_binary; /**< 服务端二进制消息回调，可为 NULL。 */
     wss_transport_queue_item_cb_t on_queue_item; /**< 命令队列条目回调，不允许为 NULL。 */
+    wss_transport_session_start_cb_t on_session_start; /**< 会话认证成功回调，可为 NULL。 */
     wss_transport_session_end_cb_t on_session_end; /**< 会话结束回调，可为 NULL。 */
+    void (*on_poll)(void); /**< 每次会话循环的有界业务推进，仅在会话任务调用。 */
     size_t queue_item_size; /**< 单条队列条目的大小，必须大于 0。 */
     unsigned queue_depth; /**< 命令队列深度，必须大于 0。 */
 } wss_transport_config_t;
@@ -113,11 +123,16 @@ esp_err_t wss_transport_start(const wss_transport_config_t *config);
  * @return ESP_ERR_INVALID_ARG item 为 NULL。
  * @return ESP_ERR_INVALID_SIZE item_size 与队列条目大小不匹配。
  * @return ESP_ERR_NO_MEM 命令队列已满。
- * @return ESP_ERR_INVALID_STATE 客户端尚未启动。
+ * @return ESP_ERR_INVALID_STATE 客户端尚未启动或 WSS 会话未就绪。
  *
  * @note 可被任意普通任务（如 MQTT 事件任务）调用；只入队不阻塞。
  */
 esp_err_t wss_transport_enqueue(const void *item, size_t item_size);
+
+/** Separate 4-slot control queue; PCM cannot consume its capacity. */
+esp_err_t wss_transport_enqueue_control(const void *item, size_t item_size);
+/** Mark the current session failed from a session callback (e.g. file read failure). */
+void wss_transport_fail_session(void);
 
 /**
  * @brief 在会话任务上下文中直接发送一帧 WebSocket 消息。

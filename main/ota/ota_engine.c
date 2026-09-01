@@ -53,6 +53,7 @@
 #include "ota_report.h"
 #include "ota_state_store.h"
 #include "ota_stability.h"
+#include "julia_fsm_runtime.h"
 
 #define BUFFSIZE 1024 /**< OTA 下载和 Flash 写入缓冲区大小，单位为字节。 */
 #define HASH_LEN 32   /**< SHA-256 摘要长度，单位为字节。 */
@@ -90,6 +91,26 @@ static uint32_t ota_cooldown_seconds(uint32_t cooldown_count)
                 CONFIG_OTA_DOWNLOAD_COOLDOWN_MAX_SECONDS : delay * 2U;
     }
     return MIN(delay, (uint32_t)CONFIG_OTA_DOWNLOAD_COOLDOWN_MAX_SECONDS);
+}
+
+/** 运行期 OTA 只有无法回滚到可用固件时升级 S7；其余任务失败保留当前固件。 */
+static bool ota_failure_requires_s7(native_ota_failure_reason_t reason)
+{
+    return reason == NATIVE_OTA_FAILURE_ROLLBACK_UNAVAILABLE;
+}
+
+/** 链路类失败保留 S8 和断点，等待现有 OTA 检查/下载流程恢复。 */
+static bool ota_failure_is_link_failure(native_ota_failure_reason_t reason)
+{
+    return reason == NATIVE_OTA_FAILURE_NETWORK_TIMEOUT ||
+           reason == NATIVE_OTA_FAILURE_TLS_VERIFY_FAILED ||
+           reason == NATIVE_OTA_FAILURE_HTTP_STATUS_INVALID;
+}
+
+static julia_fault_reason_t ota_fault_reason(native_ota_failure_reason_t reason)
+{
+    (void)reason;
+    return JULIA_FAULT_OTA_ROLLBACK_UNAVAILABLE;
 }
 
 /** Preserve a reliable TLS handshake/certificate failure instead of merging it
@@ -222,9 +243,19 @@ esp_err_t ota_engine_handle_server_json(const char *json, size_t json_len)
 
     ESP_LOGI(TAG, "Creating OTA task: artifact=%s, version=%s, size=%" PRIu32 ", force_update=%d",
              request->artifact_id, request->version, request->image_size, (int)request->force_update);
+    /* 必须先把 S8 事件排入 FSM，再创建高优先级 OTA 任务，避免任务快速失败时
+     * EVT_OTA_TASK_FAILED 先于 EVT_OTA_AVAILABLE 到达。 */
+    esp_err_t fsm_err = julia_fsm_runtime_post(EVT_OTA_AVAILABLE);
+    if (fsm_err != ESP_OK) {
+        ESP_LOGW(TAG, "OTA accepted but S8 event was rejected: %s",
+                 esp_err_to_name(fsm_err));
+    }
     if (xTaskCreate(ota_engine_task, "ota_engine_task", 12288, request, 5, NULL) != pdPASS) {
         ota_clear_in_progress();
         free(request);
+        if (fsm_err == ESP_OK) {
+            (void)julia_fsm_runtime_post(EVT_OTA_TASK_FAILED);
+        }
         return ESP_ERR_NO_MEM;
     }
 
@@ -1086,12 +1117,32 @@ cleanup:
                  native_ota_failure_reason_name(failure_reason), esp_err_to_name(err));
     }
     if (reboot) {
+        esp_err_t fsm_err = julia_fsm_runtime_post(EVT_OTA_SUCCEEDED);
+        if (fsm_err != ESP_OK) {
+            ESP_LOGW(TAG, "OTA success S0 event rejected: %s", esp_err_to_name(fsm_err));
+        }
+        /* 给低优先级 FSM 任务一次提交 S8 -> S0 的机会，再执行现有复位。 */
+        vTaskDelay(pdMS_TO_TICKS(50));
         ESP_LOGI(TAG, "Prepare to restart system!");
         esp_restart();
+    } else if (failure_reason != NATIVE_OTA_FAILURE_NONE) {
+        esp_err_t fsm_err;
+        if (ota_failure_requires_s7(failure_reason)) {
+            fsm_err = julia_fsm_runtime_raise_fault(
+                ota_fault_reason(failure_reason), err);
+        } else if (!ota_failure_is_link_failure(failure_reason)) {
+            fsm_err = julia_fsm_runtime_post(EVT_OTA_TASK_FAILED);
+        } else {
+            ESP_LOGW(TAG, "OTA link failure keeps S8 pending recovery: %s",
+                     native_ota_failure_reason_name(failure_reason));
+            fsm_err = ESP_OK;
+        }
+        if (fsm_err != ESP_OK) {
+            ESP_LOGW(TAG, "OTA terminal FSM event rejected: %s", esp_err_to_name(fsm_err));
+        }
     }
     vTaskDelete(NULL);
     while (1) {
         vTaskDelay(portMAX_DELAY);
     }
 }
-

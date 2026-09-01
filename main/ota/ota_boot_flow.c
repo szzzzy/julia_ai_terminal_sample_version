@@ -38,6 +38,7 @@
 #include "nvs_flash.h"
 
 #include "ota_boot_health.h"
+#include "julia_fault.h"
 #include "ota_report.h"
 #include "ota_state_store.h"
 #include "ota_types.h"
@@ -106,8 +107,18 @@ static bool ota_local_health_check(bool include_gpio_diagnostic)
  * @note 本函数不返回、不重启，也不擦除 NVS；通过每秒延时保持任务可调度，等待人工处理
  *       或外部复位。只能在普通任务上下文调用。
  */
-static void __attribute__((noreturn)) ota_enter_safe_mode(const char *reason)
+static bool s_fault_nvs_ready;
+
+static void __attribute__((noreturn)) ota_enter_safe_mode(
+    julia_fault_reason_t fault_reason, esp_err_t error, const char *reason)
 {
+    if (s_fault_nvs_ready) {
+        /* OTA 启动验收早于行为 FSM；以 S7 身份落盘后沿用现有安全模式，
+         * 不在无可回滚镜像时反复 reset。 */
+        (void)julia_fault_record(fault_reason, error,
+                                 JULIA_MAIN_STATE_S7_FAULT,
+                                 JULIA_S2_SUB_STATE_NONE);
+    }
     ota_boot_health_enter_safe_mode(reason);
 }
 
@@ -171,7 +182,8 @@ void ota_boot_flow_run(void)
     bool pending_verify = false;
     esp_err_t err = ota_boot_health_begin(&pending_verify);
     if (err != ESP_OK) {
-        ota_enter_safe_mode("cannot read OTA boot state");
+        ota_enter_safe_mode(JULIA_FAULT_FLASH_IO, err,
+                            "cannot read OTA boot state");
     }
 
     err = nvs_flash_init();
@@ -179,7 +191,8 @@ void ota_boot_flow_run(void)
         if (pending_verify) {
             ESP_LOGE(TAG, "NVS format is incompatible during PENDING_VERIFY; refusing to erase NVS");
             err = ota_boot_health_reject("NVS format incompatible");
-            ota_enter_safe_mode(err == ESP_ERR_OTA_ROLLBACK_FAILED ?
+            ota_enter_safe_mode(JULIA_FAULT_OTA_ROLLBACK_UNAVAILABLE, err,
+                                err == ESP_ERR_OTA_ROLLBACK_FAILED ?
                                 "rollback unavailable after NVS failure" :
                                 "rollback failed after NVS failure");
         }
@@ -188,8 +201,10 @@ void ota_boot_flow_run(void)
         err = nvs_flash_init();
     }
     if (err != ESP_OK) {
-        ota_enter_safe_mode("NVS initialization failed");
+        ota_enter_safe_mode(JULIA_FAULT_NVS_UNRECOVERABLE, err,
+                            "NVS initialization failed");
     }
+    s_fault_nvs_ready = true;
     ota_state_store_log_nvs_usage(TAG, "startup", ESP_OK);
 
     err = native_ota_report_init();
@@ -222,11 +237,13 @@ void ota_boot_flow_run(void)
                 ESP_LOGW(TAG, "Could not report rolled_back: %s", esp_err_to_name(err));
             }
             err = ota_boot_health_reject("boot self-test failed");
-            ota_enter_safe_mode(err == ESP_ERR_OTA_ROLLBACK_FAILED ?
+            ota_enter_safe_mode(JULIA_FAULT_OTA_ROLLBACK_UNAVAILABLE, err,
+                                err == ESP_ERR_OTA_ROLLBACK_FAILED ?
                                 "rollback unavailable after self-test" :
                                 "rollback failed after self-test");
         }
-        ota_enter_safe_mode("local health check failed");
+        ota_enter_safe_mode(JULIA_FAULT_CRITICAL_INIT, ESP_FAIL,
+                            "local health check failed");
     }
 
     /* A product override must finish critical local business initialization before a
@@ -243,7 +260,8 @@ void ota_boot_flow_run(void)
                      esp_err_to_name(err));
         }
         err = ota_boot_health_reject("product boot health check failed");
-        ota_enter_safe_mode(err == ESP_ERR_OTA_ROLLBACK_FAILED ?
+        ota_enter_safe_mode(JULIA_FAULT_OTA_ROLLBACK_UNAVAILABLE, err,
+                            err == ESP_ERR_OTA_ROLLBACK_FAILED ?
                             "rollback unavailable after product health check" :
                             "rollback failed after product health check");
     }
@@ -257,7 +275,8 @@ void ota_boot_flow_run(void)
                 NATIVE_OTA_FAILURE_ROLLBACK_UNAVAILABLE;
             (void)native_ota_report_boot_rolled_back(rollback_reason);
             err = ota_boot_health_reject("cannot confirm healthy image");
-            ota_enter_safe_mode("cannot confirm or rollback image");
+            ota_enter_safe_mode(JULIA_FAULT_OTA_ROLLBACK_UNAVAILABLE, err,
+                                "cannot confirm or rollback image");
         }
         err = native_ota_report_boot_succeeded();
         if (err != ESP_OK) {
@@ -295,4 +314,3 @@ void ota_boot_flow_run(void)
         }
     }
 }
-

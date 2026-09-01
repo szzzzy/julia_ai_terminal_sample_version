@@ -1,10 +1,9 @@
 /**
  * @file julia_motion.c
- * @brief Ports the old project's short-term QMI8658 motion detector.
+ * @brief QMI8658 短时运动检测与显示唤醒。
  *
- * This is deliberately not attitude solving and has no SD dependency.  It
- * compares adjacent acceleration samples and gyroscope magnitude, requires
- * three consecutive hits, and only wakes low-priority far/sleep states.
+ * 本模块比较相邻加速度样本与陀螺仪幅值，不执行姿态解算，也不依赖 SD。
+ * 连续命中门限后只恢复显示；S3/S5/S6 进入 S4 仍必须由唤醒词触发。
  */
 #include "julia_motion.h"
 
@@ -22,10 +21,10 @@
 #define MOTION_TASK_STACK_SIZE 3072
 #define MOTION_TASK_PRIORITY   3
 #define MOTION_SAMPLE_MS       100
-#define MOTION_CONFIRM_FRAMES  4
-#define MOTION_COOLDOWN_MS     3000
-#define MOTION_ACCEL_DELTA_G   0.20f
-#define MOTION_GYRO_DPS        25.0f
+#define MOTION_CONFIRM_FRAMES  8
+#define MOTION_COOLDOWN_MS     10000
+#define MOTION_ACCEL_DELTA_G   0.80f
+#define MOTION_GYRO_DPS        120.0f
 
 static const char *TAG = "JULIA_MOTION";
 static TaskHandle_t s_task;
@@ -73,13 +72,9 @@ static void motion_task(void *argument)
         consecutive = detected ? consecutive + 1U : 0U;
         if (consecutive < MOTION_CONFIRM_FRAMES) continue;
 
-        ESP_LOGI(TAG, "motion wake state=%s accel_delta=%.3fg gyro=%.1fdps",
+        ESP_LOGI(TAG, "motion display wake state=%s accel_delta=%.3fg gyro=%.1fdps",
                  julia_fsm_main_state_name(state), (double)delta, (double)gyro);
         julia_idle_display_note_activity();
-        esp_err_t err = julia_fsm_runtime_post(EVT_USER_RETURN);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "USER_RETURN rejected: %s", esp_err_to_name(err));
-        }
         consecutive = 0;
         cooldown_until = now + pdMS_TO_TICKS(MOTION_COOLDOWN_MS);
     }

@@ -52,4 +52,7 @@ void julia_avatar_set_dozing(bool active);
 /** Return the current dialogue phase without touching LVGL. */
 julia_avatar_dialog_phase_t julia_avatar_get_dialog_phase(void);
 
+/** 设置固定在屏幕左上侧的黑色小号状态叠字；UI 未初始化时先缓存。 */
+void julia_avatar_set_status_text(const char *text);
+
 bool julia_avatar_is_ready(void);

@@ -18,10 +18,11 @@ menu "Example Configuration"
 
     config OTA_IMAGE_PROJECT_NAME
         string "Expected image project name"
-        default "native_ota"
+        default "julia_fused_base"
         help
             Expected esp_app_desc project_name embedded in OTA images. This prevents an
             image built for another ESP-IDF project from being installed accidentally.
+            Must match the project() name in the root CMakeLists.txt.
 
     config OTA_ALLOWED_URL_HOSTS
         string "Allowed OTA URL hosts"
@@ -348,6 +349,16 @@ menu "Example Configuration"
 
     menu "WSS voice stream configuration"
 
+        config JULIA_SERVER_WAKE_ENABLE
+            bool "Use server-side wake word detection"
+            default y
+            help
+                Keep PCM upload active for the lifetime of an authenticated WSS
+                session while the UI remains IDLE. The server detects the wake
+                word and sends MIC_START to enter LISTEN. When enabled, the local
+                WakeNet detector is not compiled or initialized. Disable this to
+                restore the bundled local WakeNet path.
+
         config WSS_SERVER_HOST
             string "WSS voice server host"
             default "192.168.137.1"
@@ -536,15 +547,31 @@ menu "Example Configuration"
         config JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS
             int "Seconds before far standby"
             range 10 86400
-            default 300
+            default 600
             help
                 Continuous idle time before the companion display closes its eyes,
-                begins backlight breathing, and enters S1.2. WakeNet remains active.
+                begins backlight breathing, and enters S3. In server wake mode
+                PCM upload remains active; in local mode WakeNet remains active.
 
         config JULIA_DISPLAY_ACTIVITY_POLL_MS
             int "Idle policy polling period (ms)"
             range 100 5000
             default 500
+
+        config JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS
+            int "Seconds in S3 before sleep"
+            range 60 86400
+            default 1800
+            help
+                Continuous time in S3 standby before entering S6 sleep.
+                The RTC night schedule remains an independent earlier trigger.
+
+        config JULIA_SILENT_STANDBY_TIMEOUT_SECONDS
+            int "Seconds in S5 before standby"
+            range 60 86400
+            default 1800
+            help
+                Continuous time in S5 silent state before returning to S3 standby.
 
         config JULIA_DISPLAY_BREATHE_MIN_PERCENT
             int "Active breathing minimum percentage"

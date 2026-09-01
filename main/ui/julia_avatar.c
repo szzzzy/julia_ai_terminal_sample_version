@@ -31,6 +31,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "avatar_rle.h"
 #include "esp_check.h"
@@ -75,6 +76,7 @@
 static const char *TAG = "julia_avatar";
 static lv_obj_t *s_motion_root;
 static lv_obj_t *s_base;
+static lv_obj_t *s_status_label;
 static volatile bool s_ready;
 static bool s_talking;
 static uint32_t s_smoothed_rms;
@@ -90,6 +92,24 @@ static julia_avatar_dialog_phase_t s_applied_dialog_phase =
     (julia_avatar_dialog_phase_t)(JULIA_AVATAR_DIALOG_SPEAKING + 1);
 static portMUX_TYPE s_phase_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_boot_sequence_played;
+static char s_status_text[32] = "S0 BOOT";
+
+void julia_avatar_set_status_text(const char *text)
+{
+    if (text == NULL || text[0] == '\0') return;
+    char snapshot[sizeof(s_status_text)];
+    portENTER_CRITICAL(&s_phase_lock);
+    strncpy(s_status_text, text, sizeof(s_status_text) - 1U);
+    s_status_text[sizeof(s_status_text) - 1U] = '\0';
+    memcpy(snapshot, s_status_text, sizeof(snapshot));
+    portEXIT_CRITICAL(&s_phase_lock);
+
+    if (s_status_label == NULL || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
+    lv_label_set_text(s_status_label, snapshot);
+    lv_obj_move_foreground(s_status_label);
+    lv_obj_invalidate(s_status_label);
+    lvgl_port_unlock();
+}
 
 /* 嵌入的相位帧二进制导出符号（链接器按 EMBED_FILES 生成 _binary_*_start/end）。
  * 每个相位一张 360x360 RGB565 帧，用项目自有 RLE 压缩后嵌入固件。 */
@@ -204,25 +224,26 @@ static bool __attribute__((unused)) avatar_phase_frame_ensure(avatar_phase_frame
     return true;
 }
 
-/* 当前演示链统一使用与眼/嘴固定坐标严格对齐的 S1.1 稳定底图。
- * 旧 LISTEN/THINK/SPEAK RLE 帧继续保留在项目内，后续重新校准五官坐标后可恢复。 */
+/* LISTEN直接使用完整闭眼立绘；其余对话阶段使用与眼/嘴固定坐标严格对齐的
+ * S1.1稳定底图。旧LISTEN/THINK/SPEAK RLE帧继续保留在项目内。 */
 static const lv_img_dsc_t *avatar_source_for_phase(julia_avatar_dialog_phase_t phase)
 {
-    (void)phase;
+    if (phase == JULIA_AVATAR_DIALOG_LISTENING) {
+        return &avatar_asset_julia_s0_1_night_sleep;
+    }
     return &avatar_asset_julia_s1_1_near_standby;
 }
 
-/* Dialogue presentation expressed only through the calibrated eye layer:
- * IDLE=random blink, LISTEN=held closed, THINK=held open, SPEAK=held closed.
- * Mouth movement remains exclusively controlled by talking_start/feed_pcm. */
+/* LISTEN的闭眼表情已经完整烘焙在底图中，因此隐藏独立眼/嘴层；IDLE恢复随机
+ * 眨眼，THINK/SPEAK持续睁眼。嘴型仅在SPEAK由talking_start/feed_pcm驱动。 */
 static void avatar_apply_phase_eyes(julia_avatar_dialog_phase_t phase)
 {
-    bool closed = phase == JULIA_AVATAR_DIALOG_LISTENING ||
-                  phase == JULIA_AVATAR_DIALOG_SPEAKING;
-    uint8_t eye_main_state = phase == JULIA_AVATAR_DIALOG_IDLE ? 1U :
-                             phase == JULIA_AVATAR_DIALOG_LISTENING ? 3U : 4U;
-    avatar_eyes_set_idle_closed(closed);
+    bool full_closed_portrait = phase == JULIA_AVATAR_DIALOG_LISTENING;
+    uint8_t eye_main_state = phase == JULIA_AVATAR_DIALOG_IDLE ? 1U : 4U;
+    avatar_eyes_set_idle_closed(false);
     avatar_eyes_set_state(eye_main_state);
+    avatar_eyes_set_visible(!full_closed_portrait);
+    avatar_mouth_set_visible(!full_closed_portrait);
 }
 
 /* 把某对话框相位应用到底图。解开锁后由 WSS 任务调用，也可能在 avatar_l1 任务中触发。
@@ -360,9 +381,15 @@ void julia_avatar_feed_pcm(const int16_t *samples, size_t sample_count)
     if (samples == NULL || sample_count == 0U) {
         return;
     }
-    uint8_t level = mouth_level_for_frame(samples, sample_count);
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
     portENTER_CRITICAL(&s_state_lock);
+    /* Playback now feeds from another task; serialize the RMS smoother with
+     * talking_start/stop and never let a cancelled chunk reopen the mouth. */
+    if (!s_talking) {
+        portEXIT_CRITICAL(&s_state_lock);
+        return;
+    }
+    uint8_t level = mouth_level_for_frame(samples, sample_count);
     s_target_mouth_level = level;
     s_last_pcm_ms = now_ms;
     portEXIT_CRITICAL(&s_state_lock);
@@ -536,6 +563,22 @@ esp_err_t julia_avatar_init(void)
 
     avatar_eyes_init(s_motion_root);
     avatar_mouth_init(s_motion_root);
+
+    /* 状态叠字固定在屏幕坐标系，不挂到微动根对象，避免随立绘缩放或点头移动。 */
+    s_status_label = lv_label_create(screen);
+    lv_obj_set_pos(s_status_label, 6, 8);
+    lv_obj_set_width(s_status_label, 150);
+    lv_label_set_long_mode(s_status_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_color(s_status_label, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_status_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_status_label, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_clear_flag(s_status_label, LV_OBJ_FLAG_SCROLLABLE);
+    char status_snapshot[sizeof(s_status_text)];
+    portENTER_CRITICAL(&s_phase_lock);
+    memcpy(status_snapshot, s_status_text, sizeof(status_snapshot));
+    portEXIT_CRITICAL(&s_phase_lock);
+    lv_label_set_text(s_status_label, status_snapshot);
+    lv_obj_move_foreground(s_status_label);
     lv_obj_invalidate(screen);
     lvgl_port_unlock();
 

@@ -3,8 +3,8 @@
  * @brief   语音业务服务实现：命令语法、WSS 文件推送协议与入口装配。
  *
  * 模块关系：
- * - 通过 mqtt_comm_register_topic() 注册语音命令 topic，MQTT 命令与 WSS 服务端
- *   文本命令共用同一套语法解析；
+ * - 通过 mqtt_comm_register_topic() 注册语音命令 topic；原有纯文本控制与 WSS
+ *   语义一致，S4 的 intent_result JSON 只由 MQTT 控制面解析；
  * - 传输由纯传输层 wss_transport 完成（连接、帧、握手、保活、重连）；
  * - FILE_SEND 的 URI 映射由 voice_uri 完成；
  * - 所有对外接口只做有界入队，实际发送在 WSS 会话任务上下文中执行。
@@ -13,8 +13,8 @@
  * - MQTT 事件任务：voice_service_on_mqtt_command 解析命令 -> voice_service_* 入队；
  * - mic_task：board_audio 的 PCM1 帧 -> voice_service_on_board_audio_frame ->
  *   voice_service_send_chunk() 入队；
- * - WSS 会话任务（唯一"执行"上下文）：on_text / on_binary / on_queue_item /
- *   on_session_end 同步执行；传输层在该任务中收敛全部 socket/TLS 读写。
+ * - WSS 会话任务处理控制、收发和文件块；voice_playback 独立消费 PCM，
+ *   完成事件由 on_poll 收回，FSM 对话阶段仍只由 WSS 会话推进。
  * - 对话阶段只由 WSS 会话任务推进；陪伴上传超时由 esp_timer 回调关闭，
  *   因而上传/对话标志由 s_mic_state_lock 保护。
  */
@@ -30,6 +30,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 
 #include "board_audio.h"
@@ -38,11 +39,11 @@
 #include "julia_fsm_runtime.h"
 #include "mqtt_comm.h"
 #include "voice_uri.h"
+#include "voice_playback.h"
 #include "wss_transport.h"
 #include "sdkconfig.h"
 
-/* SD 文件访问锁钩子（融合方案 §9.6）：底座工程由 sd_card.c 提供强符号
- * julia_wireless_sd_lock/unlock；组件内弱默认实现允许未接线时无锁退化。 */
+/* 可选的共享 SD 所有权钩子；默认弱实现不加锁。 */
 __attribute__((weak)) bool julia_wireless_sd_lock(uint32_t timeout_ms)
 {
     (void)timeout_ms;
@@ -63,10 +64,10 @@ static void post_fsm_event(fsm_event_t event)
 }
 
 /**
- * WSS 作业队列深度。MIC 每 20 ms 产生一帧，16 槽可吸收约 320 ms 的
+ * WSS 作业队列深度。MIC 每 20 ms 产生一帧，8 槽可吸收约 160 ms 的
  * 短时网络/调度抖动；队列仍保持有界，避免弱网时无限占用内部 RAM。
  */
-#define VOICE_QUEUE_DEPTH 16
+#define VOICE_QUEUE_DEPTH 8
 
 /**
  * @brief 命令队列中的一条作业：文件 URI（含 NUL）或一块 MIC 数据。
@@ -90,8 +91,16 @@ typedef struct {
 static portMUX_TYPE s_mic_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_mic_streaming;
 static bool s_dialog_listening;
+/* These fields are owned exclusively by the WSS session task. */
+static uint32_t s_playback_generation;
+static FILE *s_file;
+static uint64_t s_file_size;
+static uint64_t s_file_sent;
+static uint32_t s_uplink_dropped;
+#if !CONFIG_JULIA_SERVER_WAKE_ENABLE
 static bool s_companion_timer_armed;
 static esp_timer_handle_t s_companion_timer;
+#endif
 
 /** FILE_SEND 允许的最大文件大小（8 MiB，融合方案 §9.6 二次限制）。 */
 #define VOICE_SEND_MAX_FILE_BYTES (8 * 1024 * 1024)
@@ -105,6 +114,9 @@ static bool voice_service_mic_is_streaming(void)
     return streaming;
 }
 
+#if CONFIG_JULIA_SERVER_WAKE_ENABLE
+static void voice_service_disarm_companion_timer(void) {}
+#else
 static void voice_service_disarm_companion_timer(void)
 {
     portENTER_CRITICAL(&s_mic_state_lock);
@@ -119,7 +131,7 @@ static void voice_service_disarm_companion_timer(void)
     }
 }
 
-/** Five idle companion minutes close PCM upload; idle_display independently enters S1.2. */
+/** 本地唤醒模式下，十分钟无交互会关闭陪伴 PCM 上传；显示策略同时进入 S3。 */
 static void voice_service_companion_timeout(void *arg)
 {
     (void)arg;
@@ -174,6 +186,7 @@ static void voice_service_arm_companion_timer(void)
     ESP_LOGI(TAG, "Companion MIC upload armed for %d seconds",
              CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS);
 }
+#endif
 
 /**
  * @brief board_audio 的 WSS sink 适配器：完整 PCM1 帧（16 B 头 + PCM）
@@ -182,7 +195,12 @@ static void voice_service_arm_companion_timer(void)
 static void voice_service_on_board_audio_frame(const uint8_t *frame, size_t bytes, void *ctx)
 {
     (void)ctx;
-    (void)voice_service_send_chunk(frame, bytes);
+    if (voice_service_send_chunk(frame, bytes) != ESP_OK) {
+        /* 只有该 MIC 回调写计数器；按累计值节流日志，避免每帧刷屏。 */
+        if ((++s_uplink_dropped & 255U) == 1U) {
+            ESP_LOGW(TAG, "MIC enqueue drops=%lu", (unsigned long)s_uplink_dropped);
+        }
+    }
 }
 
 /** 是否为允许外发的文件扩展名（当前仅 .wav）。 */
@@ -210,8 +228,7 @@ static esp_err_t voice_service_send_error(const char *text)
  *
  * 打开失败向服务端回复 "ERROR file_open_failed"；成功后按协议发送
  * "BEGIN FILE <size> <name>"、若干 1200 B 二进制帧和 "END <bytes>"。
- * BEGIN、二进制帧、fread 或 END 任一失败都会置位会话故障标志（由传输层
- * 在写失败时设置），会话循环随后关闭并重连，绝不给截断文件发送 END。
+ * 此函数只打开文件并发送 BEGIN；on_poll 每轮推进一个块，完整结束才发送 END。
  *
  * @param[in] uri NUL 结尾的文件 URI，长度受 VOICE_SERVICE_URI_MAX_LEN 约束。
  * @return ESP_OK 传输成功或命令被安全拒绝（会话仍健康）；
@@ -219,6 +236,13 @@ static esp_err_t voice_service_send_error(const char *text)
  */
 static esp_err_t voice_service_push_file(const char *uri)
 {
+    portENTER_CRITICAL(&s_mic_state_lock);
+    bool listening = s_dialog_listening;
+    portEXIT_CRITICAL(&s_mic_state_lock);
+    if (s_file != NULL || voice_playback_is_active() || listening) {
+        (void)voice_service_send_error("ERROR file_busy");
+        return ESP_OK;
+    }
     char path[VOICE_SERVICE_URI_MAX_LEN + 16];
     if (!voice_uri_to_path(uri, path, sizeof(path))) {
         (void)voice_service_send_error("ERROR bad_uri");
@@ -232,7 +256,7 @@ static esp_err_t voice_service_push_file(const char *uri)
     }
 
     /* 文件访问必须持有 SD 锁（融合方案 §9.6）。 */
-    if (!julia_wireless_sd_lock(3000)) {
+    if (!julia_wireless_sd_lock(0)) {
         (void)voice_service_send_error("ERROR sd_busy");
         ESP_LOGW(TAG, "FILE_SEND rejected: SD lock busy");
         return ESP_OK;
@@ -281,50 +305,107 @@ static esp_err_t voice_service_push_file(const char *uri)
     }
     ESP_LOGI(TAG, "Pushing %s (%ld bytes)", path, size);
 
-    static uint8_t buf[WSS_TRANSPORT_MAX_PAYLOAD];
-    uint64_t total = 0;
-    bool ok = true;
-    for (;;) {
-        size_t got = fread(buf, 1, sizeof(buf), f);
-        if (got == 0) {
-            if (ferror(f)) {
-                ESP_LOGE(TAG, "fread failed for %s", path);
-                ok = false;
-            }
-            break;
-        }
-        if (wss_transport_send_now(0x2, buf, got) != ESP_OK) {
-            ESP_LOGE(TAG, "Binary frame send failed for %s at offset %" PRIu64, path, total);
-            ok = false;
-            break;
-        }
-        total += (uint64_t)got;
-    }
-    fclose(f);
-    julia_wireless_sd_unlock();
-
-    /* 仅当完整读出且每个字节都确认写出（total == 预取 size）时才发 END；
-     * 任何失败都置位会话故障，把截断文件伪装成已结束传输。 */
-    if (!ok || total != (uint64_t)size) {
-        ESP_LOGW(TAG, "Aborting push of %s: %" PRIu64 "/%ld bytes transferred", path, total, size);
-        return ESP_FAIL;
-    }
-    char end[48];
-    n = snprintf(end, sizeof(end), "END %" PRIu64, total);
-    if (n <= 0 || (size_t)n >= sizeof(end) ||
-        wss_transport_send_now(0x1, (const uint8_t *)end, (size_t)n) != ESP_OK) {
-        ESP_LOGE(TAG, "END frame send failed for %s", path);
-        return ESP_FAIL;
-    }
-    ESP_LOGI(TAG, "Pushed %s (%" PRIu64 " bytes)", path, total);
+    s_file = f;
+    s_file_size = (uint64_t)size;
+    s_file_sent = 0;
     return ESP_OK;
 }
 
-/** MIC_START is a semantic utterance start; it also opens PCM upload if needed. */
+static void voice_service_close_file(void)
+{
+    if (s_file != NULL) {
+        fclose(s_file);
+        s_file = NULL;
+        julia_wireless_sd_unlock();
+    }
+}
+
+static void voice_service_cancel_file(void)
+{
+    if (s_file != NULL) {
+        voice_service_close_file();
+        (void)voice_service_send_error("ERROR file_cancelled");
+    }
+}
+
+/* 每轮会话最多推进一个有界文件块，确保控制、接收和 PING 都有执行机会。
+ * 文件 END（或 ERROR）之前暂停 MIC 二进制帧，避免同一连接上的数据语义混淆。 */
+static void voice_service_file_poll(void)
+{
+    if (s_file == NULL) return;
+    uint8_t buf[WSS_TRANSPORT_MAX_PAYLOAD];
+    size_t got = fread(buf, 1, sizeof(buf), s_file);
+    if (got > 0) {
+        if (s_file_sent + got > s_file_size ||
+            wss_transport_send_now(0x2, buf, got) != ESP_OK) {
+            voice_service_close_file();
+            wss_transport_fail_session();
+            return;
+        }
+        s_file_sent += got;
+        return;
+    }
+    bool ok = !ferror(s_file) && s_file_sent == s_file_size;
+    voice_service_close_file();
+    if (!ok) {
+        ESP_LOGW(TAG, "File read incomplete: %" PRIu64 "/%" PRIu64, s_file_sent, s_file_size);
+        wss_transport_fail_session();
+        return;
+    }
+    char end[48];
+    int n = snprintf(end, sizeof(end), "END %" PRIu64, s_file_sent);
+    (void)wss_transport_send_now(0x1, (const uint8_t *)end, (size_t)n);
+}
+
+static void voice_service_speaker_done(void)
+{
+    s_playback_generation = 0;
+    julia_avatar_talking_stop();
+    portENTER_CRITICAL(&s_mic_state_lock);
+    s_dialog_listening = false;
+    if (s_mic_streaming) board_audio_mic_wake();
+    portEXIT_CRITICAL(&s_mic_state_lock);
+    post_fsm_event(EVT_SILENCE_TIMEOUT);
+    julia_idle_display_note_activity();
+    julia_idle_display_set_busy(false);
+#if !CONFIG_JULIA_SERVER_WAKE_ENABLE
+    if (voice_service_mic_is_streaming()) voice_service_arm_companion_timer();
+#endif
+}
+
+static void voice_service_poll(void)
+{
+    uint32_t generation;
+    esp_err_t result;
+    if (voice_playback_take_completion(&generation, &result) &&
+        generation == s_playback_generation) {
+        voice_service_speaker_done();
+        if (result != ESP_OK) {
+            (void)voice_service_send_error(result == ESP_ERR_NO_MEM ? "ERROR playback_overflow" :
+                                          result == ESP_ERR_TIMEOUT ? "ERROR playback_timeout" :
+                                                                     "ERROR playback_failed");
+        }
+    }
+    voice_service_file_poll();
+}
+
+static void voice_service_played_pcm(const int16_t *pcm, size_t samples, void *ctx)
+{
+    (void)ctx;
+    julia_avatar_feed_pcm(pcm, samples);
+}
+
+/** MIC_START 表示一轮用户发言开始，并在需要时同时开启 PCM 上传。 */
 static void voice_service_apply_mic_start(void)
 {
     voice_service_disarm_companion_timer();
     julia_idle_display_note_activity();
+
+    voice_service_cancel_file();
+    bool interrupted_speaker = voice_playback_is_active();
+    voice_playback_stop();
+    s_playback_generation = 0;
+    julia_avatar_talking_stop();
 
     bool already_listening;
     bool started_streaming = false;
@@ -341,17 +422,21 @@ static void voice_service_apply_mic_start(void)
 
     julia_idle_display_set_busy(true);
     if (!already_listening) {
-        /* A wake while S0 first returns to S1.1, then enters S3.3 LISTEN.
-         * This path is intentionally executed even when PCM was already being
-         * uploaded by the companion window. */
-        post_fsm_event(EVT_WAKEUP);
+        if (interrupted_speaker) {
+            /* 服务端确认的用户发言优先于当前扬声器下行。 */
+            post_fsm_event(EVT_INTERRUPT);
+        } else {
+            /* 非打断场景先复用现有唤醒事件，再投递用户呼叫事件进入“听”。 */
+            post_fsm_event(EVT_WAKEUP);
+        }
         post_fsm_event(EVT_USER_CALL);
     }
-    ESP_LOGI(TAG, "MIC_START: listening%s",
-             started_streaming ? ", PCM upload started" : ", PCM upload already active");
+    ESP_LOGI(TAG, "MIC_START: listening%s%s",
+             started_streaming ? ", PCM upload started" : ", PCM upload already active",
+             interrupted_speaker ? ", speaker interrupted" : "");
 }
 
-/** MIC_STOP ends the utterance but leaves PCM upload available for the companion window. */
+/** MIC_STOP 表示本轮用户发言结束，但在陪伴窗口内继续保留 PCM 上传能力。 */
 static void voice_service_apply_mic_stop(void)
 {
     julia_idle_display_note_activity();
@@ -367,8 +452,8 @@ static void voice_service_apply_mic_stop(void)
         return;
     }
 
-    /* THINK remains busy, while the transport stays open for the eventual
-     * SPKE -> IDLE companion window and server-side dynamic-noise VAD. */
+    /* “想”阶段继续保持忙碌；传输连接保留到后续 SPKE -> IDLE 陪伴窗口，
+     * 同时供服务端动态噪声 VAD 继续使用。 */
     julia_idle_display_set_busy(true);
     if (was_listening) {
         post_fsm_event(EVT_START_DIALOG);
@@ -379,7 +464,7 @@ static void voice_service_apply_mic_stop(void)
 /**
  * @brief 处理服务端下发的完整文本帧命令（wss_transport on_text 回调）。
  *
- * 在会话任务上下文中执行：FILE_SEND 立即推送；MIC_START/MIC_STOP 直接调用
+ * 在会话任务上下文中执行：FILE_SEND 启动分块推送；MIC_START/MIC_STOP 直接调用
  * 与 MQTT 队列作业共用的内部状态应用函数，避免被 PCM1 队列挤占。
  *
  * @param[in] text 文本载荷，不要求以 NUL 结尾。
@@ -417,27 +502,17 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
      * 但与在下行 PCM（on_binary）之间隐含着顺序约束：必须先 SPKS 成功
      * 才允许写 PCM，否则 PCM 被 on_binary 丢弃（见 voice_service_on_binary）。 */
     if (len == 4 && memcmp(text, "SPKE", 4) == 0) {
-        (void)board_audio_speaker_stop();
-        julia_avatar_talking_stop();
-        /* End SPEAK semantically but keep continuous PCM available while IDLE.
-         * The server performs dynamic-noise/VAD analysis and sends MIC_START
-         * only after it confirms a new utterance. */
-        portENTER_CRITICAL(&s_mic_state_lock);
-        s_dialog_listening = false;
-        if (s_mic_streaming) {
-            board_audio_mic_wake();
-        }
-        portEXIT_CRITICAL(&s_mic_state_lock);
-        post_fsm_event(EVT_SILENCE_TIMEOUT);
-        julia_idle_display_note_activity();
-        julia_idle_display_set_busy(false);
-        if (voice_service_mic_is_streaming()) {
-            voice_service_arm_companion_timer();
-        }
-        ESP_LOGI(TAG, "SPKE: speaker stop, IDLE companion upload retained");
+        /* END 排在所有已接收 PCM 之后；播放任务负责报告完成。
+         * 已被打断或不存在的播放代次无需执行结束动作。 */
+        if (s_playback_generation != 0) voice_playback_finish();
+        ESP_LOGI(TAG, "SPKE: draining accepted playback");
     } else if (len == 4 && memcmp(text, "SPKT", 4) == 0) {
-        (void)board_audio_speaker_self_test();
-        ESP_LOGI(TAG, "SPKT: local tone test");
+        voice_service_disarm_companion_timer();
+        if (voice_playback_start(24000, true, &s_playback_generation) == ESP_OK) {
+            voice_service_cancel_file();
+            julia_idle_display_set_busy(true);
+        }
+        ESP_LOGI(TAG, "SPKT: asynchronous local tone test");
     } else if (len > 5 && memcmp(text, "SPKS ", 5) == 0) {
         char buf[16];
         size_t n = len - 5;
@@ -446,10 +521,15 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
         buf[n] = '\0';
         char *end = NULL;
         long rate = strtol(buf, &end, 10);
-        if (end != buf && board_audio_speaker_start((uint32_t)rate) == ESP_OK) {
+        if (end != buf && *end == '\0' &&
+            voice_playback_start((uint32_t)rate, false, &s_playback_generation) == ESP_OK) {
+            voice_service_cancel_file();
+            voice_service_disarm_companion_timer();
             julia_avatar_talking_start();
-            /* Normal flow is S3.3 -> S4.1 -> S4.3. START_DIALOG is harmless
-             * when MIC_STOP has already advanced the FSM to S4.1. */
+            /* 复用现有事件推进 S2 子状态：S1 的 USER_CALL 进入 S2.1“听”；
+             * MIC_STOP/START_DIALOG 由 S2.1 进入 S2.2，SPKS/MULTI_TURN 进入 S2.3“说”。
+             * S4 的沟通意图必须等待服务端语义信号，不能由本地 USER_CALL 推断。
+             * 若 MIC_STOP 已推进到 S2.2，此处重复 START_DIALOG 会被安全忽略。 */
             post_fsm_event(EVT_START_DIALOG);
             post_fsm_event(EVT_MULTI_TURN_DETECTED);
             julia_idle_display_note_activity();
@@ -473,6 +553,9 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
             ESP_LOGW(TAG, "Invalid SPKV volume: %.*s", (int)n, buf);
         }
     } else if (len > 5 && memcmp(text, "MICS ", 5) == 0) {
+#if CONFIG_JULIA_SERVER_WAKE_ENABLE
+        ESP_LOGW(TAG, "MICS ignored: server wake mode requires continuous PCM upload");
+#else
         char buf[16];
         size_t n = len - 5;
         if (n >= sizeof(buf)) n = sizeof(buf) - 1;
@@ -486,6 +569,7 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
         } else {
             ESP_LOGW(TAG, "Invalid MICS bg: %.*s", (int)n, buf);
         }
+#endif
     } else if (len == 4 && memcmp(text, "MICW", 4) == 0) {
         board_audio_mic_wake();
         ESP_LOGI(TAG, "MICW: wake, continuous upload");
@@ -495,7 +579,7 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
 }
 
 /**
- * @brief WSS 下行二进制（服务端 PCM）→ 板级扬声器（融合方案 §9.4）。
+ * @brief WSS 下行 PCM 复制到独立播放任务的有界缓冲，不在此写 I2S。
  *
  * 前置约束：必须已由 SPKS 开始播放（board_audio_speaker_is_playing()），
  * 否则整帧丢弃（§9.6 保护）——服务器推流顺序要求"先 SPKS，再 PCM 帧"。
@@ -507,22 +591,20 @@ static void voice_service_on_binary(const uint8_t *data, size_t len)
     if (data == NULL || len == 0U || (len & 1U) != 0U) {
         return;
     }
-    if (!board_audio_speaker_is_playing()) {
+    if (!voice_playback_is_active()) {
         ESP_LOGW(TAG, "Dropping %u-byte downlink PCM: speaker not started", (unsigned)len);
         return;
     }
-    esp_err_t err = board_audio_speaker_write(data, len);
+    esp_err_t err = voice_playback_write(data, len);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Downlink PCM write failed: %s", esp_err_to_name(err));
-    } else {
-        julia_avatar_feed_pcm((const int16_t *)data, len / sizeof(int16_t));
     }
 }
 
 /**
  * @brief 处理命令队列中的一条作业（wss_transport on_queue_item 回调）。
  *
- * 在会话任务上下文中执行；FILE_SEND 直接推送文件，MIC 块仅在流式状态
+ * 在会话任务上下文中执行；FILE_SEND 启动分块传输，MIC 块仅在流式状态
  * 开启且会话有效时发送。
  *
  * @param[in] item      队列条目，不允许为 NULL。
@@ -547,7 +629,10 @@ static void voice_service_on_queue_item(void *item, size_t item_size)
         voice_service_apply_mic_stop();
         break;
     case VOICE_JOB_SEND_CHUNK:
-        if (!voice_service_mic_is_streaming()) {
+        if (s_file != NULL) {
+            /* BEGIN FILE..END is a file-only binary interval. */
+            break;
+        } else if (!voice_service_mic_is_streaming()) {
             ESP_LOGW(TAG, "Dropping %u-byte MIC chunk: streaming is not active",
                      (unsigned)job->len);
         } else if (wss_transport_send_now(0x2, job->data, job->len) != ESP_OK) {
@@ -560,6 +645,23 @@ static void voice_service_on_queue_item(void *item, size_t item_size)
     }
 }
 
+#if CONFIG_JULIA_SERVER_WAKE_ENABLE
+/** Authenticated WSS means the server becomes the sole wake-word detector. */
+static void voice_service_on_session_start(void)
+{
+    portENTER_CRITICAL(&s_mic_state_lock);
+    s_mic_streaming = true;
+    s_dialog_listening = false;
+    board_audio_mic_wake();
+    board_audio_enable_wss_mic(true);
+    portEXIT_CRITICAL(&s_mic_state_lock);
+
+    /* 后台唤醒监听只属于传输层；服务端明确发送 MIC_START 前，
+     * 保持当前主状态与 IDLE 立绘不变。 */
+    ESP_LOGI(TAG, "WSS session ready: IDLE PCM upload enabled for server wake detection");
+}
+#endif
+
 /**
  * @brief WSS 会话结束回调：链路关闭后复位会话级 MIC 流式状态。
  */
@@ -571,7 +673,9 @@ static void voice_service_on_session_end(void)
     s_dialog_listening = false;
     board_audio_enable_wss_mic(false);
     portEXIT_CRITICAL(&s_mic_state_lock);
-    (void)board_audio_speaker_stop();
+    voice_service_close_file();
+    voice_playback_stop();
+    s_playback_generation = 0;
     julia_avatar_talking_stop();
     post_fsm_event(EVT_SILENCE_TIMEOUT);
     julia_idle_display_note_activity();
@@ -598,14 +702,54 @@ static esp_err_t voice_service_enqueue(voice_job_type_t type, const uint8_t *dat
     if (data != NULL && len > 0U) {
         memcpy(job.data, data, len);
     }
-    return wss_transport_enqueue(&job, sizeof(job));
+    return type == VOICE_JOB_SEND_CHUNK ? wss_transport_enqueue(&job, sizeof(job))
+                                       : wss_transport_enqueue_control(&job, sizeof(job));
+}
+
+/**
+ * @brief 解析服务端经 MQTT 下发的 S4 语义判定结果。
+ *
+ * 固定格式：{"type":"intent_result","intent":"normal|goodnight|dismiss"}。
+ * 返回 true 表示载荷是 JSON 并已完成处理或拒绝；false 表示继续按旧文本命令解析。
+ */
+static bool voice_service_handle_intent_json(const char *cmd, size_t cmd_len)
+{
+    if (cmd_len == 0U || cmd[0] != '{') return false;
+    cJSON *root = cJSON_ParseWithLength(cmd, cmd_len);
+    if (root == NULL || !cJSON_IsObject(root)) {
+        ESP_LOGW(TAG, "Ignoring malformed intent JSON");
+        cJSON_Delete(root);
+        return true;
+    }
+
+    const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
+    const cJSON *intent = cJSON_GetObjectItemCaseSensitive(root, "intent");
+    if (!cJSON_IsString(type) || strcmp(type->valuestring, "intent_result") != 0 ||
+        !cJSON_IsString(intent)) {
+        ESP_LOGW(TAG, "Ignoring JSON without type=intent_result and string intent");
+        cJSON_Delete(root);
+        return true;
+    }
+
+    if (strcmp(intent->valuestring, "normal") == 0) {
+        /* normal 只确认没有特殊语义；正常状态推进继续由现有语音事件负责。 */
+        ESP_LOGD(TAG, "Normal intent accepted without FSM transition");
+    } else if (strcmp(intent->valuestring, "goodnight") == 0) {
+        post_fsm_event(EVT_INTENT_GOODNIGHT);
+    } else if (strcmp(intent->valuestring, "dismiss") == 0) {
+        post_fsm_event(EVT_INTENT_DISMISS);
+    } else {
+        ESP_LOGW(TAG, "Ignoring unknown intent result: %s", intent->valuestring);
+    }
+    cJSON_Delete(root);
+    return true;
 }
 
 /**
  * @brief 处理一条完整重组的 MQTT 语音命令（通信层注册表回调）。
  *
- * 语音命令是纯文本行：FILE_SEND <uri>、MIC_START、MIC_STOP。命令只入队，
- * 不在此处访问网络，也不影响 OTA 状态。
+ * 原有命令是纯文本行：FILE_SEND <uri>、MIC_START、MIC_STOP；语义结果使用
+ * JSON：{"type":"intent_result","intent":"normal|goodnight|dismiss"}。
  *
  * @param[in] cmd     NUL 结尾的命令文本，不允许为 NULL。
  * @param[in] cmd_len 命令有效长度，范围为 1～VOICE_SERVICE_CMD_MAX_LEN。
@@ -626,6 +770,8 @@ static void voice_service_on_mqtt_command(const char *cmd, size_t cmd_len)
         return;
     }
     ESP_LOGI(TAG, "Voice command: %.*s", (int)cmd_len, cmd);
+
+    if (voice_service_handle_intent_json(cmd, cmd_len)) return;
 
     if (cmd_len > strlen("FILE_SEND ") && strncmp(cmd, "FILE_SEND ", 10) == 0) {
         /* 复制到独立缓冲区保证 NUL 结尾，供 WSS 会话任务异步使用。 */
@@ -662,6 +808,7 @@ static void voice_service_on_mqtt_command(const char *cmd, size_t cmd_len)
 
 esp_err_t voice_service_init(void)
 {
+#if !CONFIG_JULIA_SERVER_WAKE_ENABLE
     if (s_companion_timer == NULL) {
         const esp_timer_create_args_t timer_args = {
             .callback = voice_service_companion_timeout,
@@ -673,6 +820,7 @@ esp_err_t voice_service_init(void)
         ESP_RETURN_ON_ERROR(esp_timer_create(&timer_args, &s_companion_timer),
                             TAG, "create companion timer");
     }
+#endif
     /* 语音 topic 非 critical：语音订阅失败不影响 OTA 连接就绪判定。 */
     return mqtt_comm_register_topic(CONFIG_COMM_MQTT_VOICE_CMD_TOPIC,
                                     VOICE_SERVICE_CMD_MAX_LEN, false,
@@ -681,8 +829,10 @@ esp_err_t voice_service_init(void)
 
 esp_err_t voice_service_init_board_audio(void)
 {
-    /* 板级 MIC：把 PCM1 帧（16B 头 + PCM）路由到 WSS binary（voice_service_send_chunk）。
-     * 未启动 MIC_START 前 mic_task 不组帧，无需其他门控。 */
+    ESP_RETURN_ON_ERROR(voice_playback_init(voice_service_played_pcm, NULL),
+                        TAG, "init playback worker");
+    /* 板级MIC把PCM1帧路由到WSS。服务器唤醒模式在WSS认证完成时立即打开
+     * 此上行；MIC_START只改变对话语义和UI。 */
     ESP_RETURN_ON_ERROR(board_audio_set_wss_sink(voice_service_on_board_audio_frame, NULL),
                         TAG, "set WSS sink");
     ESP_LOGI(TAG, "board audio wired: PCM1 uplink -> WSS, SPKS/SPKE downlink -> speaker");
@@ -696,7 +846,11 @@ esp_err_t voice_service_ip_ready(void *arg)
         .on_text = voice_service_on_server_text,
         .on_binary = voice_service_on_binary,
         .on_queue_item = voice_service_on_queue_item,
+#if CONFIG_JULIA_SERVER_WAKE_ENABLE
+        .on_session_start = voice_service_on_session_start,
+#endif
         .on_session_end = voice_service_on_session_end,
+        .on_poll = voice_service_poll,
         .queue_item_size = sizeof(voice_job_t),
         .queue_depth = VOICE_QUEUE_DEPTH,
     };

@@ -29,7 +29,7 @@ void avatar_eyes_set_transition_active(bool active);
 void avatar_eyes_set_visible(bool visible);
 /* 立即把左右眼切到指定帧（内部取 LVGL 锁）。 */
 void avatar_eyes_show(avatar_eyes_frame_t frame);
-/** Hold the eyes closed across the periodic blink task until explicitly released. */
+/** 持续保持闭眼，直到调用方显式解除；期间周期眨眼任务不会恢复睁眼。 */
 void avatar_eyes_set_idle_closed(bool closed);
 /* 将 360×360 RGB565 帧内的“绿色瞳孔”像素重着色为金铜色（眼部特征处理）。 */
 void avatar_eyes_correct_pupils_rgb565(uint16_t *pixels, uint16_t width, uint16_t height);

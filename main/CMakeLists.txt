@@ -31,6 +31,8 @@ set(srcs
     # 语音服务：纯传输层 + 业务协议 + URI 映射 + 演示。
     "voice/wss_transport.c"
     "voice/voice_service.c"
+    "voice/voice_playback.c"
+    "voice/pcm_buffer.c"
     "voice/voice_uri.c"
     "voice/voice_push_demo.c"
 
@@ -61,9 +63,6 @@ set(srcs
     "ui/julia_backlight.c"
     "app/julia_idle_display.c"
 
-    # 本地唤醒词（WakeNet "你好小智"）：检测到后自动开麦推流。
-    "voice/wake_detector.c"
-
     # 固件 OTA 模块。
     "ota/ota_boot_flow.c"
     "ota/ota_boot_health.c"
@@ -80,6 +79,7 @@ set(srcs
 
     "fsm/julia_fsm.c"
     "fsm/julia_fsm_runtime.c"
+    "fsm/julia_fault.c"
 
 )
 set(priv_requires
@@ -114,8 +114,16 @@ set(priv_requires
     esp_mm
     lvgl__lvgl
     julia_board_audio
-    espressif__esp-sr
 )
+
+# Server-side wake is the delivery default: the firmware continuously uploads
+# IDLE PCM and the server sends MIC_START only after detecting the wake word.
+# Keep the local WakeNet source and dependency behind one switch for rollback
+# or for a future custom "你好小科" model.
+if(NOT CONFIG_JULIA_SERVER_WAKE_ENABLE)
+    list(APPEND srcs "voice/wake_detector.c")
+    list(APPEND priv_requires espressif__esp-sr)
+endif()
 
 idf_component_register(
     SRCS ${srcs}

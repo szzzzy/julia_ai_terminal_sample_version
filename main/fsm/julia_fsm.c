@@ -1,9 +1,9 @@
 /**
  * @file julia_fsm.c
- * @brief S0～S8 分层状态的元数据与允许迁移图。
+ * @brief Julia 行为状态机的状态校验、允许迁移图与现有事件映射。
  *
- * 本文件负责校验并执行调用方明确请求的状态切换。听、想、说阶段复用
- * 现有语音事件完成映射，其他事件到目标状态的规则将在后续补充。
+ * 允许迁移图负责拒绝非法跳转；事件入口只映射当前工程已经实际产生的
+ * 空闲、唤醒、夜间和语音事件。未实现的故障、OTA 等业务不在这里预留处理分支。
  */
 #include "julia_fsm.h"
 
@@ -35,31 +35,21 @@ static const char *const s_s2_sub_state_names[JULIA_S2_SUB_STATE_COUNT] = {
 static const char *const s_event_names[EVT_COUNT] = {
     [EVT_NONE] = "EVT_NONE",
     [EVT_USER_LEAVE] = "EVT_USER_LEAVE",
-    [EVT_USER_RETURN] = "EVT_USER_RETURN",
     [EVT_USER_CALL] = "EVT_USER_CALL",
-    [EVT_EMOTION_DETECTED] = "EVT_EMOTION_DETECTED",
-    [EVT_ROUTINE_BREAK] = "EVT_ROUTINE_BREAK",
     [EVT_SILENCE_TIMEOUT] = "EVT_SILENCE_TIMEOUT",
-    [EVT_USER_REJECT] = "EVT_USER_REJECT",
-    [EVT_USER_PERFUNCTORY] = "EVT_USER_PERFUNCTORY",
-    [EVT_USER_LEFT_DIALOG] = "EVT_USER_LEFT_DIALOG",
-    [EVT_LOW_BATTERY] = "EVT_LOW_BATTERY",
-    [EVT_CHARGE_START] = "EVT_CHARGE_START",
-    [EVT_CHARGE_DONE] = "EVT_CHARGE_DONE",
     [EVT_NIGHT_TIME] = "EVT_NIGHT_TIME",
-    [EVT_MANUAL_SLEEP] = "EVT_MANUAL_SLEEP",
-    [EVT_DAY_AWAY] = "EVT_DAY_AWAY",
+    [EVT_STANDBY_TIMEOUT] = "EVT_STANDBY_TIMEOUT",
+    [EVT_SILENT_TIMEOUT] = "EVT_SILENT_TIMEOUT",
     [EVT_BEDTIME] = "EVT_BEDTIME",
-    [EVT_SHARED_ACTIVITY_START] = "EVT_SHARED_ACTIVITY_START",
-    [EVT_SHARED_ACTIVITY_STOP] = "EVT_SHARED_ACTIVITY_STOP",
     [EVT_START_DIALOG] = "EVT_START_DIALOG",
-    [EVT_DEEP_TALK_DETECTED] = "EVT_DEEP_TALK_DETECTED",
     [EVT_MULTI_TURN_DETECTED] = "EVT_MULTI_TURN_DETECTED",
     [EVT_INTERRUPT] = "EVT_INTERRUPT",
-    [EVT_RECOVERY_ATTEMPT] = "EVT_RECOVERY_ATTEMPT",
     [EVT_WAKEUP] = "EVT_WAKEUP",
-    [EVT_BOOT_COMPLETE] = "EVT_BOOT_COMPLETE",
-    [EVT_SYSTEM_FAULT] = "EVT_SYSTEM_FAULT",
+    [EVT_INTENT_GOODNIGHT] = "EVT_INTENT_GOODNIGHT",
+    [EVT_INTENT_DISMISS] = "EVT_INTENT_DISMISS",
+    [EVT_OTA_AVAILABLE] = "EVT_OTA_AVAILABLE",
+    [EVT_OTA_SUCCEEDED] = "EVT_OTA_SUCCEEDED",
+    [EVT_OTA_TASK_FAILED] = "EVT_OTA_TASK_FAILED",
 };
 
 static void default_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
@@ -154,7 +144,7 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
         return target_is(to_main_state, to_s2_sub_state,
                          JULIA_MAIN_STATE_S5_SILENT) ||
                (to_main_state == JULIA_MAIN_STATE_S2_DIALOG &&
-                to_s2_sub_state == JULIA_S2_SUB_STATE_S2_1_LISTENING);
+                to_s2_sub_state == JULIA_S2_SUB_STATE_S2_2_THINKING);
 
     case JULIA_MAIN_STATE_S5_SILENT:
         return target_is(to_main_state, to_s2_sub_state,
@@ -167,6 +157,10 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
                          JULIA_MAIN_STATE_S4_INTERACTION);
 
     case JULIA_MAIN_STATE_S8_OTA:
+        return target_is(to_main_state, to_s2_sub_state,
+                         JULIA_MAIN_STATE_S0_BOOT) ||
+               target_is(to_main_state, to_s2_sub_state,
+                         JULIA_MAIN_STATE_S1_COMPANION);
     case JULIA_MAIN_STATE_S7_FAULT:
     case JULIA_MAIN_STATE_COUNT:
     default:
@@ -222,20 +216,57 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
     julia_main_state_t target_main_state = JULIA_MAIN_STATE_COUNT;
     julia_s2_sub_state_t target_s2_sub_state = JULIA_S2_SUB_STATE_COUNT;
 
-    if (event == EVT_SYSTEM_FAULT &&
-        fsm->main_state != JULIA_MAIN_STATE_S7_FAULT) {
-        /* 故障入口对 S0～S6、S8 全局有效；进入 S7 后由运行时立即复位。 */
-        target_main_state = JULIA_MAIN_STATE_S7_FAULT;
+    if (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION &&
+               event == EVT_USER_LEAVE) {
+        /* 复用显示空闲策略的用户离开事件，由陪伴态进入待机态。 */
+        target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
-    } else if (fsm->main_state == JULIA_MAIN_STATE_S0_BOOT &&
-               event == EVT_BOOT_COMPLETE) {
-        /* 本地关键服务初始化完成后，开机态进入陪伴态。 */
+    } else if ((fsm->main_state == JULIA_MAIN_STATE_S0_BOOT ||
+                fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION) &&
+               event == EVT_OTA_AVAILABLE) {
+        target_main_state = JULIA_MAIN_STATE_S8_OTA;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
+    } else if (fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY &&
+               event == EVT_WAKEUP) {
+        /* 只有语音链路确认的唤醒词能从待机进入发起交互态。 */
+        target_main_state = JULIA_MAIN_STATE_S4_INTERACTION;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
+    } else if (fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY &&
+               (event == EVT_NIGHT_TIME || event == EVT_STANDBY_TIMEOUT)) {
+        /* 夜间窗口或 S3 驻留超时都进入睡眠态。 */
+        target_main_state = JULIA_MAIN_STATE_S6_SLEEP;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
+    } else if ((fsm->main_state == JULIA_MAIN_STATE_S5_SILENT ||
+                fsm->main_state == JULIA_MAIN_STATE_S6_SLEEP) &&
+               event == EVT_WAKEUP) {
+        /* 静默态和睡眠态同样只响应唤醒词进入发起交互态。 */
+        target_main_state = JULIA_MAIN_STATE_S4_INTERACTION;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
+    } else if (fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION &&
+               event == EVT_START_DIALOG) {
+        /* 正常话语结束直接进入“想”，不要求服务端额外返回 dialog 意图。 */
+        target_main_state = JULIA_MAIN_STATE_S2_DIALOG;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_S2_2_THINKING;
+    } else if (fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION &&
+               (event == EVT_INTENT_GOODNIGHT || event == EVT_INTENT_DISMISS)) {
+        /* 晚安和明确结束沟通属于服务端识别的特殊语义。 */
+        target_main_state = JULIA_MAIN_STATE_S5_SILENT;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
+    } else if (fsm->main_state == JULIA_MAIN_STATE_S5_SILENT &&
+               event == EVT_SILENT_TIMEOUT) {
+        target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
+    } else if (fsm->main_state == JULIA_MAIN_STATE_S8_OTA &&
+               event == EVT_OTA_SUCCEEDED) {
+        target_main_state = JULIA_MAIN_STATE_S0_BOOT;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
+    } else if (fsm->main_state == JULIA_MAIN_STATE_S8_OTA &&
+               event == EVT_OTA_TASK_FAILED) {
         target_main_state = JULIA_MAIN_STATE_S1_COMPANION;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     /* 复用现有语音链路事件驱动“听 -> 想 -> 说”，不新增阶段事件。 */
     } else if (event == EVT_USER_CALL &&
-        (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
-         fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION)) {
+               fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION) {
         target_main_state = JULIA_MAIN_STATE_S2_DIALOG;
         target_s2_sub_state = JULIA_S2_SUB_STATE_S2_1_LISTENING;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG) {

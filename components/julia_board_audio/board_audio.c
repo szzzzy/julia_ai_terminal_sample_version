@@ -5,7 +5,7 @@
  *   mic_init / speaker_init / scale_sample / mic_dbfs_x100
  *   mic_task 的 I2S 读取、PCM 转换、休眠/预录
  *   speaker 的 start/volume/data/end 核心
- *   playing 半双工标志、PCM1、SPKS/SPKV/SPKD/SPKE/MICS/MICW 语义
+ *   playing 扬声器活动标志、PCM1、SPKS/SPKV/SPKD/SPKE/MICS/MICW 语义
  *
  * 不保留（§8.2）：
  *   app_main、esp_log_level_set("*", ESP_LOG_NONE)、usb_init/usb_write_all/
@@ -46,7 +46,6 @@
 
 static i2s_chan_handle_t mic_rx, spk_tx;
 static volatile bool playing;
-static volatile TickType_t last_speaker_activity;
 static volatile uint32_t speaker_volume = DEFAULT_SPEAKER_VOLUME_PERCENT;
 static int32_t mic_raw[MIC_SAMPLES];
 static int16_t mic_pcm[MIC_SAMPLES];
@@ -62,6 +61,7 @@ static int16_t spk_stereo[MAX_SPK_BYTES];
 /* Speaker 串行化：start/write/stop/self_test 整体持锁，
  * 防止 WSS 下行、本地 TTS、文件播放交叉配置/交叉写 PCM。 */
 static SemaphoreHandle_t s_spk_lock;
+static TaskHandle_t s_mic_task;
 
 /* PCM1 帧缓冲：16 B 头 + MIC_SAMPLES*2 B PCM = 656 B（WSS 单个 binary）。 */
 static uint8_t s_pcm1_frame[16 + MIC_SAMPLES * 2];
@@ -106,6 +106,8 @@ static esp_err_t speaker_init(uint32_t rate)
     }
     i2s_chan_config_t c = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
     c.auto_clear = true;
+    c.dma_desc_num = 4;
+    c.dma_frame_num = 160;
     ESP_RETURN_ON_ERROR(i2s_new_channel(&c, &spk_tx, NULL), TAG, "new SPK channel");
     i2s_std_config_t s = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(rate),
@@ -164,15 +166,9 @@ static void mic_task(void *arg)
             !got) {
             continue;
         }
-        /* 半双工：Speaker 播放中暂停整条 MIC 处理（750 ms 活动兜底），与最小包一致。 */
-        if (playing) {
-            if ((int32_t)(xTaskGetTickCount() - last_speaker_activity) >
-                pdMS_TO_TICKS(750)) {
-                playing = false;
-            } else {
-                continue;
-            }
-        }
+        /* WSS keeps receiving MIC during playback. Only the playback worker
+         * owns speaker lifetime; an input gap must not silently close it. */
+        bool speaker_active = playing;
         size_t count = got / 4;
         if (count > MIC_SAMPLES) count = MIC_SAMPLES;
         for (size_t i = 0; i < count; i++) {
@@ -182,7 +178,7 @@ static void mic_task(void *arg)
             mic_pcm[i] = (int16_t)v;
         }
         /* fanout 路径 1：AFE（Julia 业务状态通过 sink 侧决定是否使用）。 */
-        if (s_afe_sink != NULL) {
+        if (s_afe_sink != NULL && !speaker_active) {
             s_afe_sink(mic_pcm, count, s_afe_ctx);
         }
         /* fanout 路径 2：WSS 上行（MIC_START 才启用；MICS/MICW 控制休眠预录）。 */
@@ -225,39 +221,38 @@ static void mic_task(void *arg)
     }
 }
 
-static void speaker_task(void *arg)
-{
-    /* 原最小包通过 USB 等待命令。融合后改为 API 驱动（board_audio_speaker_*），
-     * 任务保留用于独占 core0-p6 上的 I2S 资源与 750 ms 兜底心跳。 */
-    (void)arg;
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(250));
-        if (playing &&
-            (int32_t)(xTaskGetTickCount() - last_speaker_activity) > pdMS_TO_TICKS(750)) {
-            playing = false;
-        }
-    }
-}
-
 esp_err_t board_audio_init(void)
 {
-    ESP_RETURN_ON_ERROR(mic_init(), TAG, "mic init");
-    ESP_RETURN_ON_ERROR(speaker_init(24000), TAG, "speaker init");
+    if (s_mic_task != NULL) return ESP_OK;
     if (s_spk_lock == NULL) {
         s_spk_lock = xSemaphoreCreateMutex();
         if (s_spk_lock == NULL) {
             return ESP_ERR_NO_MEM;
         }
     }
-    if (xTaskCreatePinnedToCore(mic_task, "board_mic", 4096, NULL, 5, NULL, 1) != pdPASS) {
-        return ESP_ERR_NO_MEM;
-    }
-    if (xTaskCreatePinnedToCore(speaker_task, "board_spk", 3072, NULL, 6, NULL, 0) != pdPASS) {
-        return ESP_ERR_NO_MEM;
+    esp_err_t err = mic_init();
+    if (err != ESP_OK) goto failed;
+    err = speaker_init(24000);
+    if (err != ESP_OK) goto failed;
+    err = board_audio_speaker_stop();
+    if (err != ESP_OK) goto failed;
+    if (xTaskCreatePinnedToCore(mic_task, "board_mic", 4096, NULL, 5, &s_mic_task, 1) != pdPASS) {
+        err = ESP_ERR_NO_MEM;
+        goto failed;
     }
     ESP_LOGI(TAG, "ready mic=I2S0(15/2/39) spk=I2S1(48/38/47) volume=%u%%",
              (unsigned)speaker_volume);
     return ESP_OK;
+
+failed:
+    (void)board_audio_speaker_stop();
+    if (mic_rx != NULL) {
+        (void)i2s_channel_disable(mic_rx);
+        (void)i2s_del_channel(mic_rx);
+        mic_rx = NULL;
+    }
+    ESP_LOGW(TAG, "audio init failed: %s", esp_err_to_name(err));
+    return err;
 }
 
 esp_err_t board_audio_set_afe_sink(audio_pcm_sink_t sink, void *ctx)
@@ -319,7 +314,6 @@ esp_err_t board_audio_speaker_start(uint32_t sample_rate)
     err = speaker_init(rate);
     if (err == ESP_OK) {
         playing = true;
-        last_speaker_activity = xTaskGetTickCount();
     }
     if (s_spk_lock != NULL) xSemaphoreGive(s_spk_lock);
     return err;
@@ -327,14 +321,13 @@ esp_err_t board_audio_speaker_start(uint32_t sample_rate)
 
 static esp_err_t board_audio_speaker_stop_locked(void)
 {
-    if (!playing) return ESP_OK;
-    int16_t z[256] = {0};
-    size_t w = 0;
-    (void)i2s_channel_write(spk_tx, z, sizeof(z), &w, portMAX_DELAY);
-    vTaskDelay(pdMS_TO_TICKS(50));
     playing = false;
-    last_speaker_activity = xTaskGetTickCount();
-    return ESP_OK;
+    if (spk_tx == NULL) return ESP_OK;
+    esp_err_t err = i2s_channel_disable(spk_tx);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
+    err = i2s_del_channel(spk_tx);
+    if (err == ESP_OK) spk_tx = NULL;
+    return err;
 }
 
 esp_err_t board_audio_speaker_write(const uint8_t *mono_pcm, size_t bytes)
@@ -349,7 +342,6 @@ esp_err_t board_audio_speaker_write(const uint8_t *mono_pcm, size_t bytes)
     if (!playing) {
         err = ESP_ERR_INVALID_STATE;
     } else {
-        last_speaker_activity = xTaskGetTickCount();
         const int16_t *m = (const int16_t *)mono_pcm;
         size_t count = bytes / 2;
         for (size_t i = 0; i < count; i++) {
@@ -358,11 +350,8 @@ esp_err_t board_audio_speaker_write(const uint8_t *mono_pcm, size_t bytes)
             spk_stereo[2 * i + 1] = value;
         }
         size_t w = 0;
-        if (i2s_channel_write(spk_tx, spk_stereo, count * 4, &w, portMAX_DELAY) != ESP_OK) {
-            err = ESP_FAIL;
-        } else {
-            last_speaker_activity = xTaskGetTickCount();
-        }
+        err = i2s_channel_write(spk_tx, spk_stereo, count * 4, &w, 50);
+        if (err == ESP_OK && w != count * 4) err = ESP_ERR_TIMEOUT;
     }
     if (s_spk_lock != NULL) xSemaphoreGive(s_spk_lock);
     return err;
@@ -399,7 +388,6 @@ esp_err_t board_audio_speaker_self_test(void)
     }
     err = speaker_init(rate);
     playing = true;
-    last_speaker_activity = xTaskGetTickCount();
     for (int tone = 0; err == ESP_OK && tone < 3; tone++) {
         for (int block = 0; err == ESP_OK && block < 12; block++) {
             for (int i = 0; i < 512; i++) {
@@ -409,12 +397,12 @@ esp_err_t board_audio_speaker_self_test(void)
                 spk_stereo[2 * i + 1] = value;
             }
             size_t written = 0;
-            if (i2s_channel_write(spk_tx, spk_stereo, 512 * 4, &written, portMAX_DELAY) != ESP_OK)
+            if (i2s_channel_write(spk_tx, spk_stereo, 512 * 4, &written, 50) != ESP_OK || written != 512 * 4)
                 err = ESP_FAIL;
         }
         int16_t silence[1024] = {0};
         size_t written = 0;
-        if (i2s_channel_write(spk_tx, silence, sizeof(silence), &written, portMAX_DELAY) != ESP_OK)
+        if (i2s_channel_write(spk_tx, silence, sizeof(silence), &written, 50) != ESP_OK || written != sizeof(silence))
             err = ESP_FAIL;
     }
     if (err == ESP_OK) err = board_audio_speaker_stop_locked();

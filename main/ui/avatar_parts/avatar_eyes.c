@@ -45,6 +45,21 @@ static volatile uint32_t s_generation;   /* “代”计数：状态一变就 +1
 /* 用于帧缓冲调色/检测的“瞳孔绿色”像素值（RGB565）。 */
 #define PUPIL_GREEN_RGB565 0x2645U
 
+/* 眼睛资源在 360×360 底图中的基准位置。闭眼素材的眼睑中心略偏高，
+ * 只在眨眼帧下移以覆盖底图下缘残留；睁眼帧始终保持生成清单坐标。 */
+#define EYE_LEFT_X              112
+#define EYE_RIGHT_X             194
+#define EYE_BASE_Y              108
+#define EYE_HALF_Y_OFFSET       1
+#define EYE_CLOSED_Y_OFFSET     3
+
+static int eye_y_for_frame(avatar_eyes_frame_t frame)
+{
+    if (frame == AVATAR_EYES_CLOSED) return EYE_BASE_Y + EYE_CLOSED_Y_OFFSET;
+    if (frame == AVATAR_EYES_HALF) return EYE_BASE_Y + EYE_HALF_Y_OFFSET;
+    return EYE_BASE_Y;
+}
+
 /* 判定某像素是否落在左右眼区域（360×360 帧内的矩形窗）。 */
 static bool in_eye_region(unsigned x, unsigned y)
 {
@@ -124,6 +139,9 @@ void avatar_eyes_show(avatar_eyes_frame_t frame)
 {
     if (!s_left || !s_right || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
     int64_t started = esp_timer_get_time();
+    int eye_y = eye_y_for_frame(frame);
+    lv_obj_set_pos(s_left, EYE_LEFT_X, eye_y);
+    lv_obj_set_pos(s_right, EYE_RIGHT_X, eye_y);
     lv_img_set_src(s_left, left_source(frame));
     lv_img_set_src(s_right, right_source(frame));
     lvgl_port_unlock();
@@ -170,8 +188,8 @@ void avatar_eyes_init(lv_obj_t *parent)
     s_right = lv_img_create(parent);
     lv_img_set_src(s_left, &avatar_asset_eye_left_open);
     lv_img_set_src(s_right, &avatar_asset_eye_right_open);
-    lv_obj_set_pos(s_left, 112, 108);
-    lv_obj_set_pos(s_right, 194, 108);
+    lv_obj_set_pos(s_left, EYE_LEFT_X, EYE_BASE_Y);
+    lv_obj_set_pos(s_right, EYE_RIGHT_X, EYE_BASE_Y);
     lv_obj_clear_flag(s_left, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(s_right, LV_OBJ_FLAG_SCROLLABLE);
     if (xTaskCreateWithCaps(blink_task, "avatar_eyes", 3072, NULL, 2, NULL,

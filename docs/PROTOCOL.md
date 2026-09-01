@@ -49,7 +49,7 @@ WSS 使用 `server_certs/ca_cert.pem` 验证证书链；当前传输实现设置
 - `MIC_START`：确认进入听音，必要时打开上传，并停止当前扬声器播放。
 - `MIC_STOP`：确认当前话语结束，进入思考；保留音频上传。
 - `SPKE`：标记音频输入结束，排空已接收的 PCM 和 DMA 尾音后回到待机；默认服务器唤醒模式继续上传。
-- 本地唤醒模式在播放完成后启动陪伴上传计时，默认 300 秒无后续对话时停止上传。
+- 本地唤醒模式在播放完成后启动陪伴上传计时，默认 600 秒无后续对话时停止上传。
 - `MIC_STOP`、闭眼表情、夜间状态均不是隐私静音命令。
 - 会话结束时关闭上传、停止播放并清除监听／忙碌状态；新的会话按所选唤醒模式启动。
 
@@ -164,15 +164,29 @@ MIC_STOP
 FILE_SEND SD:/sample.wav
 ```
 
-当前处理器只支持这三类，允许末尾空白和换行，不支持一条消息中的多行命令列表。注册载荷上限为 128 字节，FILE_SEND URI 缓冲区含 NUL 共 128 字节。
+服务端完成 S4 语义判断后，使用以下固定 JSON 字段：
 
-这些命令进入独立 4 槽控制队列，不与 MIC 的 8 槽队列争用容量，仍须由 WSS 会话执行；会话未就绪或队列已满时拒绝，连接边界清理队列，不重放断链期间的命令。当前没有 `vstatus` 发布，也没有 `mic_started`／`mic_stopped` 等应用层回执。MQTT PUBACK 不表示命令已执行。
+```json
+{"type":"intent_result","intent":"normal"}
+{"type":"intent_result","intent":"goodnight"}
+{"type":"intent_result","intent":"dismiss"}
+```
+
+`type` 必须严格等于 `intent_result`，以后增加语义只扩展 `intent` 值，不改变消息类型。`intent=normal` 表示没有特殊语义，当前不改变状态，正常流程继续由 `MIC_STOP` 推进；`intent=goodnight` 和 `intent=dismiss` 仅在 S4 生效并进入 S5。其他状态收到迟到的特殊语义结果时由 FSM 忽略，不改变当前轮次。
+
+正常对话不发送 `intent_result`：服务端直接发送 `MIC_STOP`，设备由 S4 进入 S2.2。识别到 `goodnight` 或 `dismiss` 时，服务器必须先发送 `intent_result`，再发送 `MIC_STOP`；后到的 `MIC_STOP` 在 S5 中会被忽略。
+
+处理器允许纯文本命令末尾带空白和换行，不支持一条消息中的多行命令列表。注册载荷上限为 128 字节，FILE_SEND URI 缓冲区含 NUL 共 128 字节；语义 JSON 必须是单个完整对象。
+
+三类纯文本命令进入独立 4 槽控制队列，不与 MIC 的 8 槽队列争用容量，仍须由 WSS 会话执行；会话未就绪或队列已满时拒绝，连接边界清理队列，不重放断链期间的命令。`intent_result` JSON 不进入 WSS 队列，而是在 MQTT 回调中零等待投递 FSM 事件。当前没有 `vstatus` 发布，也没有 `mic_started`／`mic_stopped` 或语义应用回执；MQTT PUBACK 只表示 broker 收到消息，不表示状态迁移已执行。
 
 ## 7. OTA 检查、清单与通知
 
 ### 7.1 设备检查请求
 
 MQTT 连接并收到 critical 主题的 SUBACK 后执行检查；默认周期为 21600 秒，附加 0–1800 秒抖动。默认响应等待 15 秒，后续重试与恢复由配置控制。
+
+行为 FSM 在 OTA 任务被接受时进入 S8。Wi‑Fi、TLS、HTTP 等临时链路失败保留 S8 和断点；镜像处理、NVS 检查点、目标分区、启动分区设置或任务创建失败回到 S1 并继续运行当前固件；提交成功进入 S0 后由现有流程复位。只有已经无法回滚到可用固件时才进入 S7。启动早期连当前固件、NVS 或 Flash 健康都无法确认的情况仍由 OTA 安全模式记录为 S7。
 
 ```json
 {

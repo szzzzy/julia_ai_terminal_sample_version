@@ -123,7 +123,7 @@ static const char *TAG = "wss_transport";
 /** 会话写方向超时（SO_SNDTIMEO）：对端停止读取时 send 最多阻塞这么久，
  *  随后 mbedTLS 返回 WANT_WRITE、写路径按链路故障结束会话，避免会话任务
  *  在推送大文件时被永久卡死。 */
-#define WSS_WRITE_TIMEOUT_MS 5000
+#define WSS_WRITE_TIMEOUT_MS 500
 /** 帧内读取允许的连续空闲超时次数，超过即判定链路故障，防止中途死亡挂死。 */
 #define WSS_READ_EAGAIN_BUDGET 5
 /** HTTP 升级响应读取允许的连续空闲超时次数。 */
@@ -141,10 +141,12 @@ extern const unsigned char ca_cert_pem_end[] asm("_binary_ca_cert_pem_end");
 static portMUX_TYPE s_start_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_started;
 static bool s_starting;
+static bool s_session_ready;
 /** 唯一会话任务：串行执行连接、帧收发与命令队列。 */
 static TaskHandle_t s_session_task;
 /** 外部调用者 -> 会话任务的有界命令队列；条目为不透明数据。 */
 static QueueHandle_t s_cmd_queue;
+static QueueHandle_t s_control_queue;
 /** 当前 TLS 会话句柄，仅由会话任务访问。 */
 static esp_tls_t *s_tls;
 /** TLS 连接配置；cacert 指针在 wss_transport_start() 中一次性填充。 */
@@ -854,10 +856,13 @@ static bool wss_connect(void)
  */
 static void wss_drain_queue(void)
 {
-    while (xQueueReceive(s_cmd_queue, s_queue_item, 0) == pdTRUE) {
-        s_config.on_queue_item(s_queue_item, s_config.queue_item_size);
-        if (s_session_failed) {
-            break;
+    /* Bounded batches leave receive/ping/poll a turn even under PCM pressure. */
+    QueueHandle_t queues[] = {s_control_queue, s_cmd_queue};
+    for (size_t q = 0; q < 2 && !s_session_failed; ++q) {
+        for (unsigned n = 0; n < 4; ++n) {
+            if (xQueueReceive(queues[q], s_queue_item, 0) != pdTRUE) break;
+            s_config.on_queue_item(s_queue_item, s_config.queue_item_size);
+            if (s_session_failed) break;
         }
     }
 }
@@ -953,8 +958,20 @@ static void wss_run_session(void)
     int64_t last_ping_us = last_rx_us;
     bool pong_pending = false;
 
-    while (s_tls != NULL) {
+    /* Do not replay audio or control requests left by a disconnected session. */
+    xQueueReset(s_cmd_queue);
+    xQueueReset(s_control_queue);
+    portENTER_CRITICAL(&s_start_lock);
+    s_session_ready = true;
+    portEXIT_CRITICAL(&s_start_lock);
+
+    if (s_config.on_session_start != NULL) {
+        s_config.on_session_start();
+    }
+
+    while (s_tls != NULL && !s_session_failed) {
         wss_drain_queue();
+        if (!s_session_failed && s_config.on_poll != NULL) s_config.on_poll();
         if (s_session_failed) {
             ESP_LOGW(TAG, "WSS write failure during queued item handling; closing session");
             break;
@@ -1111,6 +1128,9 @@ static void wss_run_session(void)
         /* 服务端其他数据帧无下行用途，直接忽略。 */
     }
 
+    portENTER_CRITICAL(&s_start_lock);
+    s_session_ready = false;
+    portEXIT_CRITICAL(&s_start_lock);
     (void)esp_tls_conn_destroy(s_tls);
     s_tls = NULL;
     s_msg_active = false;
@@ -1121,6 +1141,8 @@ static void wss_run_session(void)
     if (s_config.on_session_end != NULL) {
         s_config.on_session_end();
     }
+    xQueueReset(s_cmd_queue);
+    xQueueReset(s_control_queue);
     ESP_LOGW(TAG, "WSS session ended; reconnecting in %d s",
              CONFIG_WSS_RECONNECT_INTERVAL_SECONDS);
 }
@@ -1210,10 +1232,17 @@ esp_err_t wss_transport_start(const wss_transport_config_t *config)
         err = ESP_ERR_NO_MEM;
         goto finish;
     }
+    if (s_control_queue == NULL) s_control_queue = xQueueCreate(4, config->queue_item_size);
+    if (s_control_queue == NULL) {
+        err = ESP_ERR_NO_MEM;
+        goto finish;
+    }
     if (xTaskCreate(wss_session_task, "wss_transport", (uint32_t)CONFIG_WSS_TASK_STACK_SIZE,
                     NULL, 4, &s_session_task) != pdPASS) {
         vQueueDelete(s_cmd_queue);
         s_cmd_queue = NULL;
+        vQueueDelete(s_control_queue);
+        s_control_queue = NULL;
         err = ESP_ERR_NO_MEM;
         goto finish;
     }
@@ -1246,6 +1275,10 @@ esp_err_t wss_transport_enqueue(const void *item, size_t item_size)
     if (s_cmd_queue == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+    portENTER_CRITICAL(&s_start_lock);
+    bool ready = s_session_ready;
+    portEXIT_CRITICAL(&s_start_lock);
+    if (!ready) return ESP_ERR_INVALID_STATE;
     if (item_size != s_config.queue_item_size) {
         return ESP_ERR_INVALID_SIZE;
     }
@@ -1254,6 +1287,20 @@ esp_err_t wss_transport_enqueue(const void *item, size_t item_size)
     }
     return ESP_OK;
 }
+
+esp_err_t wss_transport_enqueue_control(const void *item, size_t item_size)
+{
+    if (item == NULL) return ESP_ERR_INVALID_ARG;
+    if (s_control_queue == NULL) return ESP_ERR_INVALID_STATE;
+    portENTER_CRITICAL(&s_start_lock);
+    bool ready = s_session_ready;
+    portEXIT_CRITICAL(&s_start_lock);
+    if (!ready) return ESP_ERR_INVALID_STATE;
+    if (item_size != s_config.queue_item_size) return ESP_ERR_INVALID_SIZE;
+    return xQueueSend(s_control_queue, item, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+void wss_transport_fail_session(void) { s_session_failed = true; }
 
 /**
  * @brief 在会话任务上下文中直接发送一帧 WebSocket 消息（封装 wss_ws_send）。

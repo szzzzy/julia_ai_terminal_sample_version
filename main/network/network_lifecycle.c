@@ -347,6 +347,19 @@ static TickType_t network_wait_ticks_until(int64_t next_retry_us, int64_t servic
  *
  * @return true 本轮至少调用了一个回调；false 没有可调用的回调。
  */
+void network_lifecycle_retry_services(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    for (size_t i = 0; i < s_slot_count; ++i) {
+        if (!s_slots[i].started_ok) {
+            s_slots[i].retry_us = INT64_MAX;
+            s_slots[i].attempt = 0;
+        }
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+    if (s_network_task != NULL) xTaskNotifyGive(s_network_task);
+}
+
 static bool network_dispatch_service_slots(void)
 {
     bool invoked_any = false;

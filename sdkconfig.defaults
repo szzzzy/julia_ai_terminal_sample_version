@@ -5,8 +5,8 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_16mb.csv"
 
-# PSRAM 与 CPU：WakeNet9l (~3.9 MiB) 必须用 PSRAM；该板 8 MiB Octal/OPI、80 MHz、
-# CLK=IO30 / CS=IO26（与 fused 工程一致）。CPU 需 240 MHz（ESP-SR 要求）。
+# PSRAM与CPU：该板使用8 MiB Octal/OPI、80 MHz，CLK=IO30 / CS=IO26。
+# 240 MHz同时为UI、TLS流式音频及可选本地WakeNet回退留出余量。
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_TYPE_AUTO=y
@@ -37,19 +37,22 @@ CONFIG_LV_COLOR_16_SWAP=y
 CONFIG_LV_MEM_CUSTOM=y
 CONFIG_LV_MEM_CUSTOM_INCLUDE="stdlib.h"
 
-# ESP-SR: 本地唤醒词（WakeNet "你好小智"，wn9_nihaoxiaozhi_tts）+ AFE 音频前端。
-# 模型由 esp-sr 组件构建时自动打包进 "model" spiffs 分区（0x400000）。
+# 本地WakeNet回退配置。CONFIG_JULIA_SERVER_WAKE_ENABLE=y时组件注册为空，
+# 这些选项不参与当前固件；关闭服务器唤醒开关即可恢复并打包该模型。
 CONFIG_USE_AFE=y
 CONFIG_AFE_INTERFACE_V1=y
 CONFIG_USE_WAKENET=y
 CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y
 
-# The 16 MiB table reserves 4 MiB for WakeNet models, leaving a 3 MiB FAT
-# audio-data partition. Never accept an artifact larger than that partition.
+# The table keeps a 512 KiB model slot for a future custom wake model and a
+# 1 MiB FAT audio-data partition. Never accept an artifact larger than FAT.
 CONFIG_AUDIO_MAX_FILE_SIZE=1048576
 
 # Enable bootloader-managed first-boot validation and rollback.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# OTA image identity must match project(julia_fused_base) in CMakeLists.txt.
+CONFIG_OTA_IMAGE_PROJECT_NAME="julia_fused_base"
 
 # Communication reliability defaults. The local WSS integration token is configured
 # below; production credentials must be injected through a protected provisioning flow.
@@ -73,6 +76,7 @@ CONFIG_WSS_KEEPALIVE_INTERVAL_SECONDS=15
 CONFIG_WSS_PONG_TIMEOUT_SECONDS=10
 CONFIG_WSS_TOKEN="julia-test-token-2026"
 CONFIG_WSS_SERVER_HOST="192.168.137.1"
+CONFIG_JULIA_SERVER_WAKE_ENABLE=y
 
 # The configured local hotspot is WPA2-PSK, not open authentication.
 CONFIG_EXAMPLE_WIFI_AUTH_WPA2_PSK=y
@@ -117,7 +121,9 @@ CONFIG_SR_MN_CN_NONE=y
 CONFIG_SR_MN_EN_NONE=y
 
 # Julia display idle policy and RTC/SNTP wall clock.
-CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS=300
+CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS=600
+CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS=1800
+CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS=1800
 CONFIG_JULIA_DISPLAY_ACTIVITY_POLL_MS=500
 CONFIG_JULIA_DISPLAY_BREATHE_MIN_PERCENT=5
 CONFIG_JULIA_DISPLAY_BREATHE_MAX_PERCENT=100
