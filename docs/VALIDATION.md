@@ -48,17 +48,17 @@
 | BOOT-05 | 连续制造相同关键初始化故障 | 每次记录递增 sequence；核对不会被误分类为普通网络故障 |
 | UI-01 | 正常 MIC_START → MIC_STOP → SPKS／PCM → SPKE | 听／想／说／待机相位、嘴型和忙碌标志一致 |
 | UI-01A | S3/S5/S6 检测唤醒词 | 进入复用“听”呈现的 S4；本地 `EVT_USER_CALL` 不得代替服务端语义判定 |
-| UI-01B | 收到 MQTT `intent_result` | `normal` 不改变状态；S4 中 `goodnight`／`dismiss` 进入 S5；正常流程由 `MIC_STOP` 进入 S2.2 |
-| UI-02 | 非 busy 陪伴超过 600 秒 | 进入 S3 待机、闭眼与背光呼吸；同时检查 MIC 仍按服务器模式上传 |
-| UI-02A | S3 连续驻留超过 1800 秒 | 投递 `EVT_STANDBY_TIMEOUT` 并进入 S6；中途唤醒会取消旧计时 |
-| UI-02B | S5 连续驻留超过 1800 秒 | 投递 `EVT_SILENT_TIMEOUT` 并回到 S3；中途唤醒会取消旧计时 |
+| UI-01B | 收到 MQTT `intent_result` | `normal` 不改变状态；S4/S2 听想阶段中 `goodnight` 直接进入 S6，`dismiss` 进入 S5；随后 `MIC_STOP` 不再推进对话 |
+| UI-02 | 非 busy 陪伴达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 600 秒） | 进入 S3 待机、闭眼与背光呼吸；同时检查 MIC 仍按服务器模式上传 |
+| UI-02A | S3 连续驻留达到 `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS`（默认 1800 秒） | 投递 `EVT_STANDBY_TIMEOUT` 并进入 S6；中途唤醒会取消旧计时 |
+| UI-02B | S5 连续驻留达到 `CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS`（默认 1800 秒） | 投递 `EVT_SILENT_TIMEOUT` 并回到 S3；中途唤醒会取消旧计时 |
 | UI-03 | 听音、思考或播放超过普通闲置阈值 | 不被普通闲置策略抢占；业务等待超时按已知限制记录 |
 | UI-04 | 有效 RTC／SNTP，覆盖 22 点、23 点、07 点 | 22 点事件当前不迁移；夜间宽限进入 S6；07 点只恢复显示，仍等待唤醒词 |
 | UI-05 | 无效 RTC／未同步时间 | 夜间调度不依赖无效墙钟误触发 |
 | UI-06 | S6 中轻触、桌面振动和明显搬动设备 | 轻微振动不触发；持续明显运动约 800ms 后恢复显示；FSM 仍为 S6；10 秒内不重复触发 |
 | UI-07 | OTA 任务成功、普通任务失败、链路失败、严重本机故障 | 分别验证 S8→S0、S8→S1、保持 S8、S8→S7 |
 | UI-08 | 连续观察左右眼半闭／全闭／睁眼循环 | 闭眼时底图下缘无残留；睁眼恢复原坐标；上下边缘无新的接缝 |
-| UI-09 | 依次覆盖 S0～S8 和 S2.1／S2.2／S2.3 | S3 保持闭眼待机；S5/S7/S8 共用 Companion 调试底图；左上状态码正确且始终置顶 |
+| UI-09 | 依次覆盖 S0～S8 和 S2.1／S2.2／S2.3 | `(60,100)` 黑色状态码完整显示且始终置顶；S3 保持闭眼待机；S5/S7/S8 共用 Companion 调试底图 |
 
 ## 5. 语音与协议
 
@@ -73,6 +73,7 @@
 | VOICE-07 | 播放时 MIC_START，并注入迟到 SPKE | 待播数据清空、旧完成事件不覆盖 LISTEN；测量真实停播延迟；另测新 SPKS 后迟到旧 SPKE 的协议限制 |
 | VOICE-08 | 服务器持续心跳但不返回回答 | 检查是否长期停在 THINK；当前没有业务超时兜底 |
 | VOICE-09 | WSS 断开并恢复 | 上传／播放停止和重连正确；确认 UI、队列与首批新音频行为 |
+| VOICE-09A | 持续 MIC 上行期间由服务器发送带 code/reason 的 CLOSE | 板卡优先读取并回显完整 CLOSE 载荷；服务器能观察到正常关闭而非仅 TCP 异常断开；达到 `CONFIG_WSS_CLOSE_WAIT_MS`（默认 500ms）仍未完成时设备强制清理并重连 |
 | VOICE-10 | MQTT 单命令及不支持命令 | 只有三类作业可执行；不等待不存在的 vstatus 回执 |
 | VOICE-11 | 本地唤醒配置单独构建／烧录 | 模型分区、识别与采音链路有效；不得仅凭服务器模式构建认定通过 |
 | VOICE-12 | 服务端一次发送超过 64KiB 未消费数据 | 显式 playback_overflow、清空缓冲并回到可交互状态；服务端按播放速率节流 |

@@ -65,6 +65,9 @@
 #define BOOT_BLINK_COUNT            8U
 #define BOOT_BLINK_OPEN_MS          255U
 #define BOOT_BLINK_CLOSED_MS        120U
+#define STATUS_LABEL_X               60
+#define STATUS_LABEL_Y              100
+#define STATUS_LABEL_WIDTH          220
 
 /* Transforming the 360x360 root invalidates the complete display on every
  * animation tick.  On the QSPI panel that frame is committed in ten strips,
@@ -94,6 +97,14 @@ static portMUX_TYPE s_phase_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_boot_sequence_played;
 static char s_status_text[32] = "S0 BOOT";
 
+static void status_label_place(void)
+{
+    if (s_status_label == NULL) return;
+    lv_obj_set_pos(s_status_label, STATUS_LABEL_X, STATUS_LABEL_Y);
+    lv_obj_set_width(s_status_label, STATUS_LABEL_WIDTH);
+    lv_obj_move_foreground(s_status_label);
+}
+
 void julia_avatar_set_status_text(const char *text)
 {
     if (text == NULL || text[0] == '\0') return;
@@ -106,7 +117,8 @@ void julia_avatar_set_status_text(const char *text)
 
     if (s_status_label == NULL || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
     lv_label_set_text(s_status_label, snapshot);
-    lv_obj_move_foreground(s_status_label);
+    /* 每次更新都重新应用固定坐标，防止布局或后续 UI 操作覆盖调试字幕位置。 */
+    status_label_place();
     lv_obj_invalidate(s_status_label);
     lvgl_port_unlock();
 }
@@ -566,8 +578,7 @@ esp_err_t julia_avatar_init(void)
 
     /* 状态叠字固定在屏幕坐标系，不挂到微动根对象，避免随立绘缩放或点头移动。 */
     s_status_label = lv_label_create(screen);
-    lv_obj_set_pos(s_status_label, 6, 8);
-    lv_obj_set_width(s_status_label, 150);
+    status_label_place();
     lv_label_set_long_mode(s_status_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_color(s_status_label, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_status_label, &lv_font_montserrat_14, LV_PART_MAIN);
@@ -578,7 +589,10 @@ esp_err_t julia_avatar_init(void)
     memcpy(status_snapshot, s_status_text, sizeof(status_snapshot));
     portEXIT_CRITICAL(&s_phase_lock);
     lv_label_set_text(s_status_label, status_snapshot);
-    lv_obj_move_foreground(s_status_label);
+    status_label_place();
+    ESP_LOGI(TAG, "status label ready x=%d y=%d width=%d text=%s",
+             lv_obj_get_x(s_status_label), lv_obj_get_y(s_status_label),
+             lv_obj_get_width(s_status_label), status_snapshot);
     lv_obj_invalidate(screen);
     lvgl_port_unlock();
 

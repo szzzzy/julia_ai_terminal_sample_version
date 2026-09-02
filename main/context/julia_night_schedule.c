@@ -21,8 +21,6 @@
 
 #define NIGHT_SCHEDULE_TASK_STACK_SIZE 3072
 #define NIGHT_SCHEDULE_TASK_PRIORITY   2
-#define NIGHT_SCHEDULE_POLL_MS         5000
-#define NIGHT_RESUME_DELAY_MS          300000
 #define INVALID_HOUR                   (-1)
 
 static const char *TAG = "NIGHT_SCHEDULE";
@@ -60,7 +58,7 @@ static void night_schedule_task(void *argument)
             time_was_valid = false;
             last_hour = INVALID_HOUR;
             sleep_deadline_us = 0;
-            vTaskDelay(pdMS_TO_TICKS(NIGHT_SCHEDULE_POLL_MS));
+            vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_NIGHT_SCHEDULE_POLL_MS));
             continue;
         }
 
@@ -87,8 +85,11 @@ static void night_schedule_task(void *argument)
                        state == JULIA_MAIN_STATE_S5_SILENT) {
                 int64_t now_us = esp_timer_get_time();
                 if (sleep_deadline_us == 0) {
-                    sleep_deadline_us = now_us + (int64_t)NIGHT_RESUME_DELAY_MS * 1000LL;
-                    ESP_LOGI(TAG, "night idle grace started: %dms", NIGHT_RESUME_DELAY_MS);
+                    sleep_deadline_us = now_us +
+                                        (int64_t)CONFIG_JULIA_NIGHT_SLEEP_GRACE_SECONDS *
+                                            1000000LL;
+                    ESP_LOGI(TAG, "night idle grace started: %ds",
+                             CONFIG_JULIA_NIGHT_SLEEP_GRACE_SECONDS);
                 } else if (now_us >= sleep_deadline_us) {
                     post_event(EVT_NIGHT_TIME);
                     schedule_owns_sleep = true;
@@ -97,7 +98,8 @@ static void night_schedule_task(void *argument)
             } else {
                 /* 活跃状态不开始夜间空闲宽限；返回空闲状态后重新完整计时。 */
                 sleep_deadline_us = esp_timer_get_time() +
-                                    (int64_t)NIGHT_RESUME_DELAY_MS * 1000LL;
+                                    (int64_t)CONFIG_JULIA_NIGHT_SLEEP_GRACE_SECONDS *
+                                        1000000LL;
             }
         } else if (schedule_owns_sleep) {
             if (state == JULIA_MAIN_STATE_S6_SLEEP) {
@@ -113,20 +115,23 @@ static void night_schedule_task(void *argument)
                        state == JULIA_MAIN_STATE_S5_SILENT) {
                 int64_t now_us = esp_timer_get_time();
                 if (sleep_deadline_us == 0) {
-                    sleep_deadline_us = now_us + (int64_t)NIGHT_RESUME_DELAY_MS * 1000LL;
+                    sleep_deadline_us = now_us +
+                                        (int64_t)CONFIG_JULIA_NIGHT_SLEEP_GRACE_SECONDS *
+                                            1000000LL;
                 } else if (now_us >= sleep_deadline_us) {
                     post_event(EVT_BEDTIME);
                     sleep_deadline_us = 0;
                 }
             } else {
                 sleep_deadline_us = esp_timer_get_time() +
-                                    (int64_t)NIGHT_RESUME_DELAY_MS * 1000LL;
+                                    (int64_t)CONFIG_JULIA_NIGHT_SLEEP_GRACE_SECONDS *
+                                        1000000LL;
             }
         } else {
             sleep_deadline_us = 0;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(NIGHT_SCHEDULE_POLL_MS));
+        vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_NIGHT_SCHEDULE_POLL_MS));
     }
 }
 
@@ -139,10 +144,10 @@ esp_err_t julia_night_schedule_init(void)
         s_task = NULL;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "ready window=%02d:00-%02d:00 resume=%dms poll=%dms",
+    ESP_LOGI(TAG, "ready window=%02d:00-%02d:00 grace=%ds poll=%dms",
              CONFIG_JULIA_NIGHT_SLEEP_START_HOUR,
              CONFIG_JULIA_NIGHT_SLEEP_END_HOUR,
-             NIGHT_RESUME_DELAY_MS,
-             NIGHT_SCHEDULE_POLL_MS);
+             CONFIG_JULIA_NIGHT_SLEEP_GRACE_SECONDS,
+             CONFIG_JULIA_NIGHT_SCHEDULE_POLL_MS);
     return ESP_OK;
 }

@@ -50,8 +50,8 @@ typedef enum {
     EVT_MULTI_TURN_DETECTED,
     EVT_INTERRUPT,
     EVT_WAKEUP,                   /**< 语音链路确认唤醒词。 */
-    EVT_INTENT_GOODNIGHT,         /**< MQTT：服务端识别到晚安意图。 */
-    EVT_INTENT_DISMISS,           /**< MQTT：服务端判定无需继续沟通。 */
+    EVT_INTENT_GOODNIGHT,         /**< MQTT：晚安意图，S4/S2 听想阶段进入 S6。 */
+    EVT_INTENT_DISMISS,           /**< MQTT：结束沟通意图，S4/S2 听想阶段进入 S5。 */
     EVT_OTA_AVAILABLE,            /**< OTA 引擎已接受升级任务。 */
     EVT_OTA_SUCCEEDED,            /**< OTA 镜像已提交，即将复位。 */
     EVT_OTA_TASK_FAILED,          /**< OTA 任务失败，放弃本次升级并恢复业务。 */

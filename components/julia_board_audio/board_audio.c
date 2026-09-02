@@ -166,9 +166,6 @@ static void mic_task(void *arg)
             !got) {
             continue;
         }
-        /* WSS keeps receiving MIC during playback. Only the playback worker
-         * owns speaker lifetime; an input gap must not silently close it. */
-        bool speaker_active = playing;
         size_t count = got / 4;
         if (count > MIC_SAMPLES) count = MIC_SAMPLES;
         for (size_t i = 0; i < count; i++) {
@@ -177,8 +174,9 @@ static void mic_task(void *arg)
             if (v < -32768) v = -32768;
             mic_pcm[i] = (int16_t)v;
         }
-        /* fanout 路径 1：AFE（Julia 业务状态通过 sink 侧决定是否使用）。 */
-        if (s_afe_sink != NULL && !speaker_active) {
+        /* fanout 路径 1：AFE。播放期间也持续送入，允许本地唤醒和云端内容比对
+         * 同时工作；扬声器生命周期仍只由播放任务管理。 */
+        if (s_afe_sink != NULL) {
             s_afe_sink(mic_pcm, count, s_afe_ctx);
         }
         /* fanout 路径 2：WSS 上行（MIC_START 才启用；MICS/MICW 控制休眠预录）。 */

@@ -49,6 +49,9 @@ int main(void)
                                     JULIA_MAIN_STATE_S5_SILENT, JULIA_S2_SUB_STATE_NONE));
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S4_INTERACTION,
                                     JULIA_S2_SUB_STATE_NONE,
+                                    JULIA_MAIN_STATE_S6_SLEEP, JULIA_S2_SUB_STATE_NONE));
+    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S4_INTERACTION,
+                                    JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S2_DIALOG,
                                     JULIA_S2_SUB_STATE_S2_2_THINKING));
     assert(!julia_fsm_can_transition(JULIA_MAIN_STATE_S4_INTERACTION,
@@ -86,6 +89,18 @@ int main(void)
     assert(!julia_fsm_can_transition(JULIA_MAIN_STATE_S2_DIALOG,
                                      JULIA_S2_SUB_STATE_S2_2_THINKING,
                                      JULIA_MAIN_STATE_S1_COMPANION,
+                                     JULIA_S2_SUB_STATE_NONE));
+    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S2_DIALOG,
+                                    JULIA_S2_SUB_STATE_S2_1_LISTENING,
+                                    JULIA_MAIN_STATE_S6_SLEEP,
+                                    JULIA_S2_SUB_STATE_NONE));
+    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S2_DIALOG,
+                                    JULIA_S2_SUB_STATE_S2_2_THINKING,
+                                    JULIA_MAIN_STATE_S5_SILENT,
+                                    JULIA_S2_SUB_STATE_NONE));
+    assert(!julia_fsm_can_transition(JULIA_MAIN_STATE_S2_DIALOG,
+                                     JULIA_S2_SUB_STATE_S2_3_SPEAKING,
+                                     JULIA_MAIN_STATE_S6_SLEEP,
                                      JULIA_S2_SUB_STATE_NONE));
 
     /* 所有其他状态都能进入故障态；S7 只能返回 S0。 */
@@ -166,13 +181,24 @@ int main(void)
     assert(julia_fsm_handle_event(&dismiss_fsm, EVT_USER_LEAVE, NULL));
     assert(julia_fsm_handle_event(&dismiss_fsm, EVT_WAKEUP, NULL));
     assert(julia_fsm_handle_event(&dismiss_fsm, EVT_INTENT_GOODNIGHT, NULL));
-    assert(dismiss_fsm.main_state == JULIA_MAIN_STATE_S5_SILENT);
+    assert(dismiss_fsm.main_state == JULIA_MAIN_STATE_S6_SLEEP);
     assert(julia_fsm_handle_event(&dismiss_fsm, EVT_WAKEUP, NULL));
     assert(dismiss_fsm.main_state == JULIA_MAIN_STATE_S4_INTERACTION);
     assert(julia_fsm_handle_event(&dismiss_fsm, EVT_INTENT_DISMISS, NULL));
     assert(dismiss_fsm.main_state == JULIA_MAIN_STATE_S5_SILENT);
     assert(julia_fsm_handle_event(&dismiss_fsm, EVT_SILENT_TIMEOUT, NULL));
     assert(dismiss_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
+
+    /* 从 S1 发起的普通听音位于 S2.1，晚安也必须直接进入 S6。 */
+    julia_fsm_t dialog_goodnight_fsm;
+    julia_fsm_init(&dialog_goodnight_fsm);
+    assert(julia_fsm_transition_to(&dialog_goodnight_fsm,
+                                   JULIA_MAIN_STATE_S1_COMPANION,
+                                   JULIA_S2_SUB_STATE_NONE, EVT_NONE));
+    assert(julia_fsm_handle_event(&dialog_goodnight_fsm, EVT_USER_CALL, NULL));
+    assert(julia_fsm_handle_event(&dialog_goodnight_fsm,
+                                  EVT_INTENT_GOODNIGHT, NULL));
+    assert(dialog_goodnight_fsm.main_state == JULIA_MAIN_STATE_S6_SLEEP);
 
     /* 纯 FSM 测试只验证 S7 迁移边；记录与复位由运行时故障通道负责。 */
     assert(julia_fsm_transition_to(&fsm, JULIA_MAIN_STATE_S7_FAULT,

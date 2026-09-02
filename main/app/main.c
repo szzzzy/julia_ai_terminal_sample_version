@@ -270,7 +270,7 @@ void app_main(void)
             ESP_LOGE(TAG, "FSM 初始化连续失败，保持 S7 等待售后处理");
             while (1) vTaskDelay(pdMS_TO_TICKS(1000));
         }
-        vTaskDelay(pdMS_TO_TICKS(3000));
+        vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_FAULT_RESET_DELAY_MS));
         esp_restart();
     }
     network_lifecycle_retry_services();

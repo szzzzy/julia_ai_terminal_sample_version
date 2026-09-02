@@ -50,7 +50,7 @@
  * - 未连接：wss_transport_start() 刚创建任务，或上一次会话销毁句柄之后。
  * - 连接中：wss_connect() 内执行 esp_tls 同步握手 + HTTP 升级；失败会销毁
  *   会话句柄并落到重连等待，绝不留半开句柄。
- * - 已连接：进入 wss_run_session()，循环"排空命令队列 → 收一帧 → 保活/分派"。
+ * - 已连接：进入 wss_run_session()，循环"收一帧 → 保活/分派 → 有界处理上行"。
  * - 重连等待：固定 CONFIG_WSS_RECONNECT_INTERVAL_SECONDS 退避后无条件重试；
  *   计数永不累加、永不放弃，因此链路中断无需外部干预即可自愈。
  *
@@ -94,6 +94,7 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_tls.h"
+#include "esp_tls_errors.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/md.h"
 #include "psa/crypto.h"
@@ -170,6 +171,13 @@ static uint8_t s_msg_payload[WSS_TRANSPORT_MAX_PAYLOAD + 1];
 static size_t s_msg_len;
 static uint8_t s_msg_opcode;
 static bool s_msg_active;
+
+/** esp-tls 在超时时可能返回 WANT_READ/WANT_WRITE，也可能保留 socket errno。 */
+static bool wss_tls_would_block(int result)
+{
+    return result == ESP_TLS_ERR_SSL_WANT_READ || result == ESP_TLS_ERR_SSL_WANT_WRITE ||
+           (result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK));
+}
 
 /** 设置 socket 读取超时。HTTP 升级和实时会话使用不同的时间预算。 */
 static void wss_set_receive_timeout(int sockfd, unsigned timeout_ms)
@@ -254,7 +262,7 @@ static esp_err_t wss_tls_read_exact(void *data, size_t len)
             return ESP_FAIL;
         }
         if (n < 0) {
-            if ((errno == EAGAIN || errno == EWOULDBLOCK) && eagain_budget > 0) {
+            if (wss_tls_would_block(n) && eagain_budget > 0) {
                 eagain_budget--;
                 continue;
             }
@@ -383,6 +391,42 @@ static esp_err_t wss_send_close(uint16_t code)
 }
 
 /**
+ * @brief 回送服务端的完整 CLOSE 载荷，并有限等待对端关闭底层连接。
+ *
+ * RFC 6455 建议关闭响应回显收到的状态码；这里直接回显完整合法载荷，兼容会校验
+ * reason 的服务端。写成功后不能立刻销毁带未读数据的 socket，否则部分 TCP 栈会
+ * 以 RST 结束连接，使已排队的 CLOSE 对端不可见。等待时间受 20 ms 接收超时和
+ * CONFIG_WSS_CLOSE_WAIT_MS 双重约束，不会卡住重连任务。
+ */
+static esp_err_t wss_reply_close_and_wait(const uint8_t *payload, size_t len)
+{
+    esp_err_t err = wss_ws_send(0x8, payload, len);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WSS CLOSE reply send failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "WSS CLOSE reply sent (%u-byte payload)", (unsigned)len);
+    int64_t deadline_us = esp_timer_get_time() +
+                          (int64_t)CONFIG_WSS_CLOSE_WAIT_MS * 1000LL;
+    uint8_t discard[32];
+    while (s_tls != NULL && esp_timer_get_time() < deadline_us) {
+        int n = esp_tls_conn_read(s_tls, discard, sizeof(discard));
+        if (n == 0) {
+            ESP_LOGI(TAG, "WSS peer completed close handshake");
+            return ESP_OK;
+        }
+        if (n < 0 && !wss_tls_would_block(n)) {
+            ESP_LOGW(TAG, "WSS peer shutdown read failed after CLOSE reply");
+            return ESP_FAIL;
+        }
+    }
+    ESP_LOGW(TAG, "WSS peer did not close within %d ms; forcing transport cleanup",
+             CONFIG_WSS_CLOSE_WAIT_MS);
+    return ESP_ERR_TIMEOUT;
+}
+
+/**
  * @brief 接收一帧 WebSocket 消息。
  *
  * 服务端帧不得掩码；RFC 6455 分片帧（FIN=0）不再在此处拒绝，由会话循环跨帧
@@ -423,7 +467,7 @@ static esp_err_t wss_ws_recv(uint8_t *opcode_out, uint8_t *payload, size_t cap,
             return ESP_FAIL;
         }
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (wss_tls_would_block(n)) {
                 *idle_out = true;
                 return ESP_OK;
             }
@@ -867,6 +911,20 @@ static void wss_drain_queue(void)
     }
 }
 
+/** 接收一轮之后处理有界上行批次和业务轮询，防止上行压力遮住对端 CLOSE。 */
+static bool wss_service_outbound(void)
+{
+    wss_drain_queue();
+    if (!s_session_failed && s_config.on_poll != NULL) {
+        s_config.on_poll();
+    }
+    if (s_session_failed) {
+        ESP_LOGW(TAG, "WSS write failure during queued item handling; closing session");
+        return false;
+    }
+    return true;
+}
+
 /**
  * @brief 校验文本载荷是否为合法 UTF-8（RFC 3629，RFC 6455 8.1 的要求）。
  *
@@ -941,8 +999,8 @@ static bool wss_close_code_is_valid(uint16_t code)
 /**
  * @brief 运行一次完整的 WSS 会话，直到链路故障、对端关闭或保活超时。
  *
- * 循环结构：先排空命令队列，再接收一帧；帧首字节的空闲超时是队列处理与
- * 保活窗口。空闲本身不代表断线：服务端静默达到
+ * 循环结构：先接收一帧，再有界处理命令队列；帧首字节的空闲超时是队列处理与
+ * 保活窗口。接收优先使持续 MIC 上行不能遮住服务端 CLOSE。空闲本身不代表断线：服务端静默达到
  * CONFIG_WSS_KEEPALIVE_INTERVAL_SECONDS 秒后客户端主动发 PING；发出 PING 后
  * 只要在 CONFIG_WSS_PONG_TIMEOUT_SECONDS 内收到任意下行帧（PONG 或其他帧都
  * 证明链路存活）就取消待定探测并重置保活计时，只有该窗口内完全没有下行帧才
@@ -970,13 +1028,8 @@ static void wss_run_session(void)
     }
 
     while (s_tls != NULL && !s_session_failed) {
-        wss_drain_queue();
-        if (!s_session_failed && s_config.on_poll != NULL) s_config.on_poll();
-        if (s_session_failed) {
-            ESP_LOGW(TAG, "WSS write failure during queued item handling; closing session");
-            break;
-        }
-
+        /* 先收一帧再处理上行：持续 MIC 上传时也要优先看到服务端 CLOSE，避免服务端
+         * 停止读取后，本机先因排队 PCM 写失败而跳过关闭握手。空闲读取仅阻塞 20ms。 */
         uint8_t op = 0;
         static uint8_t frame_payload[WSS_TRANSPORT_MAX_PAYLOAD + 1]; /* 大缓冲留在静态区 */
         size_t len = 0;
@@ -989,7 +1042,10 @@ static void wss_run_session(void)
         }
 
         if (idle) {
-            /* 空闲窗口：只做主动保活，不把空闲当作断线。 */
+            /* 空闲窗口：处理上行和主动保活，不把空闲当作断线。 */
+            if (!wss_service_outbound()) {
+                break;
+            }
             int64_t now_us = esp_timer_get_time();
             if (pong_pending) {
                 int64_t pong_timeout_us = (int64_t)CONFIG_WSS_PONG_TIMEOUT_SECONDS * 1000000LL;
@@ -1027,6 +1083,7 @@ static void wss_run_session(void)
                 if (wss_ws_send(0xA, frame_payload, len) != ESP_OK) {
                     break;
                 }
+                if (!wss_service_outbound()) break;
                 continue;
             }
             if (op == 0x8) {                /* CLOSE：先校验载荷，再回送 CLOSE（RFC 6455 5.5.1） */
@@ -1053,7 +1110,10 @@ static void wss_run_session(void)
                     }
                 }
                 ESP_LOGI(TAG, "WSS server sent CLOSE (code 0x%04X); replying CLOSE", close_code);
-                (void)wss_send_close(close_code);   /* 回显状态码；无状态码则发空载荷 */
+                portENTER_CRITICAL(&s_start_lock);
+                s_session_ready = false;    /* 拒绝关闭等待期间产生的新上行条目。 */
+                portEXIT_CRITICAL(&s_start_lock);
+                (void)wss_reply_close_and_wait(frame_payload, len);
                 break;
             }
             if (op != 0xA) {                /* 保留控制操作码 0xB-0xF：协议错误（RFC 6455 5.5） */
@@ -1062,6 +1122,7 @@ static void wss_run_session(void)
                 break;
             }
             /* PONG（0xA）：待定探测已在上方统一清除。 */
+            if (!wss_service_outbound()) break;
             continue;
         }
 
@@ -1125,7 +1186,10 @@ static void wss_run_session(void)
                 }
             }
         }
-        /* 服务端其他数据帧无下行用途，直接忽略。 */
+        /* 服务端其他数据帧无下行用途，直接忽略；每个接收轮次后再处理上行。 */
+        if (!wss_service_outbound()) {
+            break;
+        }
     }
 
     portENTER_CRITICAL(&s_start_lock);

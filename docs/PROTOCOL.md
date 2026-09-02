@@ -49,7 +49,7 @@ WSS 使用 `server_certs/ca_cert.pem` 验证证书链；当前传输实现设置
 - `MIC_START`：确认进入听音，必要时打开上传，并停止当前扬声器播放。
 - `MIC_STOP`：确认当前话语结束，进入思考；保留音频上传。
 - `SPKE`：标记音频输入结束，排空已接收的 PCM 和 DMA 尾音后回到待机；默认服务器唤醒模式继续上传。
-- 本地唤醒模式在播放完成后启动陪伴上传计时，默认 600 秒无后续对话时停止上传。
+- 本地唤醒模式在播放完成后启动陪伴上传计时，达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 600 秒）无后续对话时停止上传。
 - `MIC_STOP`、闭眼表情、夜间状态均不是隐私静音命令。
 - 会话结束时关闭上传、停止播放并清除监听／忙碌状态；新的会话按所选唤醒模式启动。
 
@@ -172,9 +172,9 @@ FILE_SEND SD:/sample.wav
 {"type":"intent_result","intent":"dismiss"}
 ```
 
-`type` 必须严格等于 `intent_result`，以后增加语义只扩展 `intent` 值，不改变消息类型。`intent=normal` 表示没有特殊语义，当前不改变状态，正常流程继续由 `MIC_STOP` 推进；`intent=goodnight` 和 `intent=dismiss` 仅在 S4 生效并进入 S5。其他状态收到迟到的特殊语义结果时由 FSM 忽略，不改变当前轮次。
+`type` 必须严格等于 `intent_result`，以后增加语义只扩展 `intent` 值，不改变消息类型。`intent=normal` 表示没有特殊语义，当前不改变状态，正常流程继续由 `MIC_STOP` 推进；`intent=goodnight` 在 S4 或 S2 的听／想阶段直接进入 S6，`intent=dismiss` 在相同阶段进入 S5。S2.3 已开始播放后收到的迟到特殊语义由 FSM 忽略，避免睡眠状态与旧回答播放并存。
 
-正常对话不发送 `intent_result`：服务端直接发送 `MIC_STOP`，设备由 S4 进入 S2.2。识别到 `goodnight` 或 `dismiss` 时，服务器必须先发送 `intent_result`，再发送 `MIC_STOP`；后到的 `MIC_STOP` 在 S5 中会被忽略。
+正常对话不发送 `intent_result`：服务端直接发送 `MIC_STOP`，设备由 S4 或 S2.1 进入 S2.2。识别到 `goodnight` 或 `dismiss` 时，服务器必须在 `SPKS` 前发送 `intent_result`；设备收到特殊语义时会结束当前监听，随后到达的 `MIC_STOP` 在 S5/S6 中被忽略。
 
 处理器允许纯文本命令末尾带空白和换行，不支持一条消息中的多行命令列表。注册载荷上限为 128 字节，FILE_SEND URI 缓冲区含 NUL 共 128 字节；语义 JSON 必须是单个完整对象。
 

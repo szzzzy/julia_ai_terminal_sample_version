@@ -16,12 +16,11 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "nvs.h"
+#include "sdkconfig.h"
 
 #define FAULT_SCHEMA_VERSION 1U
 #define FAULT_NAMESPACE      "julia_fault"
 #define FAULT_RECORD_KEY     "last"
-#define FAULT_QUICK_UPTIME_MS 60000U
-#define FAULT_AUTO_RESET_LIMIT 3U
 
 static const char *TAG = "JULIA_FAULT";
 
@@ -80,7 +79,8 @@ esp_err_t julia_fault_record(julia_fault_reason_t reason, esp_err_t error,
     uint32_t sequence = previous_valid ? previous.sequence + 1U : 1U;
     uint32_t repeat_count = previous_valid &&
                             previous.reason == (uint32_t)reason &&
-                            previous.uptime_ms < FAULT_QUICK_UPTIME_MS
+                            previous.uptime_ms <
+                                (uint32_t)CONFIG_JULIA_FAULT_QUICK_UPTIME_SECONDS * 1000U
                                 ? previous.repeat_count + 1U : 1U;
     julia_fault_record_t record = {
         .schema_version = FAULT_SCHEMA_VERSION,
@@ -124,5 +124,5 @@ bool julia_fault_reset_allowed(void)
 {
     julia_fault_record_t record;
     if (julia_fault_read_last(&record) != ESP_OK) return true;
-    return record.repeat_count <= FAULT_AUTO_RESET_LIMIT;
+    return record.repeat_count <= CONFIG_JULIA_FAULT_AUTO_RESET_LIMIT;
 }

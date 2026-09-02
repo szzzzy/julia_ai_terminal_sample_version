@@ -45,6 +45,12 @@ idf.py -B build build
 | `CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE`／`CONFIG_WSS_TOKEN` | WSS 优先使用前者，空值时使用后者，与 MQTT 认证模式分开理解 |
 | `CONFIG_OTA_ALLOWED_URL_HOSTS` | OTA HTTPS 主机允许列表；空值会放行非空主机，不是默认白名单 |
 | `CONFIG_JULIA_SERVER_WAKE_ENABLE` | 默认启用服务器唤醒；本地唤醒需要另行构建和验证模型分区 |
+| `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS` | S1→S3 驻留阈值，默认 600 秒 |
+| `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS`／`CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS` | S3→S6、S5→S3 驻留阈值，默认均为 1800 秒 |
+| `CONFIG_JULIA_NIGHT_SLEEP_*` | 夜间开始／结束小时、入睡宽限和轮询周期 |
+| `CONFIG_JULIA_FAULT_*` | S7 复位等待、快速故障窗口和自动复位次数上限 |
+| `CONFIG_JULIA_IMU_*` | IMU 采样、连续帧、冷却、加速度和陀螺仪阈值 |
+| `CONFIG_WSS_CLOSE_WAIT_MS` | Close 回包后等待对端关闭的上限，默认 500ms |
 
 ## 3. Windows 构建路径
 

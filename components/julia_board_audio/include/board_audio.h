@@ -16,7 +16,8 @@ extern "C" {
  * 保留（§8.1）：mic_init / speaker_init / scale_sample / mic_dbfs_x100、
  * mic_task 的 I2S 读取、PCM 转换、休眠/预录、speaker 的 start/volume/data/end、
  * playing扬声器活动标志、PCM1、SPKS/SPKV/SPKD/SPKE/MICS/MICW语义。
- * WSS MIC在播放期间继续上传；本地AFE在播放期间暂停以避免自唤醒。
+ * 播放期间 WSS MIC 与本地 AFE 都持续接收麦克风帧，以支持唤醒和语音打断；
+ * 回声内容由云端比对过滤。
  * 不保留（§8.2）：app_main、esp_log_level_set("*", ESP_LOG_NONE)、usb_init/
  * usb_write_all/usb_read_all、USB 命令无限读取循环 —— 由本组件的 C API 与
  * WSS 上行/下行（voice_service）替换。
@@ -33,7 +34,7 @@ esp_err_t board_audio_init(void);
 
 /* ---- MIC 上行 fanout（§8.4） ---- */
 
-/** 设置 AFE sink；每个 20 ms 帧回调一次，MICS/MICW 不影响 AFE 路径。 */
+/** 设置 AFE sink；每个 20 ms 帧回调一次，播放及 MICS/MICW 均不暂停 AFE 路径。 */
 esp_err_t board_audio_set_afe_sink(audio_pcm_sink_t sink, void *ctx);
 
 /** 设置 WSS sink（PCM1 帧）；MIC_START/MIC_STOP 通过 enable_wss_mic 控制。 */

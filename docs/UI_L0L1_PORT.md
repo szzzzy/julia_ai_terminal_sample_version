@@ -95,17 +95,17 @@ app_main
 
 这是调试阶段呈现映射。听、想、说继续复用项目已有语音和播放链路；尚无正式素材的主状态统一使用 Companion 基础立绘，依靠固定状态码观察迁移。S7 的 NVS 记录和复位逻辑不受临时 UI 复用影响。
 
-屏幕左上侧固定覆盖当前已启用的 14px 黑色小号状态叠字，不随 Avatar 微动根对象移动。主状态显示 `S0 BOOT`～`S8 OTA`，S2 显示 `S2.1 LISTEN`、`S2.2 THINK`、`S2.3 SPEAK`。状态在 UI 初始化前发生时先缓存，标签创建后再应用。
+屏幕固定覆盖当前已启用的 14px 黑色小号状态叠字，坐标为 `(60,100)`、宽度为 220px，不随 Avatar 微动根对象移动。主状态显示 `S0 BOOT`～`S8 OTA`，S2 显示 `S2.1 LISTEN`、`S2.2 THINK`、`S2.3 SPEAK`。状态在 UI 初始化前发生时先缓存，标签创建后再应用；每次更新都会重新设置坐标，避免其他 UI 操作覆盖位置。
 
 ## 7. 待机、夜间与运动
 
 ### 活动时间
 
-`julia_idle_display.c` 每 500ms 检查活动时间。非 busy 且连续 600 秒无交互时投递 `EVT_USER_LEAVE`，由 S1 陪伴进入 S3 待机。闲置任务不直接操作立绘；FSM 运行时在进入 S3 后统一应用闭眼和背光呼吸。听音／思考／说话期间 busy 为真，普通闲置逻辑不降档。
+`julia_idle_display.c` 按 `CONFIG_JULIA_DISPLAY_ACTIVITY_POLL_MS` 检查活动时间。非 busy 且连续达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 600 秒）无交互时投递 `EVT_USER_LEAVE`，由 S1 陪伴进入 S3 待机。闲置任务不直接操作立绘；FSM 运行时在进入 S3 后统一应用闭眼和背光呼吸。听音／思考／说话期间 busy 为真，普通闲置逻辑不降档。
 
-进入 S3 后由 FSM 运行时启动独立的一次性计时器；连续驻留 1800 秒仍未唤醒时投递 `EVT_STANDBY_TIMEOUT`，由 S3 进入 S6。23:00～07:00 的 RTC 夜间事件仍独立生效，可在 30 分钟计时到期前先进入 S6。
+进入 S3 后由 FSM 运行时启动独立的一次性计时器；连续驻留达到 `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS`（默认 1800 秒）仍未唤醒时投递 `EVT_STANDBY_TIMEOUT`，由 S3 进入 S6。默认 23:00～07:00 的 RTC 夜间事件仍独立生效，可在驻留计时到期前先进入 S6。
 
-进入 S5 后同样启动独立的 1800 秒计时器；期间没有唤醒词时投递 `EVT_SILENT_TIMEOUT`，由 S5 回到 S3。S3 和 S5 计时器在离开各自状态时立即取消。
+进入 S5 后同样启动由 `CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS` 控制的一次性计时器（默认 1800 秒）；期间没有唤醒词时投递 `EVT_SILENT_TIMEOUT`，由 S5 回到 S3。S3 和 S5 计时器在离开各自状态时立即取消。
 
 默认背光呼吸范围为 5%–100%，周期 4000ms。该亮度范围不等于已经达到待机功耗目标。
 

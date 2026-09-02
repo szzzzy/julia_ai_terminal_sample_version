@@ -17,14 +17,12 @@
 #include "julia_fsm_runtime.h"
 #include "julia_idle_display.h"
 #include "qmi8658_shared.h"
+#include "sdkconfig.h"
 
 #define MOTION_TASK_STACK_SIZE 3072
 #define MOTION_TASK_PRIORITY   3
-#define MOTION_SAMPLE_MS       100
-#define MOTION_CONFIRM_FRAMES  8
-#define MOTION_COOLDOWN_MS     10000
-#define MOTION_ACCEL_DELTA_G   0.80f
-#define MOTION_GYRO_DPS        120.0f
+#define MOTION_ACCEL_DELTA_G \
+    ((float)CONFIG_JULIA_IMU_ACCEL_DELTA_MG / 1000.0f)
 
 static const char *TAG = "JULIA_MOTION";
 static TaskHandle_t s_task;
@@ -45,7 +43,7 @@ static void motion_task(void *argument)
     TickType_t cooldown_until = 0;
 
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(MOTION_SAMPLE_MS));
+        vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_IMU_MOTION_SAMPLE_MS));
         board_imu_sample_t current;
         if (board_imu_read(&current) != ESP_OK) {
             consecutive = 0;
@@ -68,15 +66,16 @@ static void motion_task(void *argument)
             continue;
         }
 
-        bool detected = delta >= MOTION_ACCEL_DELTA_G || gyro >= MOTION_GYRO_DPS;
+        bool detected = delta >= MOTION_ACCEL_DELTA_G ||
+                        gyro >= (float)CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS;
         consecutive = detected ? consecutive + 1U : 0U;
-        if (consecutive < MOTION_CONFIRM_FRAMES) continue;
+        if (consecutive < CONFIG_JULIA_IMU_MOTION_CONFIRM_FRAMES) continue;
 
         ESP_LOGI(TAG, "motion display wake state=%s accel_delta=%.3fg gyro=%.1fdps",
                  julia_fsm_main_state_name(state), (double)delta, (double)gyro);
         julia_idle_display_note_activity();
         consecutive = 0;
-        cooldown_until = now + pdMS_TO_TICKS(MOTION_COOLDOWN_MS);
+        cooldown_until = now + pdMS_TO_TICKS(CONFIG_JULIA_IMU_MOTION_COOLDOWN_MS);
     }
 }
 
@@ -91,7 +90,9 @@ esp_err_t julia_motion_init(void)
         return ESP_ERR_NO_MEM;
     }
     ESP_LOGI(TAG, "ready sample=%dms confirm=%d accel=%.2fg gyro=%.1fdps",
-             MOTION_SAMPLE_MS, MOTION_CONFIRM_FRAMES,
-             (double)MOTION_ACCEL_DELTA_G, (double)MOTION_GYRO_DPS);
+             CONFIG_JULIA_IMU_MOTION_SAMPLE_MS,
+             CONFIG_JULIA_IMU_MOTION_CONFIRM_FRAMES,
+             (double)MOTION_ACCEL_DELTA_G,
+             (double)CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS);
     return ESP_OK;
 }

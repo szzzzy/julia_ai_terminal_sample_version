@@ -418,6 +418,15 @@ menu "Example Configuration"
                 reconnects. Keep this shorter than the PING interval so probes
                 never pile up.
 
+        config WSS_CLOSE_WAIT_MS
+            int "WSS close handshake wait (ms)"
+            range 100 5000
+            default 500
+            help
+                Maximum time to wait for the peer to close TLS/TCP after this
+                client replies to a WebSocket CLOSE frame. On timeout the
+                transport is forcibly cleaned up and reconnects normally.
+
         config WSS_TASK_STACK_SIZE
             int "WSS session task stack size (bytes)"
             range 16384 65536
@@ -573,6 +582,30 @@ menu "Example Configuration"
             help
                 Continuous time in S5 silent state before returning to S3 standby.
 
+        config JULIA_FAULT_RESET_DELAY_MS
+            int "S7 reset delay (ms)"
+            range 0 60000
+            default 3000
+            help
+                Time to keep the S7 fault presentation visible before an
+                allowed automatic reset.
+
+        config JULIA_FAULT_QUICK_UPTIME_SECONDS
+            int "Quick repeated-fault uptime window (seconds)"
+            range 1 3600
+            default 60
+            help
+                A repeated fault occurring before this uptime is counted as a
+                quick boot-loop recurrence of the same fault reason.
+
+        config JULIA_FAULT_AUTO_RESET_LIMIT
+            int "Maximum automatic resets for the same quick fault"
+            range 0 20
+            default 3
+            help
+                Maximum repeat count that may still reset automatically. Set
+                to zero to hold the first recorded serious fault in S7.
+
         config JULIA_DISPLAY_BREATHE_MIN_PERCENT
             int "Active breathing minimum percentage"
             range 0 100
@@ -600,10 +633,9 @@ menu "Example Configuration"
             default y
             depends on JULIA_RTC_ENABLE
             help
-                Enter S0.1 night sleep during the configured local-time window and
-                return to S1.1 standby when the window ends. Active dialogue is never
-                interrupted; after a night interaction returns to standby, the schedule
-                re-enters night sleep on its next poll.
+                Enter S6 during the configured local-time window after the idle
+                grace. Active dialogue is never interrupted; the end of the
+                window restores the display but S6 still waits for a wake word.
 
         config JULIA_NIGHT_SLEEP_START_HOUR
             int "Night sleep start hour (local time)"
@@ -617,13 +649,61 @@ menu "Example Configuration"
             default 7
             depends on JULIA_NIGHT_SLEEP_ENABLE
 
+        config JULIA_NIGHT_SLEEP_GRACE_SECONDS
+            int "Night idle grace before sleep (seconds)"
+            range 1 3600
+            default 300
+            depends on JULIA_NIGHT_SLEEP_ENABLE
+            help
+                Idle grace after entering the configured night window before
+                posting the night-time sleep event.
+
+        config JULIA_NIGHT_SCHEDULE_POLL_MS
+            int "Night schedule polling period (ms)"
+            range 500 60000
+            default 5000
+            depends on JULIA_NIGHT_SLEEP_ENABLE
+
         config JULIA_IMU_MOTION_ENABLE
             bool "Enable QMI8658 motion wake"
             default y
             help
-                Reuse the old project's adjacent-sample acceleration and gyro
-                magnitude detector. Three consecutive motion samples wake far
-                standby or sleep through EVT_USER_RETURN. No SD card is required.
+                Use adjacent-sample acceleration and gyro magnitude detection.
+                The configured number of consecutive samples restores the
+                display only while in S6; it does not change the FSM state.
+
+        config JULIA_IMU_MOTION_SAMPLE_MS
+            int "IMU motion sample period (ms)"
+            range 20 1000
+            default 100
+            depends on JULIA_IMU_MOTION_ENABLE
+
+        config JULIA_IMU_MOTION_CONFIRM_FRAMES
+            int "Consecutive IMU motion frames"
+            range 1 100
+            default 8
+            depends on JULIA_IMU_MOTION_ENABLE
+
+        config JULIA_IMU_MOTION_COOLDOWN_MS
+            int "IMU display-wake cooldown (ms)"
+            range 0 600000
+            default 10000
+            depends on JULIA_IMU_MOTION_ENABLE
+
+        config JULIA_IMU_ACCEL_DELTA_MG
+            int "Adjacent-sample acceleration threshold (mg sum)"
+            range 10 4000
+            default 800
+            depends on JULIA_IMU_MOTION_ENABLE
+            help
+                Sum of absolute X/Y/Z acceleration changes between adjacent
+                samples, expressed in milli-g. 800 means 0.80 g.
+
+        config JULIA_IMU_GYRO_THRESHOLD_DPS
+            int "Gyroscope magnitude threshold (degrees/s)"
+            range 1 2000
+            default 120
+            depends on JULIA_IMU_MOTION_ENABLE
 
         config JULIA_TIMEZONE
             string "POSIX timezone"

@@ -4,7 +4,7 @@
  *
  * 模块关系：
  * - 通过 mqtt_comm_register_topic() 注册语音命令 topic；原有纯文本控制与 WSS
- *   语义一致，S4 的 intent_result JSON 只由 MQTT 控制面解析；
+ *   语义一致，S4/S2 的 intent_result JSON 只由 MQTT 控制面解析；
  * - 传输由纯传输层 wss_transport 完成（连接、帧、握手、保活、重连）；
  * - FILE_SEND 的 URI 映射由 voice_uri 完成；
  * - 所有对外接口只做有界入队，实际发送在 WSS 会话任务上下文中执行。
@@ -707,7 +707,24 @@ static esp_err_t voice_service_enqueue(voice_job_type_t type, const uint8_t *dat
 }
 
 /**
- * @brief 解析服务端经 MQTT 下发的 S4 语义判定结果。
+ * @brief 结束特殊语义对应的当前话语，避免迟到 MIC_STOP 再推进状态。
+ */
+static void voice_service_apply_terminal_intent(fsm_event_t event, const char *intent)
+{
+    bool was_listening;
+    portENTER_CRITICAL(&s_mic_state_lock);
+    was_listening = s_dialog_listening;
+    s_dialog_listening = false;
+    portEXIT_CRITICAL(&s_mic_state_lock);
+
+    julia_idle_display_set_busy(false);
+    post_fsm_event(event);
+    ESP_LOGI(TAG, "Terminal intent applied: %s%s", intent,
+             was_listening ? ", utterance closed" : "");
+}
+
+/**
+ * @brief 解析服务端经 MQTT 下发的 S4/S2 语义判定结果。
  *
  * 固定格式：{"type":"intent_result","intent":"normal|goodnight|dismiss"}。
  * 返回 true 表示载荷是 JSON 并已完成处理或拒绝；false 表示继续按旧文本命令解析。
@@ -735,9 +752,9 @@ static bool voice_service_handle_intent_json(const char *cmd, size_t cmd_len)
         /* normal 只确认没有特殊语义；正常状态推进继续由现有语音事件负责。 */
         ESP_LOGD(TAG, "Normal intent accepted without FSM transition");
     } else if (strcmp(intent->valuestring, "goodnight") == 0) {
-        post_fsm_event(EVT_INTENT_GOODNIGHT);
+        voice_service_apply_terminal_intent(EVT_INTENT_GOODNIGHT, "goodnight");
     } else if (strcmp(intent->valuestring, "dismiss") == 0) {
-        post_fsm_event(EVT_INTENT_DISMISS);
+        voice_service_apply_terminal_intent(EVT_INTENT_DISMISS, "dismiss");
     } else {
         ESP_LOGW(TAG, "Ignoring unknown intent result: %s", intent->valuestring);
     }

@@ -20,7 +20,6 @@
 #define FSM_EVENT_QUEUE_DEPTH 16
 #define FSM_TASK_STACK_SIZE   4096
 #define FSM_TASK_PRIORITY     4
-#define FSM_FAULT_RESET_DELAY_MS 3000
 
 typedef enum {
     FSM_RUNTIME_MESSAGE_EVENT = 0,
@@ -254,7 +253,7 @@ static void fsm_task(void *argument)
                 ESP_LOGE(TAG, "同类故障连续超过自动复位上限，保持 S7 等待售后处理");
                 continue;
             }
-            vTaskDelay(pdMS_TO_TICKS(FSM_FAULT_RESET_DELAY_MS));
+            vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_FAULT_RESET_DELAY_MS));
             esp_restart();
             continue;
         }
@@ -336,10 +335,16 @@ esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready)
         s_event_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "ready initial=%s/%s queue=%u",
+    ESP_LOGI(TAG, "ready initial=%s/%s queue=%u s3_sleep=%ds s5_standby=%ds "
+                  "fault_reset=%dms quick_fault=%ds/%d",
              julia_fsm_main_state_name(s_fsm.main_state),
              julia_fsm_s2_sub_state_name(s_fsm.s2_sub_state),
-             (unsigned)FSM_EVENT_QUEUE_DEPTH);
+             (unsigned)FSM_EVENT_QUEUE_DEPTH,
+             CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS,
+             CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS,
+             CONFIG_JULIA_FAULT_RESET_DELAY_MS,
+             CONFIG_JULIA_FAULT_QUICK_UPTIME_SECONDS,
+             CONFIG_JULIA_FAULT_AUTO_RESET_LIMIT);
     return ESP_OK;
 }
 

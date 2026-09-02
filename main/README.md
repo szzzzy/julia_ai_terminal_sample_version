@@ -43,7 +43,7 @@
 
 | 执行上下文 | 所有权／限制 |
 | --- | --- |
-| `board_mic` | 从 I2S 读取 MIC，转换为 PCM16，通过回调入队；播放时继续向 WSS 上传，暂停本地 AFE 输入 |
+| `board_mic` | 从 I2S 读取 MIC，转换为 PCM16，通过回调入队；播放时 WSS 上行与本地 AFE 均持续接收，以支持唤醒和语音打断 |
 | WSS 会话任务 | 独占 TLS 句柄；分批处理控制／PCM 队列、接收数据、轮询播放完成事件和推进一个文件块 |
 | `voice_playback` | 独占运行时扬声器操作，160 样本一块消费 PCM，负责预缓冲、尾音排空、取消和异常完成 |
 | MQTT 事件上下文 | 分片重组与路由；语音命令入队；PUBACK 交给报告处理流程 |
@@ -70,15 +70,15 @@ MIC 使用 8 槽发送队列，MQTT 控制作业使用独立 4 槽队列。每�
 
 播放任务的完成信息包含本地 generation；它只防止设备内部的旧任务结果覆盖新状态，不是服务端的 turn_id。具体参数与推流约束见 [通信协议](../docs/PROTOCOL.md)。
 
-普通跨模块行为通过 `julia_fsm_runtime_post()` 投递，严重故障通过 `julia_fsm_runtime_raise_fault()` 投递到队首。S3 的 30 分钟驻留计时由 FSM 运行时持有；语音播放结束仍由现有 `EVT_SILENCE_TIMEOUT` 生产者推进。
+普通跨模块行为通过 `julia_fsm_runtime_post()` 投递，严重故障通过 `julia_fsm_runtime_raise_fault()` 投递到队首。S3 的驻留计时由 FSM 运行时持有，默认 30 分钟，由 `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS` 配置；语音播放结束仍由现有 `EVT_SILENCE_TIMEOUT` 生产者推进。
 
 ## 语音状态与显示状态
 
 `s_mic_streaming` 表示是否上传音频，`s_dialog_listening` 表示是否处于用户听音阶段；两者不等价。
 
-默认服务器唤醒模式中，WSS 建连后 streaming 为真，界面保持陪伴。S1 的 `MIC_START` 进入 S2.1“听”，`MIC_STOP` 进入 S2.2“想”，正常回答 `SPKS` 进入 S2.3“说”；`SPKE` 排空音频后回到 S1。S3/S5/S6 检测到唤醒词后先进入 S4，普通话语结束由 `MIC_STOP` 进入 S2.2，`goodnight`／`dismiss` 特殊语义由 MQTT `intent_result` 进入 S5。细节与时序见 [通信协议](../docs/PROTOCOL.md)。
+默认服务器唤醒模式中，WSS 建连后 streaming 为真，界面保持陪伴。S1 的 `MIC_START` 进入 S2.1“听”，`MIC_STOP` 进入 S2.2“想”，正常回答 `SPKS` 进入 S2.3“说”；`SPKE` 排空音频后回到 S1。S3/S5/S6 检测到唤醒词后先进入 S4，普通话语结束由 `MIC_STOP` 进入 S2.2；MQTT `intent_result=goodnight` 从 S4/S2 听想阶段直接进入 S6，`dismiss` 进入 S5。细节与时序见 [通信协议](../docs/PROTOCOL.md)。
 
-FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发起交互、S5 静默、S6 睡眠、S7 故障、S8 OTA。只有 S2 有 S2.1“听”、S2.2“想”、S2.3“说”三个子状态。S1 连续空闲 10 分钟进入 S3；S3 连续驻留 30 分钟或命中 23:00～07:00 夜间条件进入 S6。
+FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发起交互、S5 静默、S6 睡眠、S7 故障、S8 OTA。只有 S2 有 S2.1“听”、S2.2“想”、S2.3“说”三个子状态。当前默认值为：S1 连续空闲 10 分钟进入 S3，S3 连续驻留 30 分钟或命中 23:00～07:00 夜间条件进入 S6；这些时间均由 `CONFIG_JULIA_*` 配置项控制。
 
 | 当前来源 | 生效状态 | 目标状态 |
 | --- | --- | --- |
@@ -91,8 +91,9 @@ FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发�
 | `EVT_USER_LEAVE` | S1 | S3 |
 | 唤醒词 `EVT_WAKEUP` | S3／S5／S6 | S4 |
 | `EVT_NIGHT_TIME`／`EVT_STANDBY_TIMEOUT` | S3 | S6 |
-| MQTT `intent_result=goodnight/dismiss` | S4 | S5 |
-| `EVT_SILENT_TIMEOUT`（30 分钟） | S5 | S3 |
+| MQTT `intent_result=goodnight` | S4／S2.1／S2.2 | S6 |
+| MQTT `intent_result=dismiss` | S4／S2.1／S2.2 | S5 |
+| `EVT_SILENT_TIMEOUT`（默认 30 分钟） | S5 | S3 |
 | OTA 引擎接受升级 | S0／S1 | S8 |
 | OTA 任务失败（非链路、非严重故障） | S8 | S1 |
 | OTA 提交成功、即将复位 | S8 | S0 |
@@ -101,7 +102,7 @@ FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发�
 
 `intent_result=normal` 只表示没有特殊语义，不改变状态。OTA 任务、NVS 检查点、目标分区、启动分区设置或普通镜像校验失败都不会触发 S7，因为活动固件尚未被替换；这类失败由 S8 回到 S1。Wi-Fi、TLS、HTTP 等临时链路失败保持 S8 和下载断点，等待现有恢复流程。只有已经无法回滚到可用固件时才从 S8 进入 S7。
 
-S7 只接收关键初始化、FSM 内部损坏和 OTA 无法安全恢复等严重故障。进入 S7 时使用 `julia_fault` NVS namespace 保存快照并在 3 秒后复位；同类快速故障连续超过三次后保持 S7，避免重启风暴。当前调试 UI 与 Companion 共用底图，依靠左上 `S7 FAULT` 状态码区分；正式故障素材后续再接入。普通网络断线、单轮会话失败和普通 OTA 包拒绝不进入 S7。
+S7 只接收关键初始化、FSM 内部损坏和 OTA 无法安全恢复等严重故障。进入 S7 时使用 `julia_fault` NVS namespace 保存快照；默认显示 3 秒后复位，同类快速故障连续超过三次后保持 S7，具体由 `CONFIG_JULIA_FAULT_*` 配置。当前调试 UI 与 Companion 共用底图，依靠左上 `S7 FAULT` 状态码区分；正式故障素材后续再接入。普通网络断线、单轮会话失败和普通 OTA 包拒绝不进入 S7。
 
 ## 编译范围与参考源码
 

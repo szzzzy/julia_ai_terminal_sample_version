@@ -126,6 +126,13 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
         if (from_s2_sub_state == JULIA_S2_SUB_STATE_S2_3_SPEAKING &&
             target_is(to_main_state, to_s2_sub_state,
                       JULIA_MAIN_STATE_S1_COMPANION)) return true;
+        /* 服务端特殊语义在听/想阶段结束当前轮次：晚安进入 S6，结束沟通进入 S5。
+         * 说话阶段不接受迟到语义，避免状态已睡眠但旧回答仍在播放。 */
+        if (from_s2_sub_state != JULIA_S2_SUB_STATE_S2_3_SPEAKING &&
+            (target_is(to_main_state, to_s2_sub_state,
+                       JULIA_MAIN_STATE_S5_SILENT) ||
+             target_is(to_main_state, to_s2_sub_state,
+                       JULIA_MAIN_STATE_S6_SLEEP))) return true;
         if (to_main_state != JULIA_MAIN_STATE_S2_DIALOG) return false;
         return (from_s2_sub_state == JULIA_S2_SUB_STATE_S2_1_LISTENING &&
                 to_s2_sub_state == JULIA_S2_SUB_STATE_S2_2_THINKING) ||
@@ -143,6 +150,8 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
     case JULIA_MAIN_STATE_S4_INTERACTION:
         return target_is(to_main_state, to_s2_sub_state,
                          JULIA_MAIN_STATE_S5_SILENT) ||
+               target_is(to_main_state, to_s2_sub_state,
+                         JULIA_MAIN_STATE_S6_SLEEP) ||
                (to_main_state == JULIA_MAIN_STATE_S2_DIALOG &&
                 to_s2_sub_state == JULIA_S2_SUB_STATE_S2_2_THINKING);
 
@@ -247,9 +256,18 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
         /* 正常话语结束直接进入“想”，不要求服务端额外返回 dialog 意图。 */
         target_main_state = JULIA_MAIN_STATE_S2_DIALOG;
         target_s2_sub_state = JULIA_S2_SUB_STATE_S2_2_THINKING;
-    } else if (fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION &&
-               (event == EVT_INTENT_GOODNIGHT || event == EVT_INTENT_DISMISS)) {
-        /* 晚安和明确结束沟通属于服务端识别的特殊语义。 */
+    } else if ((fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
+                (fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG &&
+                 fsm->s2_sub_state != JULIA_S2_SUB_STATE_S2_3_SPEAKING)) &&
+               event == EVT_INTENT_GOODNIGHT) {
+        /* “晚安”结束本轮沟通并立即进入睡眠，不再绕经 S5/S3 计时。 */
+        target_main_state = JULIA_MAIN_STATE_S6_SLEEP;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
+    } else if ((fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
+                (fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG &&
+                 fsm->s2_sub_state != JULIA_S2_SUB_STATE_S2_3_SPEAKING)) &&
+               event == EVT_INTENT_DISMISS) {
+        /* 明确结束沟通进入静默，仍按 S5 的独立计时策略返回 S3。 */
         target_main_state = JULIA_MAIN_STATE_S5_SILENT;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S5_SILENT &&
