@@ -1,15 +1,13 @@
 /**
  * @file    ota_control_plane.h
- * @brief   OTA 控制面请求构建与服务器清单解析接口。
+ * @brief   生成版本检查请求，并拒绝不属于本设备、本次请求或不安全的升级清单。
  *
- * 本模块只处理 MQTT 控制消息：生成版本检查请求、关联 request_id，
- * 并把服务器 JSON 深拷贝为已校验的 native_ota_manifest_t。它不创建 FreeRTOS
- * 下载任务、不访问 OTA 分区，也不执行 HTTP 固件下载。
+ * 每次检查使用新的请求编号。服务器响应必须匹配该编号、本机身份、产品和硬件版本；
+ * 下载地址、版本、大小、摘要、安全版本和有效期也必须全部合法。通过后只输出清单，
+ * 不创建下载任务、不写固件分区。
  *
- * 状态边界：本模块几乎无状态，仅保留最近一次主动检查的 request_id，用于把迟到
- * 的响应与“正在等待的那次请求”做关联，避免把旧响应误当作本次升级。OTA 的生命
- * 周期状态（accepted/downloading/.../deferred）由 ota_report 层维护，不在本模块
- * 内持有——本模块只在“是否值得下载”上做一次性判定。
+ * 只接受最近一次检查的响应，迟到旧响应和已隔离制品都会被拒绝。本模块只回答
+ * “是否值得下载”，服务器可见的升级进度由状态报告模块维护。
  */
 #pragma once
 
@@ -24,14 +22,14 @@
 extern "C" {
 #endif
 
-/** 获取由芯片基础 MAC 地址生成的稳定设备标识。 */
+/** 获取设备生命周期内稳定的身份标识，用于主题隔离和服务器响应校验。 */
 esp_err_t native_ota_get_device_id(char *device_id, size_t device_id_size);
 
-/** 生成设备主动发送的 OTA 版本检查请求。 */
+/** 生成包含设备身份、硬件版本和当前固件版本的检查请求。 */
 esp_err_t native_ota_build_check_request(char *json, size_t json_size, size_t *json_len);
 
 /**
- * @brief 解析并校验一条 OTA 服务器响应。
+ * @brief 校验服务器响应是否属于本次检查，并判断是否需要下载。
  *
  * 当响应声明 update=false 或目标版本已经运行时，函数返回 ESP_OK 且将
  * download_requested 置为 false；当需要下载时，manifest 返回完整深拷贝。

@@ -1,13 +1,9 @@
 /**
  * @file    julia_time.h
- * @brief   设备壁钟管理：本地时区恢复 + RTC 备份 + SNTP 网络校时。
+ * @brief   让设备在断网启动时仍有合理时间，并在联网后自动校准和写回 RTC。
  *
- * 职责边界：
- *   - 负责给出"可信的当前时间"，并把可信时间写回 RTC/系统时钟。它不关心这个
- *     时间被谁用（julia_context 用它判断夜间/22 点，julia_routine 用它做日常统计）。
- *   - 与 julia_context 的"时间同步"是两条独立路径：本模块由 app_main 在初始化时调用
- *     julia_time_init()（用 RTC 恢复系统时间），并在 IP-ready 时通过 julia_time_ip_ready()
- *     启动 SNTP（成功后把时间写回 RTC）。两处都会写 PCF85063，见 julia_context.c 注释。
+ * 开机先读取板载 RTC；联网后再从 SNTP 获取更准确时间并写回 RTC。明显早于产品
+ * 使用年代的时间视为未设置，夜间策略不会依据无效时间误触发。
  *
  * 依赖：板级 RTC 接口（board_rtc_*）、SNTP、时区宏 CONFIG_JULIA_TIMEZONE。
  *
@@ -24,19 +20,17 @@
 extern "C" {
 #endif
 
-/** Initialize timezone and restore system wall time from the onboard RTC. */
+/** 设置本地时区，并尝试从板载 RTC 恢复系统时间。 */
 esp_err_t julia_time_init(void);
 
 /**
- * @brief IP-ready 回调：网络取得 IPv4 后启动 SNTP 校时。
- *        （可注册到 network_lifecycle；仅首次生效，重复调用为无操作。）
+ * @brief 网络可用后启动 SNTP 校时；重复通知不会创建第二个同步服务。
  */
 esp_err_t julia_time_ip_ready(void *arg);
 
-/** Return true when either RTC restore or SNTP has provided a valid wall clock. */
+/** 返回设备是否已经获得足够可信、可用于夜间判断的当前时间。 */
 bool julia_time_valid(void);
 
 #ifdef __cplusplus
 }
 #endif
-

@@ -1,34 +1,20 @@
 /**
  * @file    audio_engine.c
- * @brief   音频素材下载引擎实现。
+ * @brief   下载音频素材并在完整性确认后保存为设备可用资源。
  *
- * 主要职责：
- * 1. 通过公共下载器 http_downloader 从 HTTPS 服务器下载音频素材；
- * 2. 数据写入独立的音频数据分区（esp_partition_write，不写 OTA 槽）；
- * 3. 按固定间隔保存 NVS 断点检查点，支持 Range 断点续传；
- * 4. 下载完成后从分区回读计算 SHA-256 并与清单比对；
- * 5. 通过通信层通用发布接口 mqtt_comm_publish() 上报 audio_status 生命周期事件，
- *    通过弱钩子 native_audio_on_ready() 通知上层（如播放栈）。
+ * 素材通过 HTTPS 写入独立数据分区。每下载一段才保存一次进度，兼顾掉电恢复和
+ * Flash 寿命；下载完成后从分区重新读取并计算 SHA-256，只有与清单一致才通知上层。
  *
  * 模块关系：
  * - 传输核心由 http_downloader 完成（连接、Range、ETag、读循环）；
  * - 摘要计算复用 ota_stability 的分区回读路径，与固件 OTA 同一校验语义；
  * - 不解析控制面 JSON、不依赖 MQTT 客户端句柄。
  *
- * 与固件 OTA 引擎（ota_engine.c）的对照（本模块是它的"平行"分支，不是子集）：
- * - 相同点：同一 http_downloader 传输核心、同一 native_ota_failure_reason_t
- *   失败分类、同一"NVS 断点 + Range 续传 + 分片重组"思路、同一 MQTT 生命周期上报；
- * - 差异点：① 目标写独立音频数据分区（audio_data，fat），不写任何 OTA 应用槽；
- *   ② 校验用"回读分区算 SHA-256 与清单比对"，替代 OTA 的镜像头/可启动性校验；
- *   ③ 完成通知走弱钩子 native_audio_on_ready()（产品可提供强符号覆盖），OTA 则是
- *   直接切槽重启；④ 断点记录存 NVS 命名空间 "audio_resume"，与 OTA 的
- *   ota_resume / ota_report 天然隔离；⑤ 与 OTA 下载互斥且 OTA 优先（见 audio_service）。
+ * 它与固件升级共用下载和断点机制，但不会切换启动分区或重启设备。两者分别保存
+ * 恢复记录，不能互相续传；同时发生时固件升级优先，避免竞争网络和 Flash。
  *
- * 下载任务状态机（由 audio_download_task 承载，栈 12288 B、优先级 5）：
- *   [idle] --audio_engine_start--> accepted --> downloading --(body 完整+长度匹配)-->
- *     verifying --(SHA-256 比对)--> ready(完成，回调 native_audio_on_ready) --> idle
- *   任一步失败 --> failed（按失败类别决定保留还是清除断点） --> idle
- * 状态与进度经 audio_report_status() 上报为 MQTT audio_status。
+ * 对服务器可见的过程是：已接受、下载中、校验中、可用或失败。网络失败保留安全
+ * 断点；清单、长度或摘要错误会清除无效结果，不能把不完整素材交给播放功能。
  */
 #include "audio_engine.h"
 

@@ -1,32 +1,21 @@
 /**
  * @file    ota_engine.c
- * @brief   固件 OTA 下载、断点续传、校验、Flash 写入与分区切换引擎。
+ * @brief   下载新固件并在所有完整性检查通过后安全切换启动版本。
  *
- * 本模块接收控制面已经校验的服务器响应，保证同一时间只有一个 OTA 任务，
- * 并负责从 HTTPS 下载镜像、恢复断点、写入目标分区、校验摘要、切换启动分区
- * 以及成功后的重启。应用启动和 PENDING_VERIFY 验收不属于本模块。
+ * 只有经过身份、版本和清单检查的升级任务才能进入这里。同一时间只执行一个任务；
+ * 下载内容写入当前未运行的应用分区，不会覆盖正在运行的固件。网络中断时保存可验证
+ * 的进度；完整镜像通过头部、长度、版本、安全版本和 SHA-256 检查后才允许重启。
  *
- * 数据流总览：
- *   控制面 JSON → ota_control_plane 解析/版本比较 → native_ota_manifest_t →
- *   本模块堆上深拷贝 → ota_engine_task：
- *     · 读取/复用断点记录（ota_state_store，含 cooldown 与 ETag）；
- *     · HTTPS Range 下载（配置证书/超时，经 esp_http_client）；
- *     · 校验镜像头与新分区前缀（ota_stability）→ 写入（esp_ota_write）；
- *     · 校验实际写入区 SHA-256（ota_stability）→ esp_ota_end；
- *     · 持久化 READY_TO_COMMIT → 提交前检查（ota_stability）→ 切换 boot 分区；
- *     · 生命周期/进度事件经 ota_report 上报；
- *     · 失败时按终端/网络分类隔离（ota_stability + ota_state_store）。
+ * 处理顺序是：读取可复用进度、通过 HTTPS 下载、边下载边写入备用分区、校验完整
+ * 镜像、保存“可以提交”的记录、检查当前是否适合重启、切换启动分区并报告服务器。
+ * 网络类失败降低重试频率；确定损坏或不匹配的制品会被隔离，不能无限自动重试。
  *
- * 状态机（引擎侧）：accepted → downloading → verifying → rebooting。
- * 下载/写入期间记录一直停留在 OTA_RESUME_PHASE_DOWNLOADING，任一步骤失败可
- * 靠检查点续传；镜像完整校验后进入 OTA_RESUME_PHASE_READY_TO_COMMIT，掉电后
- * 可跳过重下直接提交；终端校验失败进入 OTA_RESUME_PHASE_QUARANTINED，禁止同
- * artifact 自动重试。每次重启后的本地验收（booted_pending_verify → succeeded /
- * failed / rolled_back / deferred）由 ota_boot_flow + ota_boot_health 完成。
+ * 下载阶段掉电后可从已保存位置恢复；完整校验后掉电则保留镜像，下次无需重下即可
+ * 再次尝试提交。校验失败的同一制品会被隔离。新固件能否最终确认或需要回滚，
+ * 由下次开机时的本地健康检查决定。
  *
- * 调用上下文：任务由 ota_engine_handle_server_json() 在 MQTT/事件任务中创建，实际
- * 下载在专用 FreeRTOS 任务（栈 12 KiB，优先级 5）内执行；该任务可阻塞在网络、
- * Flash 或 NVS 上，因此本文件的所有函数都禁止在中断上下文调用。
+ * MQTT 事件处理只负责创建后台任务，实际下载、Flash 写入和持久化均在后台执行，
+ * 不会阻塞 MQTT 心跳和其它控制消息。本模块不能从中断中调用。
  */
 #include <errno.h>
 #include <inttypes.h>
@@ -68,17 +57,13 @@ static const char *TAG = "ota_engine";
 #define OTA_MAX_EMPTY_READS 600U
 
 /**
- * @brief 计算连续网络失败后的下次退避冷却时长（指数退避，封顶）。
+ * @brief 计算网络连续失败后应等待多久再试，避免持续请求服务器和消耗电量。
  *
  * @param[in] cooldown_count 已累计的冷却次数；首次调用应传 0，之后每轮 +1。
  * @return 冷却秒数，范围 [BASE, MAX]，单位为秒。
  *
- * 实现把 BASE 从 1 倍起随 count 增长逐次翻倍，并受 MAX 上限与“翻倍后不越界”
- * 的约束：count=0 或 1 时返回 BASE，count≥2 时返回 2^(count-1)*BASE，命中 MAX 后
- * 封顶。count 达到 1 仍返回 BASE，是为了让“调用方传 count+1”与“复用记录里的
- * cooldown_count”两种传法在首次冷却时得到同一结果。
- * 该策略在“快速重试恢复”和“避免持续打满服务器”之间取平衡；网络类失败可
- * 反复重试，因此冷却永不等于“隔离”，只用于临时降频。
+ * 第一次失败使用基础等待时间，之后逐步翻倍但不超过上限。网络恢复后仍允许继续
+ * 尝试；等待只用于降低频率，不代表该固件制品已经被判定无效。
  *
  * @note 纯整数运算，不访问 Flash、NVS 或网络，可在普通任务上下文调用。
  */

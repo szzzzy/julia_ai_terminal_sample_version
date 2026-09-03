@@ -1,21 +1,17 @@
 /**
  * @file    pcf85063_shared.c
- * @brief   PCF85063 RTC 的“共享/封装”层：使用 ESP-IDF i2c_master 驱动访问 RTC。
+ * @brief   在共享板载 I2C 上读写 RTC，并把芯片格式转换为普通日期时间。
  *
- * 与 main/PCF85063/PCF85063.c 的区别：
- *   - 本文件是面向 ESP-IDF 原生驱动的轻量封装，复用 tca9554 创建的 i2c_master 总线，
- *     仅供 julia_time.c（SNTP 校时/启动时从 RTC 恢复系统时间）使用；
- *   - main/PCF85063/PCF85063.c 是较完整的 Waveshare 驱动，经外部 I2C_Driver 组件
- *     访问，供 julia_context.c 使用。两者都写同一颗 RTC（地址 0x51），但走不同总线栈。
+ * 当前时间服务通过这里在开机时恢复时间，并在网络校准后写回。旧版 RTC 驱动仍在
+ * 仓库中，但当前应用不应同时启动两套实现，否则会有两个调用方操作同一颗芯片。
  *
  * 硬件连接：
  * - PCF85063 位于共享 I2C 总线（I2C_NUM_0：SCL=IO10、SDA=IO11）上，从机地址 0x51。
  * - 初始化时必须依赖 tca9554_init() 先创建总线（本函数会主动调用它以幂等自举）。
  * - 上电后向 CTRL1 写 CAP_SEL=1，选择内部 12.5pF 负载电容（匹配晶振规格）。
  *
- * 上游：julia_time.c 的 julia_time_init() → board_rtc_init()；ip_ready 后由
- * SNTP sync 回调 board_rtc_set_time() 写回。启动早期 board_rtc_read_time() 用于
- * 恢复系统时间。数据流：RTC 的 BCD 时间寄存器 → bcd_to_dec → board_rtc_datetime_t。
+ * 芯片使用 BCD 保存时间，本模块在边界完成转换；其它模块始终使用普通十进制日期，
+ * 不需要了解寄存器格式。
  */
 
 #include "pcf85063_shared.h"
@@ -168,4 +164,3 @@ esp_err_t board_rtc_set_time(const board_rtc_datetime_t *time)
     };
     return write_regs(PCF85063_SECONDS_REG, data, sizeof(data));
 }
-

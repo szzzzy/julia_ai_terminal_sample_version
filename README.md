@@ -2,7 +2,7 @@
 
 Julia Fused-Base 是面向 ESP32-S3 陪伴终端的设备固件，提供麦克风采集、WSS 语音传输、扬声器播放、屏幕表情、行为状态机、RTC／IMU 情境输入和 MQTT／HTTPS 固件 OTA。
 
-文档版本：V1.0。实现核对日期：2026-08-31。适用对象：当前工作区的实际构建配置。固件版本由根目录 `CMakeLists.txt` 的 `PROJECT_VER` 定义，当前为 `0.1.0`；文档版本与固件版本独立。
+文档版本：V1.1。实现核对日期：2026-09-03。适用对象：当前工作区的实际构建配置。固件版本由根目录 `CMakeLists.txt` 的 `PROJECT_VER` 定义，当前为 `0.1.0`；文档版本与固件版本独立。
 
 ## 能力范围
 
@@ -127,6 +127,7 @@ flowchart LR
 | [验证与验收](docs/VALIDATION.md) | 功能、故障、性能和发布验证清单 |
 | [工程边界与已知限制](docs/COMMENT_AUDIT_FINDINGS.md) | 当前限制、影响和待验证事项 |
 | [主机回归测试](tests/host/README.md) | 测试构建、覆盖范围及模拟硬件的边界 |
+| [源码注释规范](docs/CODE_COMMENT_STYLE.md) | 用业务含义解释条件、结果、失败与并发，避免只复述变量名 |
 
 ## 使用边界
 

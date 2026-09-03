@@ -1,31 +1,16 @@
 /**
  * @file    julia_avatar.c
- * @brief   Julia L1 立绘层：静态立绘 + 相位帧 + RMS 嘴型 + 微动。
+ * @brief   把听音、等待回答和说话状态转换为用户看到的 Julia 表情。
  *
- * 模块职责与边界：
- *   - 本模块是"当前运行时真正生效"的 L1 立绘链路（app_main 经 julia_display_init()+
- *     julia_avatar_init() 启动）。它构建 Julia 静态立绘，并按"对话相位"
- *     （IDLE/LISTENING/THINKING/SPEAKING）使用统一稳定底图，以眼睛开合区分相位，
- *     同时用 RMS 驱动 4 档嘴型，并运行一个"微动"任务（眨眼/呼吸由微动层承担）。
- *   - 与之相对：julia_ui.c 是 fused 遗留的总控（不参与当前构建）；julia_backlight 管
- *     背光；julia_display_theme（或 app/julia_idle_display.c）管显示功率/息屏。
- *   - 上游调用方：voice_service（WSS 任务）经 julia_avatar_feed_pcm/talking_start/
- *     talking_stop/set_dialog_phase 驱动嘴型与相位；julia_idle_display 经
- *     julia_avatar_set_dozing 切换睡眠立绘。
+ * 普通状态使用稳定底图，通过眼睛区分正在听、等待回答和播放回答；设备说话时，
+ * 嘴型由已经送往扬声器的声音强度驱动，而不是由网络到包速度驱动。睡眠时切换为
+ * 完整闭眼画面。背光和是否进入待机由其它模块统一决定。
  *
- * 线程模型：
- *   - 本模块所有 LVGL 对象操作都在 lvgl_port_lock() 临界区内进行（lvgl_port 内有独立
- *     "lvgl" 任务在跑 lv_timer_handler）。
- *   - julia_avatar_init() 创建一个 "avatar_l1" 任务（优先级 3，栈 4096，PSRAM），每
- *     40ms 计算一次嘴型档位并调用 avatar_mouth_set_shape()。
- *   - 相位/嘴型/dozing 状态用 portMUX_TYPE（s_phase_lock / s_state_lock）保护，因为
- *     它们可能在 WSS 任务与 avatar_l1 任务之间并发读写。
+ * 独立任务每 40 ms 更新一次嘴型和微动。语音任务只写入“当前阶段”和声音强度，
+ * 不直接操作界面对象；所有 LVGL 修改在内部串行完成。
  *
- * 数据流：
- *   - 相位帧：LISTEN/THINK/SPEAK .bin（嵌入）→ avatar_rle_decode_rgb565() 解到 PSRAM
- *     （360x360 RGB565）→ 校验 CRC32 → 作为 lv_img_dsc_t 绑定到底图 s_base。
- *   - 嘴型：voice_service 每帧 PCM → julia_avatar_feed_pcm() → mouth_level_for_frame()
- *     计算 RMS 档位(0..3) → avatar_l1 任务每 40ms 调 avatar_mouth_set_shape()。
+ * 内嵌相位画面解压到外部内存并校验完整性后才显示。嘴型将短时间声音能量分成四档，
+ * 没有新声音或设备不在说话时自动闭嘴。
  */
 #include "julia_avatar.h"
 
@@ -69,11 +54,9 @@
 #define STATUS_LABEL_Y              100
 #define STATUS_LABEL_WIDTH          220
 
-/* Transforming the 360x360 root invalidates the complete display on every
- * animation tick.  On the QSPI panel that frame is committed in ten strips,
- * without a TE signal to keep the writes outside the LCD scanout window.  The
- * result is continuous visible tearing/flicker.  Keep animation updates local
- * to the eyes and mouth until panel-synchronised full-frame rendering exists. */
+/* 整体移动 360×360 根对象会让每一帧都刷新全屏；当前 QSPI 面板分十条发送且没有
+ * 撕裂同步信号，持续全屏更新会出现明显闪烁。因此微动只修改局部眼睛和嘴巴，
+ * 不移动整幅立绘。 */
 #define AVATAR_ENABLE_FULL_FRAME_MOTION 0
 
 static const char *TAG = "julia_avatar";

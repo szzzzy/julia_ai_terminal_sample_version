@@ -1,17 +1,15 @@
 /**
  * @file    audio_control_plane.h
- * @brief   音频控制面请求构建与音频清单解析接口。
+ * @brief   生成音频版本检查请求，并确认服务器返回的素材确实属于本设备和本次请求。
  *
- * 与 ota_control_plane 平行：只处理 MQTT 音频控制消息，生成音频检查请求、
- * 关联 request_id，并把服务器 JSON 深拷贝为已校验的 native_audio_manifest_t。
- * 不创建下载任务、不访问分区、不执行 HTTP 下载。
+ * 迟到的旧响应、设备身份不符、地址不安全、大小或摘要非法时全部拒绝。通过检查后
+ * 只输出一份可供下载使用的清单，不创建任务、不写分区，也不执行 HTTPS 下载。
  *
  * 协议版本不升级：复用现有 MQTT/HTTPS 双通道与 schema_version=1 语义，
  * 仅新增 audio_* 报文类型与独立 topic 前缀。
  *
- * 注意本模块解析的是"音频素材下载"的 MQTT 检查报文（audio_check/audio_check_response），
- * 与"WSS 下行文本命令"（SPKS/SPKV/SPKE/SPKT/MICS/MICW，见 main/voice）是两套
- * 完全独立的协议，别混淆：这里的"控制面"管素材更新，不碰 I2S 采集/音量/自检音。
+ * 这里管理可长期保存的音频素材版本，不处理实时回答、音量或扬声器自检；
+ * 实时声音命令属于 WSS 语音协议。
  */
 #pragma once
 

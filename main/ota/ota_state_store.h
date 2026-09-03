@@ -1,14 +1,12 @@
 /**
  * @file    ota_state_store.h
- * @brief   OTA 断点续传与 artifact 隔离状态的 NVS 存储。
+ * @brief   保存升级下载进度，并记住哪些损坏制品不得再次自动尝试。
  *
- * 状态保存在独立的 ota_resume namespace 中，不与业务配置共用键名。
- * 检查点按固定数据量写入，避免每个网络包都触发 Flash 擦写。
+ * 设备每写入一段固件才保存一次检查点，掉电后最多重下一小段，同时避免每个网络包
+ * 都擦写 Flash。确定损坏的制品会被隔离；单纯网络失败只降低重试频率。
  *
- * 生命周期与命名注意：这里的阶段（phase）只描述“下载/校验/隔离”这一侧的可恢复状态，
- * 用于断点续传、冷却和隔离策略；它不等于对外上报的 ota_status 生命周期状态
- * （见 ota_report.h native_ota_report_state_t，含 accepted/downloading/…/rolled_back）。
- * 两者的取值相互独立，不要混用。
+ * 本文件保存的是设备重启后如何继续下载或提交，不是服务器看到的升级进度；
+ * 两套状态用途不同，不能互相转换或混用。
  */
 #pragma once
 
@@ -45,7 +43,7 @@ typedef enum {
     OTA_RESUME_PHASE_QUARANTINED = 3, /**< 终端校验失败，禁止同一 artifact 自动重试。 */
 } ota_resume_phase_t;
 
-/** Persistent network retry cooldown. This intentionally never means quarantined. */
+/** 表示网络连续失败后的临时等待；等待结束后仍允许重试，不等于制品被隔离。 */
 #define OTA_RESUME_PHASE_COOLING_DOWN ((ota_resume_phase_t)4)
 
 /*
@@ -67,20 +65,15 @@ typedef enum {
  *   READY_TO_COMMIT ──(提交前掉电, 下轮核对分区摘要后直接提交或重下)──▶ 保持
  *   QUARANTINED ──(终端错误, 禁止自动重试)──▶ 保持不变
  *
- * 设计约束（Why）：
- * - 只有 DOWNLOADING/READY_TO_COMMIT 之间可以安全地“无成本”来回，因为它们代表
- *   一个已校验前缀的合法断点；QUARANTINED 是终态，不允许静默回到 DOWNLOADING，
- *   这样同一坏镜像不会在重启后无限重下。
- * - COOLING_DOWN 是短时网络抖动后的“退避闸门”，它与 QUARANTINED 语义完全相反
- *   （一个允许重试、一个禁止重试），因此故意不写成同一个枚举值。
- * - 记录被“删除”等价于回到 EMPTY：表示没有可继续的对象，需要从零初始化。
+ * 关键要求：网络失败允许稍后继续，镜像校验失败则禁止同一制品自动重试；完整校验
+ * 后掉电应直接恢复提交，不能重新下载。删除记录表示没有可安全继续的任务，需要从零开始。
  */
 
 /**
- * @brief 可跨重启恢复的 OTA 元数据记录。
+ * @brief 设备重启后继续同一升级所需的最小记录。
  *
- * verified_offset 表示已经成功写入并完成 NVS 检查点的镜像前缀长度；
- * 恢复时必须对 manifest、URL、SHA、目标分区和 HTTP Content-Range 再次校验。
+ * 只把已经写入且保存检查点的前缀视为可靠。恢复时必须再次核对清单、下载地址、
+ * 摘要、目标分区和服务器返回范围，避免把另一个制品接在旧数据后面。
  */
 typedef struct {
     uint32_t schema_version; /**< 记录布局版本，必须等于 OTA_STATE_STORE_SCHEMA_VERSION。 */

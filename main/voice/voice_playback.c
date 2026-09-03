@@ -1,3 +1,12 @@
+/**
+ * @file voice_playback.c
+ * @brief 用固定容量缓冲吸收网络抖动，并由单一后台任务连续驱动扬声器。
+ *
+ * 收到开始命令后先等待约 80 ms 声音，避免刚开播就因网络小间隔产生断续；
+ * 输入短暂停顿时重新积累，连续 15 秒没有可播放数据才判定超时。服务器声明结束后，
+ * 设备会播放所有已接受声音并补足扬声器硬件尾音，再报告“实际播放完成”。
+ * 用户插话或新一轮播放会使旧编号失效，旧任务不能覆盖新一轮状态。
+ */
 #include "voice_playback.h"
 
 #include <math.h>
@@ -16,7 +25,7 @@
 #define PLAYBACK_PREBUFFER_MS 80U
 #define PLAYBACK_PREBUFFER_WAIT_MS 120U
 #define PLAYBACK_STARVE_MS 15000U
-/* More than the board's 4 x 160-frame DMA capacity, to play the accepted tail. */
+/* 结束输入后再写入略多于扬声器硬件队列容量的静音，确保已接受的尾音真正离开硬件。 */
 #define PLAYBACK_DRAIN_SAMPLES (5U * PLAYBACK_CHUNK_SAMPLES)
 
 static const char *TAG = "voice_playback";
@@ -35,7 +44,7 @@ static uint32_t s_overflows;
 static audio_pcm_sink_t s_pcm_sink;
 static void *s_pcm_ctx;
 
-/* The lock covers only bookkeeping and <=1200-byte copies, never I2S or UI. */
+/* 互斥只保护播放进度和小块内存复制；扬声器写入不持锁，避免阻塞新数据和打断请求。 */
 static void lock(void) { xSemaphoreTake(s_lock, portMAX_DELAY); }
 static void unlock(void) { xSemaphoreGive(s_lock); }
 

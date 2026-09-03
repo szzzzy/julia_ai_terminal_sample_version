@@ -1,20 +1,17 @@
 /**
  * @file    julia_idle_display.c
- * @brief   待机显示策略实现：默认跟随 S3，交互后陪伴十分钟再回到 S3。
+ * @brief   实现“交流结束后保留一段免唤醒时间，超时后恢复等待唤醒”的策略。
  *
  * 职责边界：
- *   - 依据“距最近交互的时长 + busy 标志”判断 S1 是否应进入 S3，并投递
- *     EVT_USER_LEAVE；调试阶段不在这里切换立绘，具体状态呈现统一由 FSM 运行时负责。
- *   - note_activity()/set_busy() 只维护空闲计时，不直接操作面板、背光或立绘；
- *     所有状态呈现由 FSM 运行时独占，避免 S6 已提交后被旁路重新点亮。
+ *   - 最近一次有效交流超过设定时长，且设备没有在听音、等待回答或播放回答时，
+ *     报告用户已经离开，设备由免唤醒陪伴返回等待唤醒。
+ *   - 本模块只维护时间与“当前交流是否仍在进行”，不直接操作面板、背光或立绘；
+ *     睡眠状态生效后不会被空闲计时逻辑从旁路重新点亮。
  *
  * 并发模型：
- *   - 有一个后台任务（display_theme_task）轮询推进状态；用户/语音侧通过
- *     note_activity()/set_busy() 更新共享状态。所有共享状态（s_last_activity_us、
- *     s_busy、s_state、s_generation）都在 s_lock（portMUX）临界区内读写。
- *   - 用 generation 计数器做"关卡约定"：任务在推进到某档前先记账，执行时再校验
- *     自己仍然是最新的一档（transition_is_current）；若活动抢先更新 generation，
- *     旧的空闲推进会被放弃。
+ *   - 后台任务定期检查时间；语音处理只负责报告新活动或交流开始/结束。
+ *   - 每次活动都会更新一个变化编号。后台任务准备报告超时时会再次核对编号；
+ *     如果期间出现新活动，就放弃已经过时的超时结果。
  */
 #include "julia_idle_display.h"
 
@@ -38,9 +35,9 @@ static const char *TAG = "DISPLAY_THEME";
 static TaskHandle_t s_task;                             /* 后台轮询任务句柄（用于判重/防重复 init）。 */
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED; /* 保护下面前四个共享字段的临界区锁。 */
 static int64_t s_last_activity_us;                      /* 最近一次用户/语音交互时刻（us）。 */
-static bool s_busy;                                     /* 当前是否处于听-想-说的"占屏"期。 */
-static display_activity_state_t s_state = DISPLAY_ACTIVITY_STANDBY; /* 当前显示档位。 */
-static uint32_t s_generation;                            /* 档位代次：每次状态变化自增，用于并发赶超校验。 */
+static bool s_busy;                                     /* 是否仍在听用户说话、等待回答或播放回答。 */
+static display_activity_state_t s_state = DISPLAY_ACTIVITY_STANDBY; /* 陪伴窗口是否仍有效。 */
+static uint32_t s_generation;                            /* 活动变化编号，用于丢弃过时的超时判断。 */
 
 static void post_fsm_event(fsm_event_t event)
 {
@@ -52,10 +49,9 @@ static void post_fsm_event(fsm_event_t event)
 }
 
 /*
- * 判断"要执行的某档推进是否仍是最新"。
- * 条件：共享状态恰好等于该档，且代次未变。若唤醒/置忙抢先改了状态和代次，
- * 则这里返回 false，调用方应放弃本次视觉设定或回滚。
- * 在持锁下读取，保证与写方的一致性视图。
+ * 确认一次准备执行的超时判断仍然有效。
+ * 如果用户刚刚开始交流，或语音处理刚刚声明设备正在忙碌，活动变化编号就会更新，
+ * 旧判断必须放弃，避免把正在交流的设备误送回待机。
  */
 static bool transition_is_current(display_activity_state_t state, uint32_t generation)
 {
@@ -67,8 +63,8 @@ static bool transition_is_current(display_activity_state_t state, uint32_t gener
 }
 
 /*
- * 达到 S3 待机阈值后投递一次用户离开事件。函数不直接修改立绘和背光，
- * 避免调试阶段 Companion 共用 UI 与闲置策略互相覆盖。
+ * 陪伴时间耗尽后只报告用户离开。设备状态管理随后统一切换表情和背光，
+ * 本模块不直接改变画面。
  */
 static void display_enter_standby(uint32_t generation)
 {
@@ -81,13 +77,8 @@ static void display_enter_standby(uint32_t generation)
 }
 
 /*
- * 后台轮询任务：周期性检查"闲置时长"，推动显示档位。优先级 3、栈 3072B。
- * 每次轮询先读一份共享快照（在锁内拷贝），再据此判断，避免长时间持锁。
- * 推进规则：空闲达到阈值、当前不是 STANDBY 且不忙时投递一次 S1→S3；
- * 阈值前保持 ACTIVE，处于 STANDBY 时不重复投递。
- *   忙（busy）时一律不推进 —— 正在听/想/说，屏幕必须保持活跃。
- * 每次进入之前都在临界区内"按当前快照重新确认 + 更新 state + 提升 generation"，
- * 保证与并发 note_activity/set_busy 的竞态能被 generation 机制察觉。
+ * 后台任务定期检查免唤醒陪伴时间。正在交流时不计超时；已经回到等待唤醒后
+ * 不重复报告。真正提交超时前会再次确认期间没有新活动。
  */
 static void display_theme_task(void *argument)
 {
@@ -112,8 +103,7 @@ static void display_theme_task(void *argument)
             if (idle_us >= sleep_us) {
                 bool enter = false;
                 uint32_t generation = 0;
-                /* 申请进入 standby：锁内再校验一次（可能上次快照已过期），并原子地
-                 * 更新 state、抬 generation。 */
+                /* 提交前再次确认用户没有恢复交流，避免使用过时的时间结果。 */
                 portENTER_CRITICAL(&s_lock);
                 if (!s_busy && s_state != DISPLAY_ACTIVITY_STANDBY) {
                     s_state = DISPLAY_ACTIVITY_STANDBY;
@@ -134,10 +124,9 @@ static void display_theme_task(void *argument)
 /*
  * @brief 初始化待机显示策略并启动后台轮询任务。
  * @return ESP_OK（含已初始化过的幂等情形）；ESP_ERR_NO_MEM（任务创建失败）。
- * @side  将初始状态置为 STANDBY、代次=1；具体 S3 呈现随后由 FSM 运行时应用。
+ * @side  初始状态表示尚未进入陪伴窗口；具体待机画面随后由设备状态管理应用。
  *
- * 幂等：若 s_task 已非空直接返回 ESP_OK，避免重复启动任务（重复 init 安全）。
- * 初值不投递 EVT_USER_LEAVE，避免默认 S3 在超时后收到重复事件。
+ * 重复调用不会创建第二个计时任务。启动时不报告用户离开，因为设备本来就在待机。
  */
 esp_err_t julia_idle_display_init(void)
 {
@@ -163,10 +152,8 @@ esp_err_t julia_idle_display_init(void)
 }
 
 /*
- * @brief 记录一次有效交互并把空闲计时档位置回 ACTIVE。
- * 调用上下文：任何用户/语音交互点（如唤醒词、语音会话、按键）。
- * 副作用：刷新 last_activity、置 ACTIVE、抬 generation；不直接改变显示。
- * 并发：在锁内更新共享状态，抬 generation 使可能正在进行的"进入 sleep"推进失效。
+ * @brief 记录一次有效交流，并从现在重新计算免唤醒陪伴时间。
+ * 唤醒词、用户话语和有效按键都属于活动；本函数不直接改变显示。
  */
 void julia_idle_display_note_activity(void)
 {
@@ -178,10 +165,10 @@ void julia_idle_display_note_activity(void)
 }
 
 /*
- * @brief 设置"独占期"标志：听-想-说期间保持屏幕活跃。
- * @param busy true 进入占屏期（不推进降档），false 结束占屏期。
- * 副作用：刷新 last_activity 并抬 generation；busy=true 时置 ACTIVE，false 只解除
- *         占屏而不唤醒显示。FSM 的交互状态负责实际点亮。
+ * @brief 声明当前交流是否仍在进行。
+ * @param busy true 表示正在听音、等待回答或播放回答，不允许陪伴窗口超时；
+ *             false 表示本轮处理结束，从当前时刻重新计算时间。
+ * 本函数只维护计时条件，实际显示由设备状态统一决定。
  */
 void julia_idle_display_set_busy(bool busy)
 {
@@ -194,9 +181,9 @@ void julia_idle_display_set_busy(bool busy)
 }
 
 /*
- * @brief 查询闲置策略是否已经投递 S3 待机。
- * @return true 表示当前处于 DISPLAY_ACTIVITY_STANDBY。
- * @note 保留旧接口名以避免破坏调用方；返回值不再等同于实际闭眼或 S6 睡眠。
+ * @brief 查询免唤醒陪伴窗口是否已经结束。
+ * @return true 表示后续交流需要重新经过唤醒流程。
+ * @note 接口名为兼容旧调用保留；返回值不代表屏幕或整机已经睡眠。
  */
 bool julia_idle_display_is_sleeping(void)
 {

@@ -1,13 +1,9 @@
 /**
  * @file    julia_time.c
- * @brief   设备壁钟管理的实现：RTC 备份/恢复 + SNTP 网络校时 + 墙钟有效性查询。
+ * @brief   开机从 RTC 恢复时间，联网后校准，并阻止无效年份触发夜间行为。
  *
- * 职责边界：
- *   - 只解决"系统时钟/墙钟是否可信、如何让它可信"，与 julia_context 的 FSM 事件
- *     无关。两份时间是"同源不同侧重"：本模块负责给操作系统 set wall time 并跟踪
- *     SNTP 是否成功。
- *   - 关键的不变式：以 2024-01-01 (JULIA_VALID_EPOCH) 为"时间尚未被设置"的判据。
- *     任何早于此的时间一律视为无效（避免把 1970 年当成真时间触发行事）。
+ * 本模块只负责让操作系统拥有可信时间，不决定设备何时睡眠。早于 2024-01-01 的
+ * 时间视为 RTC 尚未设置或网络尚未同步，调用方必须暂停夜间判断。
  *
  * 线程模型：
  *   - s_time_valid / s_sntp_started 由 s_lock（portMUX）保护，可被 IP-ready 回调
@@ -221,4 +217,3 @@ bool julia_time_valid(void)
     }
     return valid;
 }
-

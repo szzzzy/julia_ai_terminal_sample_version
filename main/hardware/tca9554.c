@@ -1,10 +1,9 @@
 /**
  * @file    tca9554.c
- * @brief   TCA9554 I2C GPIO 扩展器驱动（板载 Extend IO 控制）。
+ * @brief   初始化板载共享 I2C，并安全改变扩展器控制的 LCD 与 SD 卡信号。
  *
- * I2C 引脚：SCL=GPIO10、SDA=GPIO11（I2C_NUM_0，400 kHz，内部上拉）。
- * 驱动逻辑与 VOICE DATA BENCHMARK/components/board_hal/tca9554.c 一致
- * （已在目标板验证），仅补充头注释。
+ * 写输出时先准备目标电平，再把引脚切成输出，避免方向切换瞬间出现错误脉冲。
+ * 寄存器读改写必须串行，防止 LCD 复位和 SD 卡控制同时修改时覆盖彼此位。
  */
 
 #include "freertos/FreeRTOS.h"
@@ -30,10 +29,10 @@ static const char *TAG = "tca9554";
 #define TCA9554_I2C_SCL GPIO_NUM_10
 #define TCA9554_I2C_SDA GPIO_NUM_11
 
-/* 共享 I2C 总线/设备句柄。tca9554 创建总线，RTC 等其他外设通过 tca9554_i2c_bus() 复用。 */
+/* 扩展器首先创建板载 I2C；RTC 和运动传感器复用同一总线，避免重复初始化控制器。 */
 static i2c_master_bus_handle_t s_bus = NULL;
 static i2c_master_dev_handle_t s_dev = NULL;
-/* 串行化对扩展器寄存器的读-改-写（见 write_pin），避免多任务并发读到半开的配置。 */
+/* 保证一次“读取旧值、修改一位、写回”完整执行，避免另一任务的引脚变化被覆盖。 */
 static SemaphoreHandle_t s_lock = NULL;
 
 /**
@@ -60,12 +59,10 @@ static esp_err_t write_reg(uint8_t reg, uint8_t val)
 }
 
 /**
- * @brief 初始化 I2C 主总线并把 TCA9554（0x20）挂到总线上（幂等；可多次调用）。
+ * @brief 建立板载共享 I2C 并接入扩展器；重复调用直接复用现有连接。
  *
- * 创建的 i2c_master 总线（I2C_NUM_0，SCL=IO10/SDA=IO11，400kHz，内部上拉）会同时
- * 被 RTC 等设备复用：后续通过 tca9554_i2c_bus() 取出同一句柄。
- * 失败时只会让 s_bus/s_dev 保持可判定状态：总线创建失败直接返回，设备添加失败
- * 亦不破坏已有状态。本函数应在任务上下文调用（内部创建互斥锁）。
+ * RTC 等板载设备随后复用这条总线。初始化失败不会留下“看似可用”的扩展器；
+ * 调用方可根据错误决定让显示或存储降级。本函数会创建同步对象，只能在任务中调用。
  *
  * @return ESP_OK 已就绪；其他 esp_err_t 总线或设备初始化失败。
  */

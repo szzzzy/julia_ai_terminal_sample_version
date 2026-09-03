@@ -1,9 +1,9 @@
 /**
  * @file julia_fsm.c
- * @brief Julia 行为状态机的状态校验、允许迁移图与现有事件映射。
+ * @brief 定义设备在开机、待机、对话、睡眠、故障和升级之间如何切换。
  *
- * 允许迁移图负责拒绝非法跳转；事件入口只映射当前工程已经实际产生的
- * 空闲、唤醒、夜间和语音事件。未实现的故障、OTA 等业务不在这里预留处理分支。
+ * 每个外部事件先按当前业务状态确定去向，再由统一入口执行变化。这样可以拒绝
+ * 不符合产品流程的跳转，例如设备尚未被唤醒时直接进入播放回答。
  */
 #include "julia_fsm.h"
 
@@ -128,8 +128,8 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
         if (from_s2_sub_state == JULIA_S2_SUB_STATE_S2_3_SPEAKING &&
             target_is(to_main_state, to_s2_sub_state,
                       JULIA_MAIN_STATE_S1_COMPANION)) return true;
-        /* 终止语义由语音服务先取消残留播放，再进入 S5/S6；允许所有 S2 阶段，
-         * 以容忍 MQTT 语义与 WSS 音频之间的跨链路到达竞态。 */
+        /* 用户的“晚安”或“结束交流”可能在回答音频前后到达，因此听音、等待回答
+         * 和播放回答阶段都允许直接结束本轮交流。语音服务会先停止尚未播完的声音。 */
         if (target_is(to_main_state, to_s2_sub_state,
                       JULIA_MAIN_STATE_S5_SILENT) ||
             target_is(to_main_state, to_s2_sub_state,
@@ -236,12 +236,13 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
          fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG ||
          fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION) &&
         (event == EVT_MQTT_DISCONNECTED || event == EVT_WSS_DISCONNECTED)) {
-        /* 任一业务传输会话断开都使网络交互态收敛到待机，等待对应链路重连。 */
+        /* 控制消息或语音数据任一连接断开后，本轮交流都不再完整，设备返回待机，
+         * 等连接自动恢复后由下一次唤醒重新开始。 */
         target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION &&
                event == EVT_USER_LEAVE) {
-        /* 复用显示空闲策略的用户离开事件，由陪伴态进入待机态。 */
+        /* 对话结束后的连续交流窗口已超时，重新要求唤醒词。 */
         target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if ((fsm->main_state == JULIA_MAIN_STATE_S0_BOOT ||
@@ -252,7 +253,7 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY &&
                event == EVT_WAKEUP) {
-        /* 只有语音链路确认的唤醒词能从待机进入发起交互态。 */
+        /* 只有已经确认的唤醒词才能让待机设备开始一轮交流。 */
         target_main_state = JULIA_MAIN_STATE_S4_INTERACTION;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY &&
@@ -296,7 +297,7 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
         /* OTA 普通失败回到需要唤醒词的待机态，避免让 S1 承担待唤醒语义。 */
         target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
-    /* 复用现有语音链路事件驱动“听 -> 想 -> 说”，不新增阶段事件。 */
+    /* 用户说完后等待回答，收到回答后播放；播放完成进入免唤醒陪伴窗口。 */
     } else if (event == EVT_USER_CALL &&
                fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION) {
         target_main_state = JULIA_MAIN_STATE_S2_DIALOG;

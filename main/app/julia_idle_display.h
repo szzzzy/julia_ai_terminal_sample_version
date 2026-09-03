@@ -1,20 +1,17 @@
 /**
  * @file    julia_idle_display.h
- * @brief   Julia 待机显示策略：默认待机，交互后陪伴一段时间再回到闭眼呼吸。
+ * @brief   记录用户最近是否仍在交流，并在陪伴窗口结束后请求返回待机。
  *
  * 职责边界：
- *   - 启动时跟随 FSM 的 S3 待机；有效交互后保持活跃陪伴显示，达到长休阈值后
- *     一次性切回待机（闭眼+背光呼吸），
- *     同时保证 LVGL/背光配合不打扰正在进行的
- *     对话播放。它只处理"屏幕该显示什么闲置状态"，不负责立绘内容本身（那是 julia_avatar/
- *     julia_ui 的职责）。
- *   - 注意与 FSM 的"设备行为状态"解耦：本模块只依据"交互活跃度 + busy 标志"
- *     投递事件，不直接控制状态对应的面板、背光或立绘。
+ *   - 设备开机后默认等待唤醒；一次交流结束后保留一段无需再次说唤醒词的时间。
+ *   - 用户正在说话、设备正在等待回答或正在播放回答时，不计算陪伴窗口超时。
+ *   - 本模块只报告“陪伴窗口已经结束”，屏幕、背光和表情由设备状态统一控制，
+ *     因此不会在睡眠状态生效后从旁路重新点亮屏幕。
  *
  * 依赖：FSM 运行时事件入口与 esp_timer。
  *
- * 使用：app_main 在 julia_avatar_init 成功后调用 julia_idle_display_init()；
- *       语音/交互处调用 note_activity()（用户交互）与 set_busy()（听-想-说期间保亮）。
+ * 使用：应用启动时开始计时；有效交流发生时刷新时间；听音、等待回答和播放回答
+ *       期间声明设备仍在忙碌。
  */
 #pragma once
 
@@ -26,16 +23,16 @@
 extern "C" {
 #endif
 
-/** Start the default-standby and post-interaction companion-window policy task. */
+/** 启动陪伴窗口计时；初始状态为等待唤醒，不会重复报告用户离开。 */
 esp_err_t julia_idle_display_init(void);
 
-/** Record valid activity; the resulting FSM state owns any display wake. */
+/** 记录一次有效交流，重新开始计算免唤醒陪伴时间。 */
 void julia_idle_display_note_activity(void);
 
-/** Prevent idle transition while listen/think/speak is active; does not drive hardware. */
+/** 声明设备是否正在听音、等待回答或播放回答；本函数不直接控制显示硬件。 */
 void julia_idle_display_set_busy(bool busy);
 
-/** Return true after closed-eye breathing mode has started. */
+/** 返回陪伴窗口是否已经结束；不代表显示面板或整机电源已经关闭。 */
 bool julia_idle_display_is_sleeping(void);
 
 #ifdef __cplusplus

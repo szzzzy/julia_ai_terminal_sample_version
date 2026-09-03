@@ -1,25 +1,18 @@
 /**
  * @file    mqtt_comm.h
- * @brief   MQTT 通信层的公共接口：topic→handler 注册、通用发布与启动。
+ * @brief   连接 MQTT Broker，把完整下行消息交给对应业务，并提供上行发布能力。
  *
- * 通信层不感知任何业务（OTA / 语音 / 音频状态）。业务模块在启动前通过
- * mqtt_comm_register_topic() 注册自己的下行 topic 与处理回调，连接建立后通信层
- * 统一订阅并完成分片重组，再把完整载荷交给对应 handler。
+ * 各业务在启动前登记自己需要接收的主题。连接成功后本模块统一订阅；一条消息即使
+ * 被底层拆成多个片段，也会先恢复成完整内容，再交给语音、升级或音频业务处理。
  *
- * 模块职责边界：
- * - 负责 MQTT 连接、已注册 topic 订阅、主动 OTA 检查任务和状态异步发送；
- * - 将完整载荷按注册表路由给业务 handler；
- * - 不执行 HTTPS 下载、OTA 分区写入或业务 NVS 清理。
+ * 本模块负责连接、订阅、消息恢复和发送。它不会下载固件、写升级分区或解释
+ * 语音命令；这些操作由收到完整消息的业务模块完成。
  *
- * 对外有两条发送通道，消费方按可靠性区分：
- * - mqtt_comm_publish()：QoS 1 尽力而为、不跟踪 PUBACK，也不做 NVS 持久化。适合
- *   音频状态等辅助上报（如 audio_engine 上报 audio_status）；
- * - OTA 关键生命周期事件：经 ota_report 注册的内部 transport（mqtt_status_transport）
- *   进入，QoS 1 且持久化到 PUBACK，用 event_id 幂等重发，不对外暴露接口。
+ * 普通状态上报只保证交给 MQTT 客户端，不等待服务器确认；升级成功、失败等关键
+ * 事件则由升级报告模块先保存，收到 Broker 确认后才删除，以便断线后补发。
  *
- * 本层与语音面的关系：语音命令（vcmd）解析与 WSS 会话状态转换在 voice_service 实现，
- * 它把 vcmd topic（非 critical）注册进本层注册表，仅复用本层的订阅/分片路由能力；
- * 音频 PCM 流向由 WSS 传输层承载，不经过本模块。语音回执等语音面语义不在此文件内。
+ * MQTT 只承载语音控制消息，麦克风和回答声音走 WSS。控制连接断开时，正在进行的
+ * 对话会返回待机，避免设备停在一个无法继续接收语义结果的状态。
  *
  * @note 所有 topic 必须在 mqtt_comm_start() 生效前注册（app_main 装配阶段）；
  *       启动后注册的新 topic 不会随已建立的会话订阅。
@@ -36,11 +29,10 @@ extern "C" {
 #endif
 
 /**
- * @brief 已注册 topic 的完整载荷处理回调。
+ * @brief 一条已订阅消息完整到达后调用的业务处理函数。
  *
- * 载荷以 NUL 结尾（通信层在重组完成后追加），长度不含末尾 NUL。回调在
- * ESP-MQTT 事件任务上下文中同步执行：只应解析元数据、入队或创建任务，
- * 不得阻塞等待下载完成，也不得访问 Flash。
+ * 内容末尾附带字符串结束符，长度不包含该结束符。处理函数运行在 MQTT 的公共
+ * 事件任务中，只能快速校验并转交工作，不能等待下载或直接写入 Flash。
  *
  * @param[in] payload     完整消息载荷首地址，不要求调用方释放。
  * @param[in] payload_len 载荷有效长度，单位为字节。
@@ -48,13 +40,13 @@ extern "C" {
 typedef void (*mqtt_inbound_handler_t)(const char *payload, size_t payload_len);
 
 /**
- * @brief 注册一个下行 MQTT topic 及其完整载荷处理回调。
+ * @brief 登记一个要订阅的 MQTT 主题及其业务处理函数。
  *
  * @param[in] topic          要订阅的完整 topic，不允许为 NULL；字符串会被复制。
  * @param[in] max_payload_len 该 topic 单条消息允许的最大长度（不含末尾 NUL），
  *                            不得超过 NATIVE_OTA_JSON_MAX_LEN。
- * @param[in] critical       为 true 时，该 topic 的 SUBACK 计入连接就绪判定；
- *                            任一 critical topic 订阅失败或超时会触发重建连接。
+ * @param[in] critical       为 true 表示缺少该主题时核心控制功能不可用；订阅失败
+ *                            或长时间没有确认时会重新建立 MQTT 连接。
  * @param[in] handler        完整载荷处理回调，不允许为 NULL。
  *
  * @return ESP_OK 注册成功（同名 topic 重复注册时覆盖旧配置）。
@@ -67,11 +59,10 @@ esp_err_t mqtt_comm_register_topic(const char *topic, size_t max_payload_len,
                                    bool critical, mqtt_inbound_handler_t handler);
 
 /**
- * @brief 以 QoS 1、非 retain 方式发布一条 MQTT 消息。
+ * @brief 以 QoS 1 且不保留的方式发布一条普通 MQTT 消息。
  *
- * 通用尽力而为发布：消息直接交给 ESP-MQTT 发送队列，不跟踪 PUBACK。用于
- * 音频状态等辅助上报通道；OTA 关键生命周期事件请继续使用 ota_report 模块
- * 的可靠 transport。
+ * 返回成功只表示 MQTT 客户端接受了消息，不表示 Broker 已确认，也不表示服务器
+ * 已完成业务处理。需要断线补发的升级关键事件必须使用升级报告模块。
  *
  * @param[in] topic     完整发布 topic，不允许为 NULL。
  * @param[in] data      消息内容首地址，不允许为 NULL。
@@ -87,11 +78,10 @@ esp_err_t mqtt_comm_register_topic(const char *topic, size_t max_payload_len,
 esp_err_t mqtt_comm_publish(const char *topic, const char *data, size_t data_len);
 
 /**
- * @brief 初始化并启动 MQTT 客户端。
+ * @brief 启动 MQTT 连接、订阅和升级检查后台任务。
  *
- * 客户端启动后由 ESP-MQTT 自有任务维持连接，并由模块内部任务在连接就绪后立即
- * 上报当前版本、随后周期检查。每次连接成功都会订阅所有已注册 topic，异常断线
- * 后使用官方客户端的自动重连机制恢复连接与版本检查。
+ * 每次连接成功都会重新订阅所有已登记主题；核心主题全部确认后立即检查固件版本，
+ * 此后按配置周期检查。异常断线由 MQTT 客户端自动重连。
  *
  * @return ESP_OK 客户端成功启动。
  * @return ESP_FAIL ESP-MQTT 客户端初始化失败。
@@ -104,7 +94,7 @@ esp_err_t mqtt_comm_publish(const char *topic, const char *data, size_t data_len
 esp_err_t mqtt_comm_start(void);
 
 /**
- * @brief 网络 IP 就绪回调适配器：转调 mqtt_comm_start()。
+ * @brief 设备已经取得 IPv4 地址时启动 MQTT 服务。
  *
  * 供 network_lifecycle 的 ip_ready 回调注册使用；失败会由网络生命周期任务
  * 按有界退避重试。

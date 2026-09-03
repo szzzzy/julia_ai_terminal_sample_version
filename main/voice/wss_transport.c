@@ -1,8 +1,12 @@
 /**
  * @file    wss_transport.c
- * @brief   基于 esp-tls 的 WSS（WebSocket over TLS）纯传输层实现。
+ * @brief   建立设备到语音服务器的加密连接，并保证每条消息完整、有序地收发。
  *
- * 设计要点：
+ * 设备只保留一个负责连接的任务。其它任务不能直接读写网络，只能提交待发送内容；
+ * 这样可以避免麦克风、文件和控制消息同时写入时互相穿插。连接异常后，本模块会
+ * 完成当前不可拆分的操作、释放连接并自动重试。
+ *
+ * 以下技术约束用于说明这些业务保证如何实现：
  * - 使用 IDF v5.x esp-tls API：esp_tls_init() + esp_tls_conn_new_sync()（返回 1/-1，
  *   句柄由调用者持有），不使用旧版返回指针的 esp_tls_conn_new()；
  * - WebSocket 帧按 RFC 6455 手写：客户端帧强制掩码（4 字节随机 key，载荷逐字节
@@ -28,13 +32,13 @@
  * - Bearer token 优先取 COMM_DEVICE_AUTH_TOKEN_VALUE，为空时回退 CONFIG_WSS_TOKEN；
  * - 服务器证书仍由 server_certs/ca_cert.pem 内嵌信任锚校验，不引入新证书。
  *
- * 业务协议（文件推送、MIC 流等）由上层 voice_service 通过回调注入，本文件不含
- * 任何业务语义。
+ * 本文件不知道收到的内容代表回答声音还是文件；语音服务负责解释消息并决定
+ * 何时开始上传、播放或发送文件。
  *
  * ------------------------------------------------------------------
- * 连接状态机（只由唯一会话任务驱动）
+ * 连接流程（只由负责连接的任务执行）
  * ------------------------------------------------------------------
- * 状态由 wss_session_task() 这一个任务推进，其它任务只能观察其副作用，绝不修改：
+ * 其它任务只能提交请求，不能直接改变连接：
  *
  *   [未连接] --wss_connect() 成功--> [已连接/会话中]
  *       ^                              |
@@ -56,7 +60,7 @@
  * - 重连等待：固定 CONFIG_WSS_RECONNECT_INTERVAL_SECONDS 退避后无条件重试；
  *   计数永不累加、永不放弃，因此链路中断无需外部干预即可自愈。
  *
- * 数据流（本模块只做字节与帧，不做业务语义）：
+ * 数据去向（这里只保证消息传输，不解释业务含义）：
  * - 上行：外部任务 wss_transport_enqueue() → s_cmd_queue → 会话任务
  *   wss_drain_queue() → 上层的 on_queue_item 回调；上层决定发送何种帧，再在
  *   回调内调用 wss_transport_send_now() → wss_ws_send()。会话任务还可能在
@@ -69,7 +73,7 @@
  * - MIC PCM 位于上层 PSRAM ring，由 on_poll 在会话任务内调用 send_now 发送；
  *   ring overflow 只跨任务提交结束请求，TLS 仍由本任务独占 teardown。
  *
- * 并发模型：
+ * 多任务协作要求：
  * - s_tls、s_rx_extra*、s_msg_*（分片重组）、s_session_failed 只在会话任务
  *   上下文中读写，天然无需锁。mbedTLS 会话句柄绝不跨任务共享，是"收发全部
  *   收敛到会话任务"的根本原因。
@@ -146,17 +150,17 @@ static const char *TAG = "wss_transport";
 extern const unsigned char ca_cert_pem_start[] asm("_binary_ca_cert_pem_start");
 extern const unsigned char ca_cert_pem_end[] asm("_binary_ca_cert_pem_end");
 
-/** Protects start idempotency; 重复启动绝不分配第二份任务或队列。 */
+/** 防止两个调用方同时启动连接；重复启动不会再创建任务或队列。 */
 static portMUX_TYPE s_start_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_started;
 static bool s_starting;
 static bool s_session_ready;
-/** 唯一会话任务：串行执行连接、帧收发与命令队列。 */
+/** 整个程序唯一负责建立连接、收发消息和处理待发送请求的任务。 */
 static TaskHandle_t s_session_task;
-/** 外部调用者 -> 会话任务的有界命令队列；条目为不透明数据。 */
+/** 其它任务提交给语音连接的普通待发送请求；容量固定，满时明确拒绝。 */
 static QueueHandle_t s_cmd_queue;
 static QueueHandle_t s_control_queue;
-/** 当前 TLS 会话句柄，仅由会话任务访问。 */
+/** 当前加密连接，只允许负责连接的任务访问。 */
 static esp_tls_t *s_tls;
 /** TLS 连接配置；cacert 指针在 wss_transport_start() 中一次性填充。 */
 static esp_tls_cfg_t s_tls_cfg;
@@ -164,12 +168,11 @@ static esp_tls_cfg_t s_tls_cfg;
 static wss_transport_config_t s_config;
 /** 队列条目接收缓冲，容量等于 queue_item_size，由启动时分配。 */
 static void *s_queue_item;
-/** 会话级"链路已坏"标志：任一路径写失败后置位，会话循环据此退出并重连。 */
+/** 表示当前连接已经不能安全继续；本轮处理结束后统一关闭并重连。 */
 static bool s_session_failed;
 /**
- * 握手阶段保留下来的"HTTP 头结束之后的余量"：一次 TLS 读取可能同时带回 HTTP
- * 响应和首个 WebSocket 帧，这些字节必须被帧解析优先消费，否则解析错位。
- * 仅由会话任务读写。
+ * 服务器可能把升级响应和第一条 WebSocket 消息一起发来。响应头之后的字节必须
+ * 留给消息解析，不能因握手完成而丢弃，否则第一条业务消息会缺失或错位。
  */
 static uint8_t s_rx_extra[WSS_HANDSHAKE_BUF_SIZE];
 static size_t s_rx_extra_len;

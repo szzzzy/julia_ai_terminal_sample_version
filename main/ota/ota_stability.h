@@ -1,21 +1,15 @@
 /**
  * @file    ota_stability.h
- * @brief   OTA 断点恢复、镜像完整性与提交前稳定性检查接口。
+ * @brief   判断已下载内容能否安全续传、能否作为固件，以及当前是否适合重启提交。
  *
- * 基于 ESP-IDF 官方 native OTA 流程，提供恢复记录、HTTP Range 一致性、镜像头
- * 预检、分区摘要和提交前条件检查。
+ * 续传前核对服务器返回范围，下载中检查镜像头，完成后重新计算分区摘要；这些检查
+ * 全部通过后，再确认电源、内存和当前业务允许设备切换启动版本。
  *
- * 模块边界（上游 ota_engine.c 调用、下游 ota_state_store.c 持久化）：
- * - 只做“纯计算/Flash/校验/NVS 记录”侧的操作：初始化/保存恢复记录、解析 Content-Range、
- *   校验镜像头、计算分区摘要、执行提交前资源检查；
- * - 不创建任务、不访问 MQTT、不设置启动分区、不重启——切换启动分区与重启由
- *   ota_engine 在返回 NATIVE_OTA_FAILURE_NONE 后自行完成；
- * - 所有读取/校验都可能阻塞（Flash、PSA Crypto、NVS），只能在普通任务上下文调用。
+ * 本模块只检查和保存结果，不连接 MQTT、不切换启动分区，也不重启设备。读取 Flash、
+ * 计算摘要和写恢复记录可能耗时，只能在后台任务中执行。
  *
- * 可覆盖钩子（弱符号，产品固件可提供强符号覆盖）：
- * - native_ota_check_power()       提交前电源状态；失败令提交被推迟(按 DEFERRED 上报)。
- * - native_ota_check_business_state() 提交前关键业务状态；失败同样推迟提交。
- * 两个钩子只读状态，不修改本模块或 OTA 恢复记录。
+ * 产品可以补充真实电量和业务忙碌检查。检查暂时不通过时保留已经验证的镜像并报告
+ * “稍后提交”，不需要重新下载。
  */
 #pragma once
 
@@ -38,10 +32,10 @@ extern "C" {
 /** 将统一失败原因转换为稳定日志字符串。 */
 const char *native_ota_failure_reason_name(native_ota_failure_reason_t reason);
 
-/** 产品可用同名强符号覆盖的电源提交前检查钩子。 */
+/** 检查当前供电是否足以安全写入启动信息并重启；默认实现不附加限制。 */
 esp_err_t native_ota_check_power(void);
 
-/** 产品可用同名强符号覆盖的关键业务状态检查钩子。 */
+/** 检查当前是否没有不可中断的业务；默认实现不附加限制。 */
 esp_err_t native_ota_check_business_state(void);
 
 /**

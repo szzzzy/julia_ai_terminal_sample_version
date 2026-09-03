@@ -1,11 +1,10 @@
 /**
  * @file voice_uplink_ring.h
- * @brief 单生产者/单消费者的固定槽音频上行环形缓冲。
+ * @brief 在麦克风采集速度短时快于网络发送速度时，暂存完整声音块。
  *
- * PCM 存储由调用方提供，固件使用 PSRAM；短小元数据由调用方放在内部 RAM。
- * producer 只发布完整帧，consumer 只有在 WSS 整帧发送成功后才 consume。
- * 每个槽绑定连接 generation，consumer 会丢弃不属于当前连接的迟到槽，禁止
- * 断线前音频进入重连后的新会话。
+ * 麦克风只放入完整声音块；负责语音连接的任务确认整块发送成功后才移除。
+ * 每块声音都记录所属连接，断线前积压的内容不会在新连接中补发，避免服务器把
+ * 旧话语误认为新的用户输入。容量固定，装满时调用方必须结束本轮连接而不是静默跳帧。
  */
 #pragma once
 
@@ -32,29 +31,29 @@ typedef struct {
     volatile bool accepting;
 } voice_uplink_ring_t;
 
-/** 初始化调用方提供的存储；capacity 必须是 2 的幂，保证序号回绕映射连续。 */
+/** 使用调用方提供的内存建立缓冲；格数必须为 2 的幂，长期运行序号回绕后仍能正确定位。 */
 bool voice_uplink_ring_init(voice_uplink_ring_t *ring,
                             uint8_t *storage, uint16_t *lengths,
                             uint32_t *slot_generations, size_t capacity,
                             size_t frame_capacity);
 
-/** 由 WSS owner 开始一个空的新上行代次；每条新连接必须使用新值。 */
+/** 为一条新的语音连接启用空缓冲；每次重连必须使用新的数据归属编号。 */
 bool voice_uplink_ring_start_generation(voice_uplink_ring_t *ring,
                                         uint32_t generation);
-/** producer/owner 均可关闭新帧入口；不移动索引，最终清理由 owner 完成。 */
+/** 停止接收新的麦克风声音；已积压内容暂不移动，由负责连接的任务统一清理。 */
 void voice_uplink_ring_close_generation(voice_uplink_ring_t *ring);
-/** 由 WSS owner 停止当前代次并丢弃已发布积压。 */
+/** 结束当前语音连接并丢弃所有尚未发送的旧声音。 */
 void voice_uplink_ring_stop_generation(voice_uplink_ring_t *ring);
 
-/** producer 非阻塞复制并发布一帧。 */
+/** 麦克风任务非阻塞地加入一块完整声音。 */
 voice_uplink_push_result_t voice_uplink_ring_push(voice_uplink_ring_t *ring,
                                                    const uint8_t *data,
                                                    size_t len);
-/** consumer 获取当前 generation 的队首；迟到旧代次槽会在内部跳过。 */
+/** 取得当前连接最早的一块待发送声音；内部会跳过属于旧连接的残留内容。 */
 bool voice_uplink_ring_peek(voice_uplink_ring_t *ring,
                             uint32_t expected_generation,
                             const uint8_t **data, size_t *len);
-/** consumer 在对应 peek 数据完整发送后释放队首。 */
+/** 一块声音完整发送成功后，将它从缓冲区移除。 */
 bool voice_uplink_ring_consume(voice_uplink_ring_t *ring);
 
 size_t voice_uplink_ring_count(const voice_uplink_ring_t *ring);

@@ -1,22 +1,14 @@
 /**
  * @file    voice_service.c
- * @brief   语音业务服务实现：命令语法、WSS 文件推送协议与入口装配。
+ * @brief   把服务器命令转换成用户能够感知的听音、回答播放和文件发送行为。
  *
- * 模块关系：
- * - 通过 mqtt_comm_register_topic() 注册语音命令 topic；原有纯文本控制与 WSS
- *   语义一致，S4/S2 的 intent_result JSON 只由 MQTT 控制面解析；
- * - 传输由纯传输层 wss_transport 完成（连接、帧、握手、保活、重连）；
- * - FILE_SEND 的 URI 映射由 voice_uri 完成；
- * - 所有对外接口只做有界入队，实际发送在 WSS 会话任务上下文中执行。
+ * MQTT 传递“用户开始/结束说话、结束交流、发送文件”等控制信息，WSS 传递
+ * 麦克风声音、服务器回答和文件内容。本模块统一解释这些消息，连接与帧收发则由
+ * WSS 连接模块负责。本地文件地址只允许映射到批准的存储目录。
  *
- * 并发/上下文：
- * - MQTT 事件任务：voice_service_on_mqtt_command 解析命令 -> voice_service_* 入队；
- * - mic_task：board_audio 的 PCM1 帧 -> voice_service_on_board_audio_frame ->
- *   voice_service_send_chunk() 写入 PSRAM ring；
- * - WSS 会话任务处理控制、收发和文件块；voice_playback 独立消费 PCM，
- *   完成事件由 on_poll 收回，FSM 对话阶段仍只由 WSS 会话推进。
- * - 对话阶段只由 WSS 会话任务推进；陪伴上传超时由 esp_timer 回调关闭，
- *   因而上传/对话标志由 s_mic_state_lock 保护。
+ * 控制消息先进入小型队列，麦克风声音进入独立的大缓冲区；两者不会互相挤占。
+ * 负责 WSS 的任务按顺序发送和推进对话，播放任务只负责把回答真正写入扬声器。
+ * 因此“已收到回答数据”和“用户已经听到完整回答”是两个不同阶段。
  */
 
 #include "voice_service.h"
@@ -76,9 +68,9 @@ static void post_fsm_event(fsm_event_t event)
 #define VOICE_UPLINK_RUN_BUDGET_US 8000LL
 
 /**
- * @brief 控制队列中的一条作业：文件 URI（含 NUL）或语音控制命令。
+ * @brief 一项等待语音连接按顺序处理的请求，例如开始说话、结束说话或发送文件。
  *
- * 作业对传输层是纯不透明条目；本模块在 on_queue_item 回调中解释它。
+ * 连接模块只负责保存和交回这项内容，不解释它的业务含义。
  */
 typedef enum {
     VOICE_JOB_SEND_FILE = 0, /**< FILE_SEND：推送一个音频文件。 */
@@ -95,7 +87,7 @@ typedef struct {
     uint8_t data[WSS_TRANSPORT_MAX_PAYLOAD]; /**< URI 或控制消息内容。 */
 } voice_job_t;
 
-/** 上传与语义监听解耦：陪伴期可 streaming=true、listening=false。 */
+/** 分别记录“是否向服务器发送声音”和“是否正在等待用户完成本轮话语”。 */
 static portMUX_TYPE s_mic_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_mic_streaming;
 static bool s_dialog_listening;
@@ -111,7 +103,7 @@ typedef enum {
     VOICE_PLAYBACK_ROLE_SELF_TEST,
 } voice_playback_role_t;
 
-/* These fields are owned exclusively by the WSS session task. */
+/* 下列播放、文件和上传进度只由负责语音连接的任务修改，避免跨任务互相覆盖。 */
 static uint32_t s_playback_generation;
 static voice_playback_role_t s_playback_role;
 static FILE *s_file;
@@ -130,7 +122,7 @@ static bool s_companion_timer_armed;
 static esp_timer_handle_t s_companion_timer;
 #endif
 
-/** FILE_SEND 允许的最大文件大小（8 MiB，融合方案 §9.6 二次限制）。 */
+/** 远程请求允许发送的单个 WAV 文件最大为 8 MiB，防止长时间占用语音连接。 */
 #define VOICE_SEND_MAX_FILE_BYTES (8 * 1024 * 1024)
 
 static esp_err_t voice_service_enqueue(voice_job_type_t type,
@@ -198,7 +190,7 @@ static uint32_t voice_service_next_uplink_generation(void)
     return s_uplink_generation;
 }
 
-/** 文件二进制区间内暂停并清空 MIC ring；只由 WSS owner 调用。 */
+/** 发送文件期间暂停麦克风并丢弃已积压声音，避免文件和声音无法区分。 */
 static void voice_service_pause_uplink_for_file(void)
 {
     voice_uplink_pump_stop(&s_uplink_pump);
@@ -208,7 +200,7 @@ static void voice_service_pause_uplink_for_file(void)
     portEXIT_CRITICAL(&s_mic_state_lock);
 }
 
-/** 文件 END 后从空 ring 恢复同一条 WSS 连接的实时 MIC。 */
+/** 文件完整结束后，从空缓冲重新开始发送实时麦克风声音。 */
 static void voice_service_resume_uplink_after_file(void)
 {
     if (!s_uplink_ring_ready) {
@@ -297,7 +289,7 @@ static void voice_service_arm_companion_timer(void)
 #endif
 
 /**
- * @brief board_audio 的 WSS sink 适配器：完整 PCM1 帧复制到 PSRAM ring。
+ * @brief 接收板级麦克风生成的一块完整声音，并加入语音服务器待发送缓冲区。
  * WSS 未启动或文件区间暂停时不接收；任何情况都不阻塞 mic_task。
  */
 static void voice_service_on_board_audio_frame(const uint8_t *frame, size_t bytes, void *ctx)
@@ -305,7 +297,7 @@ static void voice_service_on_board_audio_frame(const uint8_t *frame, size_t byte
     (void)ctx;
     esp_err_t err = voice_service_send_chunk(frame, bytes);
     if (err == ESP_ERR_NO_MEM) {
-        /* 只有真正 ring full 才计为容量丢帧；文件区间和连接边界的暂停不计入。 */
+        /* 只有缓冲确实装满才记录容量故障；发送文件或连接切换造成的主动暂停不算丢帧。 */
         if ((++s_uplink_dropped & 255U) == 1U) {
             ESP_LOGW(TAG, "MIC uplink ring full drops=%lu",
                      (unsigned long)s_uplink_dropped);
@@ -524,7 +516,7 @@ static int64_t voice_service_uplink_now_us(void *ctx)
     return esp_timer_get_time();
 }
 
-/** 正常发送 1 帧；出现积压后每轮在 8 帧/8ms 双重预算内追赶。 */
+/** 正常每轮发送一块麦克风声音；积压时有限追赶，同时给控制和接收留时间。 */
 static void voice_service_uplink_poll(void)
 {
     if (!s_uplink_ring_ready || s_uplink_generation == 0U ||
@@ -575,7 +567,7 @@ static void voice_service_played_pcm(const int16_t *pcm, size_t samples, void *c
     julia_avatar_feed_pcm(pcm, samples);
 }
 
-/** MIC_START 表示一轮用户发言开始，并在需要时同时开启 PCM 上传。 */
+/** “开始说话”确认用户已经进入本轮表达；必要时同时开始上传麦克风。 */
 static void voice_service_apply_mic_start(void)
 {
     voice_service_disarm_companion_timer();
@@ -607,8 +599,8 @@ static void voice_service_apply_mic_start(void)
     if (state == JULIA_MAIN_STATE_S3_STANDBY ||
         state == JULIA_MAIN_STATE_S5_SILENT ||
         state == JULIA_MAIN_STATE_S6_SLEEP) {
-        /* 兼容旧服务端/本地 WakeNet：没有 wake_detected 时，MIC_START 仍可可靠地
-         * 先把低活动状态推进到 S4；扬声器或残留 listening 不得改投 INTERRUPT。 */
+        /* 兼容没有单独发送唤醒确认的旧服务器和本地唤醒：收到“开始说话”时，
+         * 仍先建立一轮交流。正在播放的旧声音不会被误判成用户插话。 */
         portENTER_CRITICAL(&s_mic_state_lock);
         s_interaction_origin = state;
         s_wake_reply_expected = true;
@@ -617,12 +609,12 @@ static void voice_service_apply_mic_start(void)
     } else if (state == JULIA_MAIN_STATE_S1_COMPANION) {
         if (!already_listening) post_fsm_event(EVT_USER_CALL);
     } else if (state == JULIA_MAIN_STATE_S4_INTERACTION) {
-        /* S4 已完成交互建立：MIC_START 只标记实际话语开始。若用户在唤醒回应
-         * 播放时插话，上方已取消回应，后续正常回答由 MIC_STOP/SPKS 推进。 */
+        /* 已经完成唤醒时，本命令只表示用户现在开始说话；如果用户打断唤醒回应，
+         * 先停止回应，再等待用户说完和服务器返回正式回答。 */
         if (interrupted_speaker) s_wake_reply_expected = false;
     } else if (state == JULIA_MAIN_STATE_S2_DIALOG &&
                s2_sub_state == JULIA_S2_SUB_STATE_S2_3_SPEAKING) {
-        /* 正常回答期间插话，复用 S2.3 -> S2.1 的中断事件。 */
+        /* 正在播放回答时用户插话，立即停止旧回答并重新开始听用户说话。 */
         post_fsm_event(EVT_INTERRUPT);
     }
     ESP_LOGI(TAG, "MIC_START: state=%s/%s listening%s%s",
@@ -632,7 +624,7 @@ static void voice_service_apply_mic_start(void)
              interrupted_speaker ? ", speaker interrupted" : "");
 }
 
-/** MIC_STOP 表示本轮用户发言结束，但在陪伴窗口内继续保留 PCM 上传能力。 */
+/** “结束说话”只结束本轮听音；免唤醒陪伴期间仍可继续上传环境声音。 */
 static void voice_service_apply_mic_stop(void)
 {
     julia_idle_display_note_activity();
@@ -648,8 +640,8 @@ static void voice_service_apply_mic_stop(void)
         return;
     }
 
-    /* “想”阶段继续保持忙碌；传输连接保留到后续 SPKE -> IDLE 陪伴窗口，
-     * 同时供服务端动态噪声 VAD 继续使用。 */
+    /* 用户说完后仍属于一次未完成的交流，空闲计时不能把设备送回待机；
+     * 连接和麦克风继续工作，直到回答真正播放完成。 */
     julia_idle_display_set_busy(true);
     if (was_listening) {
         post_fsm_event(EVT_START_DIALOG);
@@ -670,7 +662,7 @@ static bool interaction_id_is_valid(const char *value)
     return true;
 }
 
-/** 解析服务器唤醒握手；返回 true 表示该 JSON 已处理，不再按旧文本命令解析。 */
+/** 识别服务器的唤醒确认消息；识别成功后不再把它当作普通文本命令。 */
 static bool voice_service_handle_wake_json(const uint8_t *text, size_t len)
 {
     if (len == 0U || text[0] != '{') return false;
@@ -725,10 +717,10 @@ static bool voice_service_handle_wake_json(const uint8_t *text, size_t len)
 }
 
 /**
- * @brief 处理服务端下发的完整文本帧命令（wss_transport on_text 回调）。
+ * @brief 处理语音服务器发来的一条完整文本命令。
  *
- * 在会话任务上下文中执行：FILE_SEND 启动分块推送；MIC_START/MIC_STOP 直接调用
- * 与 MQTT 队列作业共用的内部状态应用函数，避免被 PCM1 队列挤占。
+ * 文件请求开始分块发送；开始/结束说话与 MQTT 使用相同的处理规则。
+ * 文本控制使用独立队列，因此不会被大量麦克风数据挤掉。
  *
  * @param[in] text 文本载荷，不要求以 NUL 结尾。
  * @param[in] len  文本长度。
@@ -759,12 +751,8 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
         return;
     }
 
-    /* ---- 板级音频下行控制命令（融合方案 §9.4，与最小包 USB 命令同语义） ----
-     * 这是服务器经 WSS 下行文本帧下发的控制面：SPKS 开播 / SPKV 音量 /
-     * SPKE 停播 / SPKT 自检 / MICS 休眠触发 / MICW 恢复上传，全部只在
-     * WSS 会话任务上下文执行（on_text 回调）。与上行（MIC 推流）无竞态，
-     * 但与在下行 PCM（on_binary）之间隐含着顺序约束：必须先 SPKS 成功
-     * 才允许写 PCM，否则 PCM 被 on_binary 丢弃（见 voice_service_on_binary）。 */
+    /* 回答声音必须先用 SPKS 声明采样率和用途，再发送二进制声音，最后用 SPKE
+     * 表示服务器已经发完。顺序错误的声音会被拒绝，避免未知数据进入扬声器。 */
     if (len == 4 && memcmp(text, "SPKE", 4) == 0) {
         /* END 排在所有已接收 PCM 之后；播放任务负责报告完成。
          * 已被打断或不存在的播放代次无需执行结束动作。 */
@@ -859,12 +847,10 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
 }
 
 /**
- * @brief WSS 下行 PCM 复制到独立播放任务的有界缓冲，不在此写 I2S。
+ * @brief 把服务器回答声音交给独立播放任务，本函数不直接操作扬声器。
  *
- * 前置约束：必须已由 SPKS 开始播放（board_audio_speaker_is_playing()），
- * 否则整帧丢弃（§9.6 保护）——服务器推流顺序要求"先 SPKS，再 PCM 帧"。
- * 长度必须非 0 且为偶数：PCM 是 16-bit mono，偶数长度才能被安全地当作
- * int16 数组喂给 `julia_avatar_feed_pcm()`（否则越界/错位）。
+ * 服务器必须先声明开始播放；未声明的二进制数据全部丢弃。声音采用 16 位单声道，
+ * 因而数据不能为空且字节数必须为偶数，否则样本会错位。
  */
 static void voice_service_on_binary(const uint8_t *data, size_t len)
 {
@@ -884,7 +870,7 @@ static void voice_service_on_binary(const uint8_t *data, size_t len)
 /**
  * @brief 处理命令队列中的一条作业（wss_transport on_queue_item 回调）。
  *
- * 在会话任务上下文中执行控制作业；MIC PCM 使用独立 PSRAM ring。
+ * 控制请求在负责语音连接的任务中执行；麦克风声音使用独立缓冲区，不占控制容量。
  *
  * @param[in] item      队列条目，不允许为 NULL。
  * @param[in] item_size 条目大小，必须等于 sizeof(voice_job_t)。
@@ -924,7 +910,7 @@ static void voice_service_on_queue_item(void *item, size_t item_size)
     }
 }
 
-/** 新 WSS 连接从空 ring 开始；任何旧连接积压都不得跨 generation 重放。 */
+/** 新语音连接从空的麦克风缓冲开始，断线前未发出的声音绝不在重连后补发。 */
 static void voice_service_on_session_start(void)
 {
     uint32_t generation = voice_service_next_uplink_generation();
@@ -956,7 +942,7 @@ static void voice_service_on_session_start(void)
 }
 
 /**
- * @brief WSS 会话结束回调：链路关闭后复位会话级 MIC 流式状态。
+ * @brief 语音连接结束后停止本轮上传、播放和文件发送，并清除旧连接数据。
  */
 static void voice_service_on_session_end(wss_transport_end_reason_t reason)
 {
@@ -985,7 +971,7 @@ static void voice_service_on_session_end(wss_transport_end_reason_t reason)
              s_uplink_generation, wss_transport_end_reason_name(reason),
              (unsigned)discarded_frames);
     post_fsm_event(EVT_WSS_DISCONNECTED);
-    /* transport 结束不是用户活动；只解除 busy，不能旁路点亮 S6。 */
+    /* 断线不是用户主动交流，只结束“正在处理”的标记，不能因此点亮睡眠中的屏幕。 */
     julia_idle_display_set_busy(false);
 }
 
@@ -1012,7 +998,7 @@ static esp_err_t voice_service_enqueue(voice_job_type_t type, const uint8_t *dat
     return wss_transport_enqueue_control(&job, sizeof(job));
 }
 
-/** FSM 提交 S4 后才排队 state_ready，保证服务器不会在状态尚未生效时开始播回应。 */
+/** 设备真正进入“已唤醒”状态后才回执，防止服务器过早发送唤醒回应。 */
 static void voice_service_on_fsm_state(julia_main_state_t main_state,
                                        julia_s2_sub_state_t s2_sub_state,
                                        fsm_event_t event, void *ctx)
@@ -1053,7 +1039,7 @@ static void voice_service_on_fsm_state(julia_main_state_t main_state,
 }
 
 /**
- * @brief 结束特殊语义对应的当前话语，避免迟到 MIC_STOP 再推进状态。
+ * @brief 用户说出“晚安”或“结束交流”时，立即结束当前话语和未播完的回答。
  */
 static void voice_service_apply_terminal_intent(fsm_event_t event, const char *intent)
 {
@@ -1065,8 +1051,8 @@ static void voice_service_apply_terminal_intent(fsm_event_t event, const char *i
         return;
     }
 
-    /* 终止语义是纯显示迁移，不允许残留唤醒回应或正常回答继续出声。该函数只在
-     * WSS 会话任务中执行，因此可同时收回播放代次和业务角色。 */
+    /* 设备已经决定结束交流后，旧的唤醒回应或正常回答都不能继续出声。
+     * 所有清理在负责语音连接的同一任务中完成，保证停止顺序一致。 */
     voice_playback_stop();
     s_playback_generation = 0;
     s_playback_role = VOICE_PLAYBACK_ROLE_NONE;
@@ -1238,7 +1224,7 @@ esp_err_t voice_service_ip_ready(void *arg)
         .on_session_end = voice_service_on_session_end,
         .on_poll = voice_service_poll,
         .queue_item_size = sizeof(voice_job_t),
-        /* MIC 已迁移到 PSRAM ring；保留 1 槽通用队列满足传输层接口。 */
+        /* 麦克风声音走独立缓冲；普通队列只保留最小容量以满足连接层通用接口。 */
         .queue_depth = VOICE_TRANSPORT_QUEUE_DEPTH,
     };
     return wss_transport_start(&transport_cfg);
@@ -1271,7 +1257,8 @@ esp_err_t voice_service_send_chunk(const uint8_t *buf, size_t len)
     switch (result) {
     case VOICE_UPLINK_PUSH_OK: return ESP_OK;
     case VOICE_UPLINK_PUSH_FULL: {
-        /* producer 只关闭入口并提交原因；ring/TLS 的清理由 WSS owner 串行完成。 */
+        /* 采集任务只报告缓冲已满；负责语音连接的任务统一停止上传并关闭连接，
+         * 避免两个任务同时清理同一批声音和加密连接。 */
         voice_uplink_ring_close_generation(&s_uplink_ring);
         (void)wss_transport_request_session_end(
             WSS_TRANSPORT_END_AUDIO_OVERFLOW);

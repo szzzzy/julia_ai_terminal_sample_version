@@ -1,11 +1,9 @@
 /**
  * @file    julia_avatar.h
- * @brief   Julia L1 立绘层的公共接口（相位帧 + RMS 嘴型 + 微动）。
+ * @brief   根据设备是否在听、等待回答或说话，更新 Julia 的眼睛、嘴型和休息画面。
  *
- * 这是当前运行时实际生效的立绘链路接口（app_main 经 julia_avatar_init 启动）。
- * 上游主要是 voice_service（WSS 任务，驱动张嘴/说话起止/对话相位）与
- * julia_idle_display（dozing 睡眠/唤醒）。所有 LVGL 操作都在模块内部加锁，
- * 调用方无需（也不应）在调用前持有 lvgl_port_lock。详见 julia_avatar.c。
+ * 语音服务只说明当前交流阶段并提供已播放声音；本模块把这些信息转换为表情。
+ * 睡眠策略可切换到闭眼画面。界面同步由模块内部完成，调用方不需要操作 LVGL 锁。
  */
 #pragma once
 
@@ -15,7 +13,7 @@
 
 #include "esp_err.h"
 
-/** The sole dialogue-phase definition shared by the voice and avatar layers. */
+/** 用户能够观察到的四种交流画面阶段。 */
 typedef enum {
     JULIA_AVATAR_DIALOG_IDLE = 0,
     JULIA_AVATAR_DIALOG_LISTENING,
@@ -23,33 +21,31 @@ typedef enum {
     JULIA_AVATAR_DIALOG_SPEAKING,
 } julia_avatar_dialog_phase_t;
 
-/** Build the static Julia portrait and start the L1 micro-motion task. */
+/** 创建 Julia 立绘并启动眨眼、呼吸和嘴型更新。 */
 esp_err_t julia_avatar_init(void);
 
 /**
- * Play the one-shot power-on eye sequence while the first portrait is ready:
- * closed-eye fade-in, then about three seconds of rapid blinking. The sequence is
- * idempotent and leaves the avatar awake with normal random blinking enabled.
+ * 播放一次开机睁眼与快速眨眼。重复调用不会重复创建对象；结束后保持清醒立绘，
+ * 再进入普通随机眨眼。
  */
 esp_err_t julia_avatar_play_boot_sequence(void);
 
-/** Mark the beginning/end of downlink speech. Safe before UI initialization. */
+/** 标记回答声音开始或结束，使嘴型只在设备实际说话时活动。 */
 void julia_avatar_talking_start(void);
 void julia_avatar_talking_stop(void);
 
-/** Feed signed, mono 16-bit speaker PCM to the RMS mouth estimator. */
+/** 提供已经送往扬声器的单声道声音，用实际音量选择嘴巴张开程度。 */
 void julia_avatar_feed_pcm(const int16_t *samples, size_t sample_count);
 
 /**
- * Set the voice dialogue phase.  This may be called from WSS and command
- * queue tasks; redundant changes are ignored and all LVGL work is locked.
+ * 设置当前交流阶段。重复设置同一阶段不会重新刷新；界面修改会在内部安全串行。
  */
 void julia_avatar_set_dialog_phase(julia_avatar_dialog_phase_t phase);
 
-/** Switch the complete portrait to/from the generated sleep artwork. */
+/** 在普通立绘和完整闭眼休息画面之间切换。 */
 void julia_avatar_set_dozing(bool active);
 
-/** Return the current dialogue phase without touching LVGL. */
+/** 查询当前交流画面阶段，不触发重绘。 */
 julia_avatar_dialog_phase_t julia_avatar_get_dialog_phase(void);
 
 /** 设置固定在屏幕左上侧的黑色小号状态叠字；UI 未初始化时先缓存。 */

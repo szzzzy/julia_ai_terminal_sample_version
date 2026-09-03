@@ -1,11 +1,10 @@
 /**
  * @file    network_lifecycle.h
- * @brief   Wi-Fi station lifecycle that never makes application startup depend on AP availability.
+ * @brief   负责连接 Wi-Fi，并在取得网络地址后启动所有需要联网的服务。
  *
- * 网络生命周期只负责 Wi-Fi 连接、IP 就绪通知与服务启动回调的有界退避重试，
- * 不感知任何具体业务（MQTT / WSS / 音频）。业务模块通过
- * network_lifecycle_register_ip_ready() 注册启动回调，取得 IPv4 后由生命周期
- * 任务按注册顺序调用；回调失败会按同一有界退避策略重试，直到成功或 IP 失效。
+ * 找不到热点、密码错误或服务器暂时不可用时，设备本地界面仍能完成启动。
+ * 本模块会持续尝试恢复 Wi-Fi；获得 IPv4 地址后，再按注册顺序启动 MQTT、语音连接
+ * 和时间同步。某项服务启动失败只延后该服务，不会让其它服务永久失去重试机会。
  */
 #pragma once
 
@@ -18,10 +17,10 @@ extern "C" {
 #endif
 
 /**
- * @brief IP 就绪启动回调：取得 IPv4 后由生命周期任务调用；失败会被有界退避重试。
+ * @brief 联网服务的启动函数；设备获得 IPv4 地址后调用，失败时稍后重试。
  *
- * 回调在后台网络生命周期任务上下文中同步执行（不在中断或事件循环回调内），可以
- * 执行建连、时间同步等较慢初始化；但不应无限阻塞，否则会推迟其它槽位与重连调度。
+ * 该函数运行在普通后台任务中，可以建立连接或同步时间，但不能无限等待，
+ * 否则会推迟其它联网服务和下一次 Wi-Fi 恢复尝试。
  */
 typedef esp_err_t (*network_ip_ready_cb_t)(void *arg);
 
@@ -29,15 +28,14 @@ typedef esp_err_t (*network_ip_ready_cb_t)(void *arg);
 #define NETWORK_MAX_IP_READY_CALLBACKS 4
 
 /**
- * @brief 注册一个 IP 就绪启动回调。
+ * @brief 登记一项“联网后才能启动”的服务。
  *
- * 取得 IPv4 后（包括断线重连后的再次取得），生命周期任务会按注册顺序调用所有
- * 回调。回调返回 ESP_OK 视为启动完成，不再重试；返回其他错误码则按有界指数
- * 退避（带负向抖动）重试，直至成功或 IP 失效。每次新的 GOT_IP 都会重置重试
- * 计数并重新触发全部回调。
+ * 每次重新获得 IPv4 地址，所有已登记服务都会按顺序重新确认启动。成功后在本次
+ * 网络连接期间不再重复调用；失败时逐步延长等待时间并加入随机偏移，避免多台设备
+ * 同时重试压垮服务器。Wi-Fi 再次断开后，本轮启动结果自动失效。
  *
- * @param[in] callback 启动回调，不允许为 NULL。
- * @param[in] arg      原样传给回调的上下文参数，可为 NULL。
+ * @param[in] callback 联网后要执行的启动函数，不允许为 NULL。
+ * @param[in] arg      传给该启动函数的业务数据，可为 NULL。
  *
  * @return ESP_OK 注册成功。
  * @return ESP_ERR_INVALID_ARG callback 为 NULL。
@@ -49,10 +47,10 @@ typedef esp_err_t (*network_ip_ready_cb_t)(void *arg);
 esp_err_t network_lifecycle_register_ip_ready(network_ip_ready_cb_t callback, void *arg);
 
 /**
- * @brief 启动 Wi-Fi station 生命周期。
+ * @brief 启动 Wi-Fi 客户端和后台恢复任务。
  *
- * 初始化 netif、注册事件并启动 Wi-Fi；后台任务永久重连，应用启动不依赖 AP
- * 可用性。取得 IPv4 后按注册表调用 IP 就绪回调。
+ * 初始化网络接口并开始连接热点。热点暂时不可用不会阻塞应用启动；后台任务持续
+ * 恢复连接，取得 IPv4 地址后启动已登记的联网服务。
  *
  * @return ESP_OK 生命周期已启动（重复调用幂等返回）。
  * @return ESP_ERR_NOT_SUPPORTED 构建未启用 Wi-Fi 连接示例。
@@ -62,7 +60,7 @@ esp_err_t network_lifecycle_register_ip_ready(network_ip_ready_cb_t callback, vo
  */
 esp_err_t network_lifecycle_start(void);
 
-/** Retry pending IP-ready callbacks promptly after a local startup dependency becomes ready. */
+/** 本地依赖刚刚就绪时，立即重试尚未成功启动的联网服务。 */
 void network_lifecycle_retry_services(void);
 
 #ifdef __cplusplus

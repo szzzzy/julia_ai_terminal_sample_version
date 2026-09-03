@@ -1,15 +1,12 @@
 /**
  * @file    ota_report.h
- * @brief   与通信协议解耦的 OTA 生命周期事件和进度上报接口。
+ * @brief   向服务器报告升级进度，并保证成功、失败等关键结果在断线或掉电后仍可补发。
  *
- * OTA 主任务只构建统一事件并交给本模块。具体 MQTT 队列和
- * PUBACK 关联由通信模块注册 transport 实现，因此下载任务不会直接调用 MQTT。
+ * 下载任务只说明设备已经到达哪个阶段，不直接操作 MQTT。通信模块负责发送；
+ * 这样升级逻辑在网络断开时仍能先保存结果，等连接恢复后继续报告。
  *
- * 可靠性分层：
- * - 生命周期事件（critical=true）先写入 NVS 待发送队列，收到 QoS 1 PUBACK
- *   前不会删除，可跨重启/断线重发；
- * - 下载进度（critical=false）只保留最新一条 RAM 槽位，按节流策略尽力发送，
- *   不持久化，允许丢失。
+ * 成功、失败、回滚和准备重启等关键结果先写入持久存储，Broker 确认收到后才删除；
+ * 下载百分比只保留最新值，允许在断线时丢失，避免频繁写 Flash 缩短存储寿命。
  */
 #pragma once
 
@@ -38,10 +35,9 @@ extern "C" {
 #define NATIVE_OTA_REPORT_PENDING_MAX 8
 
 /**
- * @brief OTA 生命周期状态。
+ * @brief 服务器能够观察到的固件升级阶段。
  *
- * 这些值会被序列化为状态 JSON 的 `state` 字段；它们描述的是设备已经
- * 到达的生命周期阶段，不等同于 ota_state_store 中用于断点恢复的阶段。
+ * 这些值表示设备已经完成或正在执行的业务步骤，不是设备内部保存下载断点的格式。
  */
 typedef enum {
     NATIVE_OTA_REPORT_ACCEPTED = 0, /**< 清单已校验并已创建 OTA 任务。 */
@@ -56,9 +52,9 @@ typedef enum {
 } native_ota_report_state_t;
 
 /**
- * @brief 一次 OTA 任务的稳定关联上下文。
+ * @brief 一次升级在重启前后保持不变的身份信息。
  *
- * 该结构不包含 URL、证书或固件内容；它只用于生成生命周期事件和跨重启恢复。
+ * 只保存服务器用于识别任务、设备和版本的字段，不保存下载地址、证书或固件内容。
  */
 typedef struct {
     char job_id[NATIVE_OTA_JOB_ID_SIZE]; /**< 可选云端任务 ID；未提供时为空串。 */
@@ -73,9 +69,9 @@ typedef struct {
 } native_ota_report_context_t;
 
 /**
- * @brief 已序列化的单条事件。
+ * @brief 一条已经准备好交给 MQTT 发送的升级状态消息。
  *
- * transport 必须在返回前复制需要的数据；调用者不会保证 message 的生命周期。
+ * 发送方如需异步处理，必须在返回前复制内容；函数返回后原消息可能立即失效。
  */
 typedef struct {
     bool critical; /**< true 表示必须持久化并等待 QoS 1 PUBACK。 */
@@ -86,16 +82,16 @@ typedef struct {
 } native_ota_report_message_t;
 
 /**
- * @brief 通信实现使用的非阻塞事件提交回调。
+ * @brief 把一条升级状态交给通信模块的快速提交函数。
  *
- * 回调必须在返回前复制所需内容，且不应等待网络发送完成；返回失败只表示当前
- * transport 没有接收成功，关键事件仍由报告模块保留在 NVS 中。
+ * 本函数不能等待真正发送完成。暂时提交失败不会丢失关键结果，报告模块仍会保留，
+ * 等通信恢复后再次尝试。
  */
 typedef esp_err_t (*native_ota_report_transport_t)(
     const native_ota_report_message_t *message, void *context);
 
 /**
- * @brief 初始化事件持久化镜像和 PUBACK 处理任务。
+ * @brief 读取尚未确认的升级结果，并启动后台确认处理。
  *
  * @return ESP_OK 已初始化或此前已初始化。
  * @return ESP_ERR_NO_MEM FreeRTOS 同步对象或确认任务创建失败。
@@ -106,7 +102,7 @@ typedef esp_err_t (*native_ota_report_transport_t)(
 esp_err_t native_ota_report_init(void);
 
 /**
- * @brief 注册或清除通信 transport。
+ * @brief 登记实际发送升级状态的通信函数，或在 MQTT 不可用时暂时清除。
  *
  * @param[in] transport 非阻塞事件提交回调；传入 NULL 暂时禁用发送。
  * @param[in] context 原样传给 transport 的上下文指针，可为 NULL。
@@ -114,13 +110,13 @@ esp_err_t native_ota_report_init(void);
  * @return ESP_ERR_INVALID_STATE 报告模块尚未初始化。
  * @return ESP_ERR_TIMEOUT 在规定时间内无法取得内部锁。
  *
- * @note 清除 transport 不会删除 NVS 中的关键事件。
+ * @note 暂停发送不会删除任何尚未确认的关键结果。
  */
 esp_err_t native_ota_report_set_transport(native_ota_report_transport_t transport,
                                            void *context);
 
 /**
- * @brief 从已校验 manifest 和当前运行版本构建报告上下文。
+ * @brief 从已校验清单中提取服务器识别本次升级所需的固定信息。
  *
  * @param[out] context 输出一次 OTA 任务的稳定关联上下文，不允许为 NULL。
  * @param[in] manifest 已通过控制面校验的清单，不允许为 NULL。
@@ -135,7 +131,7 @@ esp_err_t native_ota_report_context_init(native_ota_report_context_t *context,
                                           const char *current_version);
 
 /**
- * @brief 返回状态的稳定协议名称。
+ * @brief 返回写入协议 JSON 的稳定状态名称。
  *
  * @param[in] state 生命周期状态枚举值。
  * @return 静态只读字符串；未知值返回 `unknown`。
@@ -143,10 +139,9 @@ esp_err_t native_ota_report_context_init(native_ota_report_context_t *context,
 const char *native_ota_report_state_name(native_ota_report_state_t state);
 
 /**
- * @brief 生成并提交一条生命周期状态事件。
+ * @brief 报告设备已经进入一个新的升级阶段。
  *
- * 关键状态会先写入有限的 NVS 待发送队列，再调用非阻塞 transport。上报失败不会
- * 改变 OTA 主流程返回值。
+ * 关键阶段先保存再发送；暂时无法上报不会改变下载和校验本身的结果。
  */
 esp_err_t native_ota_report_event(const native_ota_report_context_t *context,
                                   native_ota_report_state_t state,
@@ -154,15 +149,15 @@ esp_err_t native_ota_report_event(const native_ota_report_context_t *context,
                                   native_ota_failure_reason_t failure_reason);
 
 /**
- * @brief 按百分比/时间策略提交下载进度。
+ * @brief 在进度变化足够大或间隔足够久时报告最新下载进度。
  *
- * 进度只保存在 RAM，满足步长、时间间隔或 100% 任一条件时才提交。
+ * 进度只保存在内存中；断线时允许跳过中间值，恢复后报告最新值。
  */
 esp_err_t native_ota_report_progress(const native_ota_report_context_t *context,
                                      uint32_t bytes_downloaded);
 
 /**
- * @brief 将持久化关键事件和 RAM 中最新进度交给当前 transport。
+ * @brief MQTT 恢复后，重新发送尚未确认的关键结果和最新进度。
  *
  * @return ESP_OK 全部当前可发送内容已交给 transport，或没有待发送内容。
  * @return ESP_ERR_NOT_SUPPORTED 尚未注册 transport。
@@ -173,17 +168,17 @@ esp_err_t native_ota_report_progress(const native_ota_report_context_t *context,
 esp_err_t native_ota_report_flush_pending(void);
 
 /**
- * @brief 记录一条已收到 QoS 1 PUBACK 的事件 ID。
+ * @brief 记录 Broker 已确认收到哪一条升级结果。
  *
  * @param[in] event_id 已确认事件的 NUL 结尾 ID，长度必须小于
  *                     NATIVE_OTA_EVENT_ID_SIZE。
  *
- * @note 函数只向有界确认队列入队，不在 MQTT 事件回调中写 Flash；队列满时保留 NVS 记录。
+ * @note 这里只登记确认，后台再删除持久记录；登记失败时保留记录并允许以后重发。
  */
 void native_ota_report_ack_event(const char *event_id);
 
 /**
- * @brief 新镜像处于 PENDING_VERIFY 时生成 booted_pending_verify 事件。
+ * @brief 新固件首次启动、尚未完成本地健康检查时报告“等待确认”。
  *
  * @return ESP_OK 已生成事件，或当前没有跨重启待验收上下文。
  * @return 其他 esp_err_t 报告构建、持久化或 transport 操作失败。
@@ -193,7 +188,7 @@ void native_ota_report_ack_event(const char *event_id);
 esp_err_t native_ota_report_boot_pending_verify(void);
 
 /**
- * @brief 本地自检通过并确认镜像后生成 succeeded 事件。
+ * @brief 新固件通过本地健康检查并正式确认后报告成功。
  *
  * @return ESP_OK 已生成事件，或当前没有跨重启待验收上下文。
  * @return 其他 esp_err_t 报告构建、持久化或 transport 操作失败。
@@ -201,7 +196,7 @@ esp_err_t native_ota_report_boot_pending_verify(void);
 esp_err_t native_ota_report_boot_succeeded(void);
 
 /**
- * @brief 自检失败或检测到回滚时生成 rolled_back 事件。
+ * @brief 新固件未通过检查并恢复旧版本时报告回滚。
  *
  * @param[in] failure_reason 回滚原因；会序列化为稳定的 error_code 字段。
  * @return ESP_OK 已生成事件，或当前没有跨重启待验收上下文。
@@ -210,7 +205,7 @@ esp_err_t native_ota_report_boot_succeeded(void);
 esp_err_t native_ota_report_boot_rolled_back(native_ota_failure_reason_t failure_reason);
 
 /**
- * @brief 在非 PENDING_VERIFY 启动中识别上一次失败升级的回滚。
+ * @brief 普通启动时核对 bootloader 是否已经替设备完成了一次回滚。
  *
  * last_invalid_version 应来自 esp_ota_get_last_invalid_partition()；只有它与持久化
  * 目标版本匹配且当前运行版本不同，才会生成 rolled_back。

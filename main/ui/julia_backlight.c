@@ -1,29 +1,16 @@
 /**
  * @file    julia_backlight.c
- * @brief   LCD 背光控制：LEDC PWM + 呼吸/渐变。
+ * @brief   控制用户看到的屏幕亮度，并在待机时生成平滑呼吸效果。
  *
- * 模块职责与边界：
- *   - 用 LEDC 定时器在 JULIA_BACKLIGHT_GPIO 上输出 20kHz 10-bit PWM，控制面板背光
- *     亮度；支持三档：直接 set、硬件 fade、以及由独立任务驱动的"呼吸"（按 LUT 循环
- *     改变占空比）。
- *   - 上游：app_main 在 julia_display_init()+julia_avatar_init() 前调用
- *     julia_backlight_init()；复位周期先保持背光关闭（gpio=0，见 init 末尾），由
- *     main.c 在"首帧完整渲染完成"后才调 julia_backlight_set(100) 点亮——避免开机白屏。
- *   - 显示功率/息屏策略不在此处：见 julia_display_theme 或 app/julia_idle_display.c。
+ * 开机时先保持全黑，完整立绘刷新后才点亮，避免用户看到白屏或未初始化像素。
+ * 设备状态决定目标亮度或是否呼吸；本模块只负责把变化平滑地输出到背光引脚，
+ * 不自行判断用户是否离开或设备是否应该睡眠。
  *
- * 线程模型：
- *   - 本模块无锁：亮度状态由"设置方"与"breathe_task"两个线程共享。所有公共入口都先
- *     julia_backlight_breathe_stop()（多数置 s_breathing=false 并停 fade），避免呼吸
- *     与手动/渐变动画竞态；呼吸任务对 volatile 状态做尽力读取。
- *   - breathe_task（优先级 4，栈 4096，PSRAM）只负责按 segment 推进曲线；每段由
- *     ledc_fade 硬件完成，任务用 vTaskDelayUntil 对齐相位，并用 IRAM ISR
- *     （fade_done）唤醒。
+ * 手动设置亮度会先停止呼吸，保证两种控制不会互相争抢。呼吸任务只安排下一段
+ * 渐变，实际亮度过渡由硬件完成，因此不会持续占用 CPU。
  *
- * 关键设计：
- *   - 用 Q10 正弦 LUT 避免浮点；gamma 表使低亮度更平缓，同时保证配置的最小/最大
- *     duty 端点不被改变。
- *   - BREATHE_ZERO_HOLD_PERCENT：当最小亮度为 0 时，在曲线两端各保留一段"全灭"，
- *     降低平均功耗（只影响驻留，不改上升/下降曲线）。
+ * 呼吸曲线预先计算，低亮度变化经过视觉校正，避免人眼看到突跳。最小亮度配置为零时，
+ * 每个周期会短暂停留在全黑，降低平均功耗但不改变渐亮和渐暗速度。
  */
 #include "julia_backlight.h"
 #include "driver/gpio.h"
@@ -52,16 +39,12 @@
 #define BREATHE_DEFAULT_SEGMENTS 120U
 #define BREATHE_LUT_SEGMENTS 120U
 #define BREATHE_MIN_SEGMENT_MS 5U
-/* When the configured minimum is zero, hold the backlight fully off at both
- * ends of each cycle to reduce average power. Change this macro to tune the
- * zero-light dwell without changing the rise/fall curve. */
+/* 最小亮度为零时，每个周期有 15% 时间保持全黑，以降低平均功耗。 */
 #ifndef BREATHE_ZERO_HOLD_PERCENT
 #define BREATHE_ZERO_HOLD_PERCENT 15U
 #endif
 
-/* One normalized sine cycle in Q10. Tables stay in Flash .rodata and avoid
- * floating-point work while the fade chain is running. Gamma is applied to
- * the normalized amplitude so configured minimum and maximum duty are kept. */
+/* 预先计算的呼吸曲线保存在 Flash，运行时不做浮点运算；视觉校正不会改变配置的端点。 */
 static const uint16_t s_sine_q10[BREATHE_LUT_SEGMENTS + 1] = {
     0,1,3,6,11,17,25,34,44,56,69,83,98,114,131,150,169,190,211,233,256,
     279,303,328,353,379,405,431,458,485,511,538,565,592,618,644,670,695,

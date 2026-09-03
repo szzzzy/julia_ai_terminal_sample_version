@@ -1,27 +1,16 @@
 /**
  * @file    voice_service.h
- * @brief   语音业务服务：FILE_SEND/MIC 命令语法、WSS 文件推送协议与入口装配。
+ * @brief   解释服务器的语音命令，并组织麦克风上传、回答播放和文件发送。
  *
- * 本模块是语音命令语法的唯一解析点，两条入口共用同一套处理：
- * - MQTT 语音命令 topic（FILE_SEND <uri> / MIC_START / MIC_STOP）：由
- *   voice_service_init() 注册到通信层 topic 注册表；
- * - WSS 服务端文本帧（wake_detected、FILE_SEND、MIC/SPK 控制）：作为
- *   wss_transport 的 on_text 回调执行；S4 提交后通过同一连接回 state_ready。
+ * MQTT 负责下发“开始说话、结束说话、发送文件和结束交流”等控制信息；
+ * WSS 负责上传麦克风、接收回答声音并传输文件。两条连接收到的命令最终都在
+ * 负责 WSS 收发的同一个任务中按顺序执行，避免控制与音频互相越过。
  *
- * 文件推送协议（BEGIN FILE <size> <name> -> 1200 B 二进制帧 -> END <bytes>）
- * 在本模块内实现，传输交给纯传输层 wss_transport；URI 到本地路径的受控映射
- * 由 voice_uri 提供。本模块不采集音频、不做编解码。
+ * 文件发送必须先声明文件名和大小，随后发送文件内容，最后报告实际字节数；
+ * 缺少结束标记时服务器必须丢弃文件。本模块不直接驱动麦克风硬件，也不编码音频。
  *
- * 线程模型：
- * - MQTT 语音命令在 ESP-MQTT 事件任务上下文解析（voice_service_on_mqtt_command），
- *   只做校验并调用 *_enqueue 有界入队，绝不直接触网；
- * - WSS 服务端文本/二进制/队列回调在"WSS 会话任务"上下文同步执行
- *   （voice_service_on_server_text / on_binary / on_queue_item），发送用
- *   wss_transport_send_now()；
- * - MIC 上行 PCM1 帧由 board_audio 的 mic_task 经 voice_service_send_chunk() 写入
- *   PSRAM SPSC ring，实际发送和连接边界清理只在会话任务执行。
- * MIC上传状态与LISTEN语义分离：SPKE后可在IDLE继续上传；服务器先以
- * wake_detected 建立 S4，再以 MIC_START 标记实际用户话语开始。
+ * 麦克风是否上传与设备是否正在听用户说话不是同一件事：默认服务器唤醒模式下，
+ * 待机时也持续上传声音供服务器识别唤醒词；MIC_START 只表示用户已经开始本轮话语。
  */
 #pragma once
 
@@ -41,20 +30,17 @@ extern "C" {
 #define VOICE_SERVICE_URI_MAX_LEN 128
 
 /**
- * @brief 板级音频接入：把 board_audio 的 PCM1 帧挂到 WSS sink，
- * 并接管 WSS 下行 wake_detected、SPKS/SPKV/SPKE/SPKT/MICS/MICW 命令。
+ * @brief 接通麦克风上传和服务器回答播放，使语音命令开始具备实际作用。
  *
- * @note 须在 board_audio_init() 之后、voice_service_ip_ready() 之前调用。
- * @note WSS 下行的二进制 PCM 帧（voice_service_on_binary）由此路由到扬声器。
+ * @note 必须先初始化板级麦克风和扬声器，再调用本函数；随后才能建立 WSS 连接。
  */
 esp_err_t voice_service_init_board_audio(void);
 
 /**
- * @brief 初始化语音服务并注册 MQTT 语音命令 topic。
+ * @brief 准备语音命令入口，并登记需要订阅的 MQTT 主题。
  *
- * 把 CONFIG_COMM_MQTT_VOICE_CMD_TOPIC 注册到通信层注册表（非 critical：
- * 语音订阅不影响 OTA 就绪判定）。WSS 传输客户端不在此启动，而是在取得 IPv4
- * 后由 voice_service_ip_ready() 启动。
+ * 此时只登记主题，不连接服务器。设备取得 IPv4 地址并且显示、声音与状态管理
+ * 都就绪后，才会启动语音连接。
  *
  * @return ESP_OK 初始化成功。
  * @return 其他 esp_err_t 通信层 topic 注册失败。
@@ -64,7 +50,7 @@ esp_err_t voice_service_init_board_audio(void);
 esp_err_t voice_service_init(void);
 
 /**
- * @brief 网络 IP 就绪回调适配器：启动 WSS 传输客户端。
+ * @brief 设备已经联网时启动语音服务器连接。
  *
  * 供 network_lifecycle 的 ip_ready 回调注册使用；失败会由网络生命周期任务
  * 按有界退避重试。
@@ -75,7 +61,7 @@ esp_err_t voice_service_init(void);
 esp_err_t voice_service_ip_ready(void *arg);
 
 /**
- * @brief 请求通过 WSS 推送一个音频文件（对应 FILE_SEND 语音命令）。
+ * @brief 请求把设备上的一个 WAV 文件发送给语音服务器。
  *
  * @param[in] uri 文件 URI："SD:/x/y" 映射到 /sdcard/x/y，"SPIFFS:/x/y" 映射到
  *                /spiffs/x/y；非法格式以 ERROR bad_uri 拒绝。
@@ -86,15 +72,15 @@ esp_err_t voice_service_ip_ready(void *arg);
  * @return ESP_ERR_NO_MEM 命令队列已满。
  * @return ESP_ERR_INVALID_STATE WSS 客户端尚未启动。
  *
- * @note 可被任意普通任务（如 MQTT 事件任务）调用；只入队不阻塞。
+ * @note 本函数只登记请求并立即返回；实际读取和发送由语音连接任务完成。
  */
 esp_err_t voice_service_send_file(const char *uri);
 
 /**
- * @brief 把一个 MIC PCM1 帧写入当前 WSS generation 的 PSRAM ring。
+ * @brief 把一块麦克风声音加入当前语音连接的待发送缓冲区。
  *
- * 每个块封装为一个二进制 WebSocket 帧；仅在 WSS 会话已建立且PCM上传窗口
- * 已开启时接收。WSS owner 完整发出后才释放槽；连接结束会丢弃全部旧代次积压。
+ * 只有语音连接可用且允许上传时才接收。数据完整发出后才从缓冲区移除；
+ * 连接断开时丢弃尚未发出的旧声音，避免重连后把过期话语交给服务器。
  *
  * @param[in] buf 音频数据首地址，不允许为 NULL。
  * @param[in] len 数据长度，1～656 字节。
@@ -102,27 +88,26 @@ esp_err_t voice_service_send_file(const char *uri);
  * @return ESP_OK 数据块已写入ring。
  * @return ESP_ERR_INVALID_ARG buf 为空或 len 为 0。
  * @return ESP_ERR_INVALID_SIZE len 超过 PCM1 最大帧长。
- * @return ESP_ERR_NO_MEM PSRAM ring 已满。
+ * @return ESP_ERR_NO_MEM 麦克风待发送缓冲区已满，本轮连接将被安全结束。
  * @return ESP_ERR_INVALID_STATE WSS 客户端尚未启动。
  */
 esp_err_t voice_service_send_chunk(const uint8_t *buf, size_t len);
 
 /**
- * @brief 确认用户开始一轮说话（对应 MIC_START 语音命令）。
+ * @brief 确认用户已经开始本轮说话。
  *
- * 命令仅入队，真正生效在 WSS 会话任务。服务器唤醒模式下 PCM 从 WSS 认证
- * 成功起已持续上传；S4 中 MIC_START 只标记实际话语开始，S1 中进入 S2.1；
- * 旧服务端或本地 WakeNet 从 S3/S5/S6 发起时仍兼容推进到 S4。
+ * 默认服务器唤醒模式下，麦克风此前可能已经在上传；本命令的业务含义是
+ * “唤醒完成，用户现在开始表达”。播放中的唤醒回应或旧回答会先被停止。
  *
  * @return ESP_OK 命令已入队；ESP_ERR_NO_MEM 命令队列已满；ESP_ERR_INVALID_STATE 尚未启动。
  */
 esp_err_t voice_service_mic_start(void);
 
 /**
- * @brief 确认当前一轮用户说话结束（对应 MIC_STOP 语音命令）。
+ * @brief 确认用户本轮话语已经结束，设备开始等待回答。
  *
- * 命令仅结束LISTEN并驱动THINK，不关闭PCM上传。服务器唤醒模式下，SPKE和
- * 十分钟进入 S3 待机只改变 UI/FSM，PCM 在 WSS 会话期间始终保持上传。
+ * 本命令不等于关闭麦克风上传。默认服务器唤醒模式下，只要 WSS 连接仍在，
+ * 待机、等待回答和播放回答期间都可以继续上传声音。
  *
  * @return ESP_OK 命令已入队；ESP_ERR_NO_MEM 命令队列已满；ESP_ERR_INVALID_STATE 尚未启动。
  */

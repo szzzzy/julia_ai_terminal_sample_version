@@ -1,19 +1,13 @@
 /**
  * @file    julia_display.c
- * @brief   板级显示封装：装配 ST77916(QSPI) 面板并把 LVGL 显示端口(LVGL_PORT)接上。
+ * @brief   按板卡接线初始化 LCD、复位面板，并在面板可用后接通 LVGL 绘图。
  *
- * @section jd_scope 职责与边界
- *         本文件是"板级接线 + 初始化编排"层：
- *           - 选定板载引脚（SPI2、SCK/数据/CS、时钟 40MHz、360x360）；
- *           - 通过现有 TCA9554 做面板复位（reset_panel_via_existing_tca9554）；
- *           - 初始化 SPI 总线 → panel IO → 创建 ST77916 面板 → reset/init/disp_on；
- *           - 最后调用 lvgl_port_init 把面板接给 LVGL（此时才建 LVGL 任务/锁/tick）。
- *         它不直接绘制像素：所有渲染走 LVGL，经 lvgl_port 的 flush_cb 落到面板。
+ * 面板必须先通过板载扩展器完成硬件复位，再建立 QSPI 总线并执行厂商初始化命令；
+ * 只有这些步骤全部成功后才能启动 LVGL。顺序错误会造成白屏、无响应或首帧丢失。
+ * 本模块不绘制具体内容，只建立从 LVGL 到 LCD 的可靠通道。
  *
- * @section jd_order 初始化顺序（panel → lvgl_port → ui）
- *         本函数只完成前两段；`main.c` 在 julia_display_init 成功后，再接 julia_avatar_init
- *         （创建立绘并做首次全屏刷新）。因此顺序严格为 panel → lvgl_port → ui，
- *         这与移植文档 §6.3 一致：LVGL 初始化的前提是 panel 已创建。
+ * 应用随后创建 Julia 立绘并完成第一次全屏刷新，最后才打开背光。这样用户看到的
+ * 第一幅画面一定是完整立绘，而不是面板上电后的未定义内容。
  *
  * @section jd_backlight 背光
  *         背光（LEDC PWM，julia_backlight 模块）与本文件独立，由 main.c 在立绘首帧

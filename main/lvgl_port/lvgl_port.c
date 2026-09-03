@@ -1,28 +1,19 @@
 /**
  * @file    lvgl_port.c
- * @brief   LVGL 与 ESP-IDF 的适配层：任务、锁、tick、刷新回调与面板同步。
+ * @brief   让界面绘制、LCD 传输和显示开关按安全顺序执行。
  *
- * @section lvgl_scope 职责与边界
- *         本模块把 (a) LVGL 的线程模型（锁 + 定时器 + 刷新）与 (b) ESP-IDF 的
- *         esp_lcd_panel_io 异步 DMA 完成事件桥接起来：
- *           - 一个独立 lvgl 任务周期调用 lv_timer_handler；
- *           - 一把递归互斥锁串行化所有 LVGL API 访问；
- *           - 一个 esp_timer 周期回调喂 LVGL tick（lv_tick_inc）；
- *           - flush_cb 通过"阻塞等待 DMA 完成信号"把异步色彩传输同步回 LVGL。
- *         它假定给定的 panel 已由 julia_display_init 创建并完成 init。
+ * LVGL 会分块生成画面，而 LCD 通过 DMA 异步发送像素。只有硬件确认上一块已经发送
+ * 完成后，LVGL 才能复用对应缓冲，否则画面会撕裂或出现随机色块。所有界面对象修改
+ * 也必须串行执行，避免两个任务同时改变同一个对象。
  *
  * @section lvgl_dma 数据流与像素格式
  *         framebuffer(LVGL) → lvgl_flush_cb → lvgl_port_draw_bitmap_sync →
  *         esp_lcd_panel_draw_bitmap →（DMA/SPI）→ 面板。像素为 RGB565（LV_COLOR_16_SWAP，
  *         见 build 侧），面板侧按大端接收；若缓冲在外部 RAM 会先做 cache 同步。
  *
- * @section lvgl_locks 并发与锁
- *         共有两把互斥锁 + 一个二值信号量：
- *           - s_lvgl_mutex（递归）：保护所有 LVGL API，LVGL 任务/UI 任务都须持有再访问；
- *           - s_panel_mutex（普通）：串行化"直接触碰面板"的操作（draw_bitmap / disp_on_off），
- *             避免刷新与开关显示并发碰撞；
- *           - s_color_done（二值）：由 SPI 完成回调（ISR 上下文）give，被 flush 同步 take。
- *         s_display_off / s_refresh_paused 为 volatile（跨任务读写的开关位）。
+ * 一把锁保护界面对象，一把锁保证“发送画面”和“开关面板”不会同时发生；硬件完成
+ * 通知用于唤醒正在等待的刷新操作。睡眠时停止产生新画面，但保留界面任务，便于
+ * 唤醒后继续使用原有对象。
  *
  * @see    main/display/julia_display.c（panel 的创建与初始化顺序）
  * @see    main/display/esp_lcd_st77916.c（SPI 传输完成回调的触发方）
@@ -45,11 +36,8 @@
 #define LVGL_TASK_STACK_SIZE        4096
 #define LVGL_TASK_PRIORITY          5
 
-/* 并发资源总览（详见文件头 @section lvgl_locks）：
- * s_lvgl_mutex：递归锁，串行化所有 LVGL API；s_panel_mutex：普通锁，串行化直接面板操作；
- * s_color_done：二值信号，ISR 里 give、flush 同步里 take。下面的 s_display_off /
- * s_refresh_paused / s_wake_started_us / s_last_flush_was_final 是跨任务开关/统计位，
- * 用 volatile 保证多任务可见性；s_flush_* 为刷新性能统计。 */
+/* 界面对象、面板操作和一次像素传输完成使用独立同步手段，避免长时间发送像素时
+ * 阻塞普通界面更新。其余字段只记录睡眠、唤醒和刷新耗时。 */
 static SemaphoreHandle_t s_lvgl_mutex;
 static lv_disp_draw_buf_t s_draw_buf;
 static lv_disp_drv_t s_disp_drv;

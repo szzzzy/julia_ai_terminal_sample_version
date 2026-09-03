@@ -1,10 +1,9 @@
 /**
  * @file    tca9554.h
- * @brief   TCA9554 I2C GPIO 扩展器驱动（板载 Extend IO 控制）。
+ * @brief   通过板载扩展器控制 LCD 复位和 SD 卡模式，并提供其它板载设备共用的 I2C 总线。
  *
- * 本板（Waveshare ESP32-S3-LCD-1.85）的 SD 卡 D3/CS 信号经 TCA9554 的 P2
- * 引脚（Extend_IO3）路由，因此操作 SD 卡前必须先初始化扩展器并保持 CS 为高，
- * 使卡始终处于 SDMMC(SD) 模式而不是误入 SPI 模式。
+ * SD 卡的模式选择信号不直接连接主芯片。挂载前必须通过扩展器保持高电平，否则
+ * SD 卡可能进入 SPI 模式而无法按当前 SDMMC 接线工作。LCD 复位也经过同一扩展器。
  *
  * 来源：VOICE DATA BENCHMARK/components/board_hal/tca9554.c（已在目标板验证）。
  */
@@ -52,5 +51,5 @@ esp_err_t tca9554_write_pin(uint8_t pin, bool level);
  */
 esp_err_t tca9554_read_pin(uint8_t pin, bool *level);
 
-/** Return the shared board I2C bus used by TCA9554, RTC and other onboard devices. */
+/** 返回板载扩展器、RTC 和运动传感器共同使用的 I2C 总线。 */
 i2c_master_bus_handle_t tca9554_i2c_bus(void);

@@ -1,30 +1,19 @@
 /**
  * @file    ota_report.c
- * @brief   OTA 状态 JSON、进度节流和关键事件持久化实现。
+ * @brief   生成服务器可识别的升级状态，并防止关键结果因断线或掉电丢失。
  *
- * 主要职责：
- * 1. 将 OTA 任务上下文和生命周期状态序列化为固定上限的状态 JSON；
- * 2. 关键事件先保存到 ota_report NVS blob，确保断电或 MQTT 断线后可以重发；
- * 3. 普通下载进度只保留最新 RAM 槽位，并按百分比步长/时间间隔节流；
- * 4. 通过非阻塞 transport 将消息交给通信模块，并把 PUBACK 交给独立任务处理。
+ * 成功、失败、回滚和准备重启等结果必须先保存，再尝试发送；Broker 确认收到后
+ * 才删除。下载百分比允许丢失，只保留最新值并限制发送频率，避免频繁写 Flash。
  *
- * 模块关系：
- * - ota_engine.c 与 ota_boot_flow.c 在下载和启动验收阶段提交事件；
- * - mqtt_comm.c 注册 transport，负责 MQTT 队列、msg_id 与 event_id 的关联；
- * - ota_state_store.c 提供共享的 NVS 容量与写入失败诊断；
- * - 本文件不调用 ESP-MQTT，不执行 HTTP/Flash 操作。
+ * 下载和启动验收只报告当前结果；MQTT 模块负责实际发送。本文件不执行 HTTP 下载
+ * 或写固件分区，因此网络恢复、状态补发和升级执行可以分别处理。
  *
- * 持久化与去重：
- * - 关键（critical）事件先进入 RAM 镜像 pending 数组并整体写 NVS，再交给 transport；
- *   只要未收到 QoS 1 PUBACK，事件就保留在 NVS，断线/断电重启后会再次 flush。
- * - 每条关键事件附带 128-bit 随机 event_id 作为幂等键：重连 flush 重复发送同一
- *   event_id 时云端按 ID 去重，本地 transport 也按 event_id 判重，避免重复上报。
- * - 进度（progress）只保留最新一条在 RAM，按百分比步长/时间间隔节流，不写 NVS。
- * - PUBACK 只进入有界确认队列，真正的 NVS 删除由后台 ack 任务执行，因此上报回调
- *   不在 MQTT 事件栈上写 Flash。
+ * 每条关键结果都有稳定事件编号。重连后可能重复发送同一编号，服务器必须按编号
+ * 去重。MQTT 的确认处理只快速登记编号，后台任务再删除持久记录，避免在 MQTT
+ * 公共事件处理中访问 Flash。
  *
- * 并发约束：NVS 内存镜像、transport 和进度基线由 s_lock 保护；MQTT PUBACK 只入
- * 有界队列，实际删除 NVS 事件由 ota_report_ack_task 完成，因此事件回调不会写 Flash。
+ * 多个升级阶段可能同时提交状态，因此共享记录在短互斥区内更新；网络发送和 Flash
+ * 删除均在互斥区外完成，避免长时间阻塞其它状态。
  */
 
 #include "ota_report.h"
@@ -61,19 +50,17 @@ static const char *TAG = "ota_report";
 #define OTA_REPORT_ACK_QUEUE_DEPTH 8
 
 /* ---------------------------------------------------------------------------
- * NVS 持久化队列布局
+ * 断线和掉电后仍需保留的升级结果
  *
- * s_store 是把“待 PUBACK 关键事件”连同一次 OTA 的关联上下文整体落在 NVS 的
- * RAM 镜像。count 表示 pending 前缀的有效条目数；context_active / awaiting_boot
- * 用于重启后把 bootloader 验收结果（success/rollback）关联回同一 artifact。
- * s_store 只在 s_lock 持有时读写。
+ * 内存中保存的内容与 NVS 中的单个记录保持一致，包括尚未确认的关键结果和本次
+ * 升级身份。设备重启后可据此把新固件成功或回滚关联到原来的服务器任务。
  * ------------------------------------------------------------------------- */
 
 /**
- * @brief 持久化队列中的单条关键状态事件。
+ * @brief 一条在 Broker 确认前不能丢失的升级结果。
  *
- * JSON 与 event_id 一起保存，PUBACK 到达后按 event_id 删除；reserved 用于保持
- * 结构体对齐并为布局兼容保留空间。
+ * 状态内容与事件编号一起保存；确认到达后按编号删除。保留字段只用于保持存储格式
+ * 稳定，当前没有业务含义。
  */
 typedef struct {
     uint8_t state; /**< native_ota_report_state_t 的持久化值。 */

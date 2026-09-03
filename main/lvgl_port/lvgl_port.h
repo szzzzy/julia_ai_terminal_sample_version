@@ -1,13 +1,11 @@
 /**
  * @file    lvgl_port.h
- * @brief   LVGL 与 ESP-IDF 适配层接口：初始化、锁、tick、刷新同步与显示开关。
+ * @brief   把 LVGL 画面安全送到 LCD，并防止多个任务同时修改界面或面板。
  *
- * @note  本模块把 LVGL（单线程模型）接到 esp_lcd_panel（异步 DMA）上。使用前必须先
- *        初始化好面板（见 julia_display_init），再调 lvgl_port_init。之后所有 LVGL
- *        API 调用都须包在 lvgl_port_lock/unlock 内。
- * @note  两种"暂停"语义：
- *         - lvgl_port_set_display_off：关闭面板显示（可仅背光作退路）；
- *         - lvgl_port_set_refresh_paused：只停刷新/动画，保持 GRAM 与背光，画面冻结。
+ * @note  必须先完成 LCD 初始化，再启动本模块。LVGL 不是多任务安全的，任何直接
+ *        修改界面对象的代码都必须先取得本模块的界面锁。
+ * @note  “关闭显示”会让面板停止显示；“暂停刷新”只冻结当前画面，面板内容和背光
+ *        仍然保留。两者用途不同，不能互换。
  * @see   main/display/julia_display.h（面板创建与初始化顺序）
  */
 #pragma once
@@ -18,7 +16,7 @@
 #include "esp_lcd_panel_ops.h"
 #include "lvgl.h"
 
-/* 显示分辨率与本机 LVGL 双缓冲尺寸（约占整屏 1/10，两帧交替）。 */
+/* 屏幕为 360×360；使用两块约十分之一屏的缓冲交替刷新，降低连续内存占用。 */
 #define LVGL_PORT_HOR_RES           360
 #define LVGL_PORT_VER_RES           360
 #define LVGL_PORT_BUFFER_PIXELS     (LVGL_PORT_HOR_RES * LVGL_PORT_VER_RES / 10)
@@ -26,10 +24,10 @@
 esp_err_t lvgl_port_init(esp_lcd_panel_handle_t panel_handle);
 bool lvgl_port_lock(TickType_t timeout_ticks);
 void lvgl_port_unlock(void);
-/* 息屏专用：任务保持存活，handler/flush 低占空跳过，禁止用于启动同步。 */
+/* 进入睡眠显示时使用；界面任务仍存活，但不再持续生成和发送新画面。 */
 esp_err_t lvgl_port_set_display_off(bool off);
 bool lvgl_port_display_off(void);
-/* Pause LVGL timers/flushes while keeping the LCD controller and GRAM on. */
+/* 冻结动画和刷新但保留当前画面，适合短时独占显示，不代表屏幕已经关闭。 */
 void lvgl_port_set_refresh_paused(bool paused);
 bool lvgl_port_refresh_paused(void);
 bool lvgl_port_color_trans_done(esp_lcd_panel_io_handle_t panel_io,

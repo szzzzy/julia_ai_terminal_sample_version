@@ -1,9 +1,9 @@
 /**
  * @file julia_fsm_runtime.c
- * @brief Julia 行为状态机的单实例运行时与现有呈现适配。
+ * @brief 按顺序处理设备行为事件，并把每个状态转换成对应的屏幕和背光表现。
  *
- * 本模块串行处理事件并保存当前状态。S2.1、S2.2、S2.3 分别调用项目
- * 已有的听、想、说呈现接口；S4 只复用 S2.1 的呈现，不与 S2.1 合并状态。
+ * 设备在开始交流、等待回答和播放回答时使用不同画面。唤醒后的准备阶段虽然
+ * 与听音画面相同，但业务上仍表示“已经被唤醒、尚未确认用户开始说话”。
  */
 #include "julia_fsm_runtime.h"
 
@@ -235,7 +235,7 @@ static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
     s_committed_main_state = main_state;
     s_committed_s2_sub_state = s2_sub_state;
     portEXIT_CRITICAL(&s_state_lock);
-    /* 状态已提交后再通知语音层；观察者只能有界入队，不能阻塞 FSM 呈现。 */
+    /* 先让新状态正式生效，再通知语音服务回报服务器，避免服务器过早发送回答。 */
     if (s_state_observer != NULL) {
         s_state_observer(main_state, s2_sub_state, event, s_state_observer_ctx);
     }
