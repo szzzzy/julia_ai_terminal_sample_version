@@ -149,7 +149,8 @@ void wss_transport_fail_session(void);
  * @return ESP_OK 发送完成。
  * @return ESP_ERR_INVALID_ARG 保留操作码、控制帧超长、载荷超长或载荷非空但
  *         payload 为 NULL；不标记会话故障。
- * @return ESP_FAIL 会话无效或写出失败；写失败同时标记会话故障，
+ * @return ESP_FAIL 会话无效、永久写错误或帧级写期限耗尽；暂时的
+ *         WANT_READ/WANT_WRITE/EAGAIN 会先有限重试。最终失败会标记会话故障，
  *         会话循环将关闭链路并重连。
  *
  * @note 只能在 on_text / on_queue_item 回调（会话任务上下文）中调用；

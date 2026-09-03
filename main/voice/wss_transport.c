@@ -23,7 +23,8 @@
  *   CONFIG_WSS_PONG_TIMEOUT_SECONDS 内收到任意下行帧（PONG 或其他帧都能证明
  *   链路存活）就取消待定探测并重置保活计时，只有该窗口内完全没有下行帧才判定
  *   链路死亡并重连自愈；
- *   写方向超时保证服务端停止读取时不会把会话任务永久卡死；
+ *   写方向的 WANT_READ/WANT_WRITE/EAGAIN 在同一帧 2 秒绝对期限内保持原参数
+ *   重试；期限耗尽或永久错误才结束会话，既容忍短时背压也避免永久卡死；
  * - Bearer token 优先取 COMM_DEVICE_AUTH_TOKEN_VALUE，为空时回退 CONFIG_WSS_TOKEN；
  * - 服务器证书仍由 server_certs/ca_cert.pem 内嵌信任锚校验，不引入新证书。
  *
@@ -103,6 +104,7 @@
 #include "psa/crypto.h"
 
 #include "wss_transport.h"
+#include "wss_tx_writer.h"
 
 /** 本模块统一使用的日志标签。 */
 static const char *TAG = "wss_transport";
@@ -124,10 +126,10 @@ static const char *TAG = "wss_transport";
  * 会话超时必须不大于一帧周期。
  */
 #define WSS_READ_TIMEOUT_MS 20
-/** 会话写方向超时（SO_SNDTIMEO）：对端停止读取时 send 最多阻塞这么久，
- *  随后 mbedTLS 返回 WANT_WRITE、写路径按链路故障结束会话，避免会话任务
- *  在推送大文件时被永久卡死。 */
+/** 单次会话写调用的 SO_SNDTIMEO；暂时错误仍由帧级绝对期限约束重试。 */
 #define WSS_WRITE_TIMEOUT_MS 500
+/** 单个 WebSocket 帧的头与载荷共享同一个绝对写入期限。 */
+#define WSS_FRAME_WRITE_DEADLINE_MS 2000
 /** 帧内读取允许的连续空闲超时次数，超过即判定链路故障，防止中途死亡挂死。 */
 #define WSS_READ_EAGAIN_BUDGET 5
 /** HTTP 升级响应读取允许的连续空闲超时次数。 */
@@ -218,10 +220,12 @@ static void wss_log_session_probe(const char *reason)
 }
 
 /** 读取并清除 ESP-TLS 保存的最后错误；仅在写失败、会话即将重建时调用。 */
-static void wss_log_tls_write_probe(const char *phase, int opcode,
+static void wss_log_tls_write_probe(const char *failure_kind,
+                                    const char *phase, int opcode,
                                     size_t frame_payload_len, int result,
                                     int saved_errno, bool would_block,
-                                    size_t sent, size_t requested)
+                                    size_t sent, size_t requested,
+                                    uint32_t retries, int64_t elapsed_us)
 {
     int tls_system_error = 0;
     int tls_mbedtls_error = 0;
@@ -239,11 +243,13 @@ static void wss_log_tls_write_probe(const char *phase, int opcode,
     }
 
     ESP_LOGE(TAG,
-             "WSS TLS write probe phase=%s opcode=0x%x frame_payload=%u "
+             "WSS TLS write probe kind=%s phase=%s opcode=0x%x frame_payload=%u "
              "progress=%u/%u result=%d errno=%d would_block=%u "
+             "retries=%" PRIu32 " elapsed_ms=%" PRIi64 " "
              "tls_system=%d tls_mbedtls=-0x%x tls_esp=0x%x",
-             phase, opcode, (unsigned)frame_payload_len, (unsigned)sent,
+             failure_kind, phase, opcode, (unsigned)frame_payload_len, (unsigned)sent,
              (unsigned)requested, result, saved_errno, (unsigned)would_block,
+             retries, elapsed_us >= 0 ? elapsed_us / 1000LL : -1,
              tls_system_error,
              tls_mbedtls_error < 0 ? -tls_mbedtls_error : tls_mbedtls_error,
              tls_esp_error);
@@ -256,6 +262,49 @@ static bool wss_tls_would_block(int result)
     return result == ESP_TLS_ERR_SSL_WANT_READ || result == ESP_TLS_ERR_SSL_WANT_WRITE ||
            (result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK));
 }
+
+static int wss_tls_write_once(void *ctx, const uint8_t *data, size_t len,
+                              int *system_error)
+{
+    (void)ctx;
+    errno = 0;
+    int result = s_tls != NULL
+                     ? esp_tls_conn_write(s_tls, (const char *)data, len)
+                     : ESP_FAIL;
+    *system_error = errno;
+    return result;
+}
+
+static int64_t wss_tls_write_now_us(void *ctx)
+{
+    (void)ctx;
+    return esp_timer_get_time();
+}
+
+static void wss_tls_write_wait_once(void *ctx)
+{
+    (void)ctx;
+    /* 一个调度 tick 避免暂时不可写时忙等；帧级绝对期限负责保证有界。 */
+    vTaskDelay(1);
+}
+
+static bool wss_tls_write_is_transient(void *ctx, int result,
+                                       int system_error)
+{
+    (void)ctx;
+    return result == ESP_TLS_ERR_SSL_WANT_READ ||
+           result == ESP_TLS_ERR_SSL_WANT_WRITE ||
+           (result == -1 &&
+            (system_error == EAGAIN || system_error == EWOULDBLOCK));
+}
+
+static const wss_tx_writer_ops_t s_tls_writer_ops = {
+    .ctx = NULL,
+    .write = wss_tls_write_once,
+    .now_us = wss_tls_write_now_us,
+    .wait_once = wss_tls_write_wait_once,
+    .is_transient = wss_tls_write_is_transient,
+};
 
 /** 设置 socket 读取超时。HTTP 升级和实时会话使用不同的时间预算。 */
 static void wss_set_receive_timeout(int sockfd, unsigned timeout_ms)
@@ -277,9 +326,9 @@ static void wss_set_receive_timeout(int sockfd, unsigned timeout_ms)
  * @brief 循环写出完整数据块。
  *
  * TLS 是字节流，单次 write 可能只完成一部分；本函数保证要么全部写出，
- * 要么返回失败由调用者结束会话。写方向受 SO_SNDTIMEO 约束：服务端停止
- * 读取时 send 超时会让 esp_tls_conn_write 返回 WANT_WRITE（负值）或部分
- * 长度，本函数把负值按链路故障返回，保证会话任务不会被永久阻塞。
+ * 要么返回失败由调用者结束会话。WANT_READ、WANT_WRITE 和 socket EAGAIN
+ * 保持当前地址及剩余长度不变，在整个 WebSocket 帧共享的绝对期限内重试；
+ * 只有期限耗尽或永久错误才结束会话。
  *
  * @param[in] data 数据首地址，不允许为 NULL。
  * @param[in] len  数据长度。
@@ -287,25 +336,40 @@ static void wss_set_receive_timeout(int sockfd, unsigned timeout_ms)
  */
 static esp_err_t wss_tls_write_all(const void *data, size_t len,
                                    const char *phase, int opcode,
-                                   size_t frame_payload_len)
+                                   size_t frame_payload_len,
+                                   int64_t frame_deadline_us)
 {
-    size_t sent = 0;
-    while (sent < len) {
-        if (s_tls == NULL) {
-            return ESP_FAIL;
+    if (s_tls == NULL) return ESP_FAIL;
+
+    wss_tx_write_stats_t stats;
+    wss_tx_write_result_t result = wss_tx_write_all(
+        &s_tls_writer_ops, data, len, frame_deadline_us, &stats);
+    int64_t elapsed_us = stats.finished_us - stats.started_us;
+    if (result == WSS_TX_WRITE_OK) {
+        if (stats.transient_retries > 0) {
+            ESP_LOGW(TAG,
+                     "WSS TLS write recovered phase=%s opcode=0x%x frame_payload=%u "
+                     "retries=%" PRIu32 " elapsed_ms=%" PRIi64,
+                     phase, opcode, (unsigned)frame_payload_len,
+                     stats.transient_retries,
+                     elapsed_us >= 0 ? elapsed_us / 1000LL : -1);
         }
-        errno = 0;
-        int n = esp_tls_conn_write(s_tls, (const char *)data + sent, len - sent);
-        if (n <= 0) {
-            int saved_errno = errno;
-            bool would_block = wss_tls_would_block(n);
-            wss_log_tls_write_probe(phase, opcode, frame_payload_len, n,
-                                    saved_errno, would_block, sent, len);
-            return ESP_FAIL;
-        }
-        sent += (size_t)n;
+        return ESP_OK;
     }
-    return ESP_OK;
+
+    int probe_result = stats.transient_retries > 0
+                           ? stats.last_transient_result : stats.last_result;
+    int probe_system_error = stats.transient_retries > 0
+                                 ? stats.last_transient_system_error
+                                 : stats.last_system_error;
+    bool would_block = wss_tls_write_is_transient(
+        NULL, probe_result, probe_system_error);
+    wss_log_tls_write_probe(
+        result == WSS_TX_WRITE_TIMEOUT ? "timeout" : "fatal",
+        phase, opcode, frame_payload_len, probe_result,
+        probe_system_error, would_block, stats.bytes_sent, len,
+        stats.transient_retries, elapsed_us);
+    return ESP_FAIL;
 }
 
 /**
@@ -435,7 +499,10 @@ static esp_err_t wss_ws_send(uint8_t opcode, const uint8_t *payload, size_t len)
     memcpy(hdr + h, mask_key, sizeof(mask_key)); /* 客户端帧必须掩码 */
     h += sizeof(mask_key);
 
-    if (wss_tls_write_all(hdr, h, "ws_header", opcode, len) != ESP_OK) {
+    int64_t frame_deadline_us = esp_timer_get_time() +
+                                (int64_t)WSS_FRAME_WRITE_DEADLINE_MS * 1000LL;
+    if (wss_tls_write_all(hdr, h, "ws_header", opcode, len,
+                          frame_deadline_us) != ESP_OK) {
         return ESP_FAIL;
     }
     if (len > 0) {
@@ -447,7 +514,8 @@ static esp_err_t wss_ws_send(uint8_t opcode, const uint8_t *payload, size_t len)
         for (size_t i = 0; i < len; i++) {
             masked[i] = payload[i] ^ mask_key[i % 4];
         }
-        if (wss_tls_write_all(masked, len, "ws_payload", opcode, len) != ESP_OK) {
+        if (wss_tls_write_all(masked, len, "ws_payload", opcode, len,
+                              frame_deadline_us) != ESP_OK) {
             return ESP_FAIL;
         }
     }
@@ -870,8 +938,10 @@ static esp_err_t wss_ws_handshake(void)
         ESP_LOGE(TAG, "WSS upgrade request too long");
         return ESP_FAIL;
     }
+    int64_t handshake_write_deadline_us = esp_timer_get_time() +
+        (int64_t)WSS_FRAME_WRITE_DEADLINE_MS * 1000LL;
     if (wss_tls_write_all(req, (size_t)n, "http_upgrade", -1,
-                          (size_t)n) != ESP_OK) {
+                          (size_t)n, handshake_write_deadline_us) != ESP_OK) {
         return ESP_FAIL;
     }
 
@@ -945,8 +1015,8 @@ static bool wss_connect(void)
     int sockfd = -1;
     if (esp_tls_get_conn_sockfd(tls, &sockfd) == ESP_OK && sockfd >= 0) {
         wss_set_receive_timeout(sockfd, WSS_HANDSHAKE_READ_TIMEOUT_MS);
-        /* 写方向同样要有界：服务端停止读取时 send 只阻塞到 SO_SNDTIMEO，
-         * 随后写路径按链路故障结束会话并重连，避免推送大文件时永久挂死。 */
+        /* 单次 send 由 SO_SNDTIMEO 限制；返回暂时错误后仍保持同一写入区间，
+         * 由 WebSocket 帧共享的 2 秒绝对期限限制总重试时间。 */
         struct timeval wtv;
         wtv.tv_sec = WSS_WRITE_TIMEOUT_MS / 1000;
         wtv.tv_usec = (WSS_WRITE_TIMEOUT_MS % 1000) * 1000;
@@ -1472,7 +1542,7 @@ void wss_transport_fail_session(void) { s_session_failed = true; }
  * 无需额外加锁。多任务并发直接调用 wss_ws_send 不是线程安全的（违背上面约定）。
  *
  * 错误语义区分两类：参数非法（ESP_ERR_INVALID_ARG，由 wss_ws_send 校验返回）不
- * 影响链路；只有会话级写失败（ESP_FAIL，含 s_tls 为空或写超时）才置位
+ * 影响链路；只有会话级写失败（ESP_FAIL，含永久错误或帧写期限耗尽）才置位
  * s_session_failed，让会话循环据此关闭并重连。上层因此在推送文件失败时只需返回
  * 失败，纠错交给传输层。
  */
