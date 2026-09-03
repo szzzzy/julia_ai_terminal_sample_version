@@ -25,19 +25,21 @@
 #define DISPLAY_THEME_TASK_STACK_SIZE 3072
 #define DISPLAY_THEME_TASK_PRIORITY   3
 
-/* 闲置策略两档：交互后的活跃陪伴，以及默认 S3 待机档。 */
+/* 该状态只表示陪伴计时是否仍可到期，不承载立绘或背光语义。 */
 typedef enum {
-    DISPLAY_ACTIVITY_ACTIVE = 0,   ///< 活跃：立绘睁眼、背光 100%。
-    DISPLAY_ACTIVITY_STANDBY,      ///< 已达到 S3 待机阈值，等待新活动。
+    DISPLAY_ACTIVITY_ACTIVE = 0,
+    DISPLAY_ACTIVITY_STANDBY,
 } display_activity_state_t;
 
 static const char *TAG = "DISPLAY_THEME";
-static TaskHandle_t s_task;                             /* 后台轮询任务句柄（用于判重/防重复 init）。 */
-static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED; /* 保护下面前四个共享字段的临界区锁。 */
-static int64_t s_last_activity_us;                      /* 最近一次用户/语音交互时刻（us）。 */
-static bool s_busy;                                     /* 是否仍在听用户说话、等待回答或播放回答。 */
-static display_activity_state_t s_state = DISPLAY_ACTIVITY_STANDBY; /* 陪伴窗口是否仍有效。 */
-static uint32_t s_generation;                            /* 活动变化编号，用于丢弃过时的超时判断。 */
+static TaskHandle_t s_task;
+/* 下列状态均由 s_lock 保护；时间来自 esp_timer 单调时钟，单位为 us。
+ * generation 使锁外计算结果在新活动到达后失效。 */
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+static int64_t s_last_activity_us;
+static bool s_busy;
+static display_activity_state_t s_state = DISPLAY_ACTIVITY_STANDBY;
+static uint32_t s_generation;
 
 static void post_fsm_event(fsm_event_t event)
 {
@@ -69,8 +71,6 @@ static bool transition_is_current(display_activity_state_t state, uint32_t gener
 static void display_enter_standby(uint32_t generation)
 {
     if (!transition_is_current(DISPLAY_ACTIVITY_STANDBY, generation)) return;
-    /* 普通空闲达到阈值后投递现有用户离开事件，使 S1 进入 S3 待机；
-     * 夜间调度仍单独负责投递进入 S6 睡眠的事件。 */
     post_fsm_event(EVT_USER_LEAVE);
     ESP_LOGI(TAG, "closed-eye breathing after %d seconds",
              CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS);
@@ -103,7 +103,6 @@ static void display_theme_task(void *argument)
             if (idle_us >= sleep_us) {
                 bool enter = false;
                 uint32_t generation = 0;
-                /* 提交前再次确认用户没有恢复交流，避免使用过时的时间结果。 */
                 portENTER_CRITICAL(&s_lock);
                 if (!s_busy && s_state != DISPLAY_ACTIVITY_STANDBY) {
                     s_state = DISPLAY_ACTIVITY_STANDBY;

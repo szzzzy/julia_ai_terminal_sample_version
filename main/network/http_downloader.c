@@ -35,7 +35,6 @@
 
 #include "ota_stability.h"
 
-/** 本模块统一使用的日志标签。 */
 static const char *TAG = "http_downloader";
 
 /** 网络读取缓冲区大小，单位为字节；也是 sink 每次回调的最大数据长度。 */

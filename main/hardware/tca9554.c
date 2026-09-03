@@ -35,23 +35,11 @@ static i2c_master_dev_handle_t s_dev = NULL;
 /* 保证一次“读取旧值、修改一位、写回”完整执行，避免另一任务的引脚变化被覆盖。 */
 static SemaphoreHandle_t s_lock = NULL;
 
-/**
- * @brief 读单个寄存器（阻塞式，超时 100ms）。
- * @param[in]  reg 寄存器地址 0x00~0x03。
- * @param[out] val 读出的值。
- * @return 总线传输结果（ESP_OK 或 i2c_master 的错误码）。
- */
 static esp_err_t read_reg(uint8_t reg, uint8_t *val)
 {
     return i2c_master_transmit_receive(s_dev, &reg, 1, val, 1, 100);
 }
 
-/**
- * @brief 写单个寄存器（阻塞式，超时 100ms）。
- * @param[in] reg 寄存器地址。
- * @param[in] val 要写进寄存器的值。
- * @return 总线传输结果。
- */
 static esp_err_t write_reg(uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = { reg, val };
@@ -69,7 +57,7 @@ static esp_err_t write_reg(uint8_t reg, uint8_t val)
 esp_err_t tca9554_init(void)
 {
     if (s_dev) {
-        return ESP_OK; /* 幂等：已初始化 */
+        return ESP_OK;
     }
     i2c_master_bus_config_t bus_cfg = {
         .i2c_port = I2C_NUM_0,
@@ -130,7 +118,7 @@ esp_err_t tca9554_write_pin(uint8_t pin, bool level)
         }
         err = write_reg(TCA9554_REG_OUTPUT, out);
         if (err == ESP_OK) {
-            cfg &= (uint8_t)~(1u << pin); /* 方向：输出 */
+            cfg &= (uint8_t)~(1u << pin);
             err = write_reg(TCA9554_REG_CONFIG, cfg);
         }
     }

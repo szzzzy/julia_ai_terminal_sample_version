@@ -63,30 +63,28 @@ static const uint16_t s_sine_gamma22_q10[BREATHE_LUT_SEGMENTS + 1] = {
     175,153,133,115,99,84,71,59,48,39,32,25,20,15,11,8,6,4,3,2,1,1,0,
     0,0,0,0,0,0
 };
-static volatile uint8_t s_percent;             /* 当前亮度百分比（尽力一致）。 */
-static volatile bool s_breathing;              /* 呼吸模式是否运行。 */
-static volatile bool s_gamma_enabled = true;   /* 是否启用 gamma 曲线。 */
-static uint8_t s_min_percent, s_max_percent;   /* 呼吸亮度上下限。 */
-static uint16_t s_curve_index, s_segments;     /* 当前曲线段/总段数。 */
-static uint32_t s_period_ms;                   /* 呼吸周期。 */
-static uint32_t s_segment_ms;                  /* 每段时长 = period/segments。 */
-static volatile uint32_t s_generation;         /* 参数版本号，避免旧任务用已更新的配置。 */
-static volatile TickType_t s_segment_started_tick; /* 当前段的起始 tick（用于 vTaskDelayUntil）。 */
+static volatile uint8_t s_percent;
+static volatile bool s_breathing;
+static volatile bool s_gamma_enabled = true;
+static uint8_t s_min_percent, s_max_percent;
+static uint16_t s_curve_index, s_segments;
+static uint32_t s_period_ms;
+static uint32_t s_segment_ms;
+/* 配置变化递增 generation；呼吸任务据此放弃旧参数剩余的 fade 段。 */
+static volatile uint32_t s_generation;
+static volatile TickType_t s_segment_started_tick;
 static TaskHandle_t s_breathe_task;
-static SemaphoreHandle_t s_fade_done;          /* 硬件 fade 完成信号（irq 给）。 */
+/* ISR 只发送完成信号，下一段 LEDC 配置仍由呼吸任务执行。 */
+static SemaphoreHandle_t s_fade_done;
 
 
-/* 百分比 → LEDC 占空比（10-bit），并夹到 [0,100]。 */
 static uint32_t duty_for(uint8_t percent)
 {
     return BL_MAX_DUTY * (percent > 100U ? 100U : percent) / 100U;
 }
 
-/* 计算曲线第 index 段的占空比：
- *   - 最小亮度 0 且启用 zero-hold 时，在首尾各留一段全灭（降功耗）；
- *   - 用 LUT（gamma 或线性）取该段的归一化幅度；
- *   - 按 min/max duty 线性缩放到实际 PWM 占空比（避免端点被 gamma 改变）。
- */
+/* zero-hold 用全黑驻留换取较低平均功耗；先归一化 LUT 再映射亮度，
+ * 避免 gamma 校正改变配置的明暗端点。 */
 static uint32_t curve_duty(uint16_t index)
 {
     if (s_min_percent == 0U && BREATHE_ZERO_HOLD_PERCENT > 0U) {
@@ -102,8 +100,7 @@ static uint32_t curve_duty(uint16_t index)
     return minimum + ((maximum - minimum) * lut[lut_index] + 511U) / 1023U;
 }
 
-/* LEDC fade 完成 ISR（IRAM）：唤醒 breathe_task，让它推进到下一段。
- * 返回是否需要上下文切换。 */
+/* ISR 不修改呼吸状态，只唤醒 owner task，避免与参数更新竞争。 */
 static bool IRAM_ATTR fade_done(const ledc_cb_param_t *param, void *arg)
 {
     (void)param;
@@ -113,17 +110,14 @@ static bool IRAM_ATTR fade_done(const ledc_cb_param_t *param, void *arg)
     return wake == pdTRUE;
 }
 
-/* 启动某一段：让 LEDC 硬件在 s_segment_ms 内渐到该段目标占空比（不等待）。 */
 static void start_segment(uint16_t index)
 {
     ledc_set_fade_with_time(BL_MODE, BL_CHANNEL, curve_duty(index), s_segment_ms);
     ledc_fade_start(BL_MODE, BL_CHANNEL, LEDC_FADE_NO_WAIT);
 }
 
-/* 呼吸任务：被 IRAM fade_done ISR 唤醒后推进到下一段。若收到新版参数
- * （generation 变化）则重置相位；否则按段边界对齐，发新一轮硬件 fade。
- * 说明：当相邻 gamma 样本量化到相同 duty 时 LEDC 会立即上报完成，这里不逐点做软件
- * PWM，而是等段边界再启动下一段，保持相位均匀。 */
+/* 相邻 gamma 样本量化为相同 duty 时，LEDC 会立即报告完成；owner task 仍等待原定
+ * 段边界，避免退化为软件 PWM。generation 变化时旧相位作废并按新配置重启。 */
 static void breathe_task(void *arg)
 {
     (void)arg;
@@ -140,10 +134,6 @@ static void breathe_task(void *arg)
             generation = current_generation;
             segment_deadline = s_segment_started_tick;
         }
-        /* LEDC reports an immediate completion when adjacent gamma samples
-         * quantize to the same duty. Keep phase time uniform without doing
-         * software PWM updates; the dedicated task only waits for the next
-         * segment boundary, then launches another hardware fade. */
         vTaskDelayUntil(&segment_deadline, pdMS_TO_TICKS(s_segment_ms));
         if (!s_breathing || generation != s_generation) continue;
         uint32_t duty = curve_duty(s_curve_index);
@@ -163,9 +153,7 @@ static void breathe_task(void *arg)
     }
 }
 
-/* 初始化背光：先把 GPIO 拉低（保证开机背光灭），配置 GPIO/LEDC 定时器与通道，
- * 安装 fade 中断并注册捕获回调，创建呼吸任务。注意 init 时 duty 为 0，因此直到
- * 调用方显式点亮（如首帧渲染完成后 julia_backlight_set/fade_to）背光都保持关闭。 */
+/* 初始化完成后 duty 仍为零；只有首帧提交者可以显式点亮，避免暴露未初始化画面。 */
 esp_err_t julia_backlight_init(void)
 {
     gpio_set_level(JULIA_BACKLIGHT_GPIO, 0);
@@ -191,7 +179,6 @@ esp_err_t julia_backlight_init(void)
     return ESP_OK;
 }
 
-/* 停止呼吸：置位 s_breathing=false 并停止 LEDC fade。 */
 void julia_backlight_breathe_stop(void)
 {
     s_breathing = false;
@@ -229,7 +216,6 @@ esp_err_t julia_backlight_wait_fade(uint32_t timeout_ms)
                ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
-/* 以默认段数启动呼吸。 */
 esp_err_t julia_backlight_breathe_start(uint8_t min_percent, uint8_t max_percent,
                                         uint32_t period_ms)
 {
@@ -237,9 +223,8 @@ esp_err_t julia_backlight_breathe_start(uint8_t min_percent, uint8_t max_percent
                                              BREATHE_DEFAULT_SEGMENTS);
 }
 
-/* 以指定段数启动呼吸。参数非法（min>=max/max>100/段数越界/每段过短）返回 INVALID_ARG。
- * 启动时把通道设为 min 亮度并从第 1 段开始；每次配置都会递增 s_generation，
- * 让任务丢弃旧配置的剩余段。 */
+/* period/segments 必须保证单段不少于 BREATHE_MIN_SEGMENT_MS；每次有效配置递增
+ * generation，使 owner task 不再推进旧参数对应的剩余 fade。 */
 esp_err_t julia_backlight_breathe_start_ex(uint8_t min_percent, uint8_t max_percent,
                                            uint32_t period_ms, uint16_t segments)
 {
@@ -281,7 +266,6 @@ bool julia_backlight_breathing(void) { return s_breathing; }
 uint8_t julia_backlight_get_percent(void) { return s_percent; }
 uint32_t julia_backlight_get_duty(void) { return ledc_get_duty(BL_MODE, BL_CHANNEL); }
 int julia_backlight_get_gpio_level(void) { return gpio_get_level(JULIA_BACKLIGHT_GPIO); }
-/* 强制熄灭：停呼吸、停 LEDC、拉低 GPIO、清百分比。 */
 void julia_backlight_force_off(void)
 {
     julia_backlight_breathe_stop();

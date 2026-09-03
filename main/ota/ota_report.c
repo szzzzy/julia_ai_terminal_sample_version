@@ -37,7 +37,6 @@
 #include "ota_control_plane.h"
 #include "ota_stability.h"
 
-/** 本模块统一使用的日志标签。 */
 static const char *TAG = "ota_report";
 
 /** ota_report NVS blob 的布局版本，改变结构体布局时必须递增。 */

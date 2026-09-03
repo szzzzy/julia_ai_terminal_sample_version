@@ -38,7 +38,6 @@
 #include "ota_control_plane.h"
 #include "ota_stability.h"
 
-/** 本模块统一使用的日志标签。 */
 static const char *TAG = "audio_engine";
 
 /** 本组宏共同约束"掉电安全 + NVS 寿命"，改动任一都需重新评估： */

@@ -35,7 +35,6 @@
 /** 同时打开的最大文件数（voice_service 单文件推送 + 预留）。 */
 #define SD_CARD_MAX_FILES 4
 
-/** 本模块统一使用的日志标签。 */
 static const char *TAG = "sd_card";
 
 /** 保护挂载状态标志的自旋锁；挂载本身在 app_main 启动路径中串行执行。 */
@@ -59,8 +58,9 @@ esp_err_t sd_card_start(void)
     }
 
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.flags = SDMMC_HOST_FLAG_1BIT | SDMMC_HOST_FLAG_DEINIT_ARG; /* 强制 1-bit */
-    host.max_freq_khz = CONFIG_SD_CARD_FREQ_KHZ;                    /* 默认 20 MHz */
+    /* D3/CS 不连接主芯片，4-bit 模式无法满足引脚契约，只能使用 1-bit。 */
+    host.flags = SDMMC_HOST_FLAG_1BIT | SDMMC_HOST_FLAG_DEINIT_ARG;
+    host.max_freq_khz = CONFIG_SD_CARD_FREQ_KHZ;
 
     sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
     slot.clk = CONFIG_SD_CARD_PIN_CLK;
@@ -68,7 +68,7 @@ esp_err_t sd_card_start(void)
     slot.d0 = CONFIG_SD_CARD_PIN_D0;
     slot.d1 = GPIO_NUM_NC;
     slot.d2 = GPIO_NUM_NC;
-    slot.d3 = GPIO_NUM_NC; /* CS 在 TCA9554 上，不在 GPIO */
+    slot.d3 = GPIO_NUM_NC;
     slot.width = 1;
     slot.flags = 0;
 

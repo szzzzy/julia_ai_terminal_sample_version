@@ -144,7 +144,7 @@ static lv_color_t *s_doze_frame;      /* 预加载的 doze 帧（PSRAM，360x360
 static bool s_doze_frame_loaded;      /* doze 帧是否成功从 SD 预加载。 */
 static uint8_t *s_png_data;           /* SD 上 reference.png 的整块数据。 */
 static lv_img_dsc_t s_png_image;      /* 由 s_png_data 描述的 LVGL 图像描述符。 */
-static esp_lcd_panel_handle_t s_panel;/* 当前 LCD panel 句柄。 */
+static esp_lcd_panel_handle_t s_panel;
 static volatile julia_sub_state_t s_current_state = JULIA_SUB_STATE_S1_1_NEAR_STANDBY;
 static volatile bool s_transitioning; /* 正在播放转场，暂停眨眼/微动等后台动画。 */
 static volatile bool s_blinking;      /* 眨眼进行中（blink_task 置位）。 */

@@ -59,7 +59,6 @@
 #include "ota_engine.h"
 #include "ota_report.h"
 
-/** 本模块统一使用的日志标签。 */
 static const char *TAG = "mqtt_comm";
 
 /** TLS verification parameters are valid only for secure MQTT URI schemes. */

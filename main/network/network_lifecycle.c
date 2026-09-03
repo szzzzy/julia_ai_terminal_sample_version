@@ -47,7 +47,6 @@ typedef struct {
     uint32_t attempt;
 } network_service_slot_t;
 
-/* 整个程序只创建一个 Wi-Fi 恢复任务和一组系统事件监听。 */
 static TaskHandle_t s_network_task;
 static esp_netif_t *s_wifi_netif;
 static esp_event_handler_instance_t s_wifi_start_handler;

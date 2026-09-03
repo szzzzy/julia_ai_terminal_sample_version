@@ -31,7 +31,6 @@
 
 #if CONFIG_VOICE_PUSH_DEMO_ENABLE
 
-/** 本模块统一使用的日志标签。 */
 static const char *TAG = "voice_push_demo";
 
 /** 客户端未启动（ESP_ERR_INVALID_STATE）或队列满（ESP_ERR_NO_MEM）时的重试间隔。 */

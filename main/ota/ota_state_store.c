@@ -13,7 +13,6 @@
 
 #include "ota_state_store.h"
 
-/** 本模块统一使用的日志标签。 */
 static const char *TAG = "ota_state_store";
 /** OTA 断点状态使用的独立 NVS namespace，不与业务配置混用。 */
 static const char *NAMESPACE = "ota_resume";

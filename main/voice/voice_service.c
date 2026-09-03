@@ -46,7 +46,6 @@ __attribute__((weak)) bool julia_wireless_sd_lock(uint32_t timeout_ms)
 }
 __attribute__((weak)) void julia_wireless_sd_unlock(void) {}
 
-/** 本模块统一使用的日志标签。 */
 static const char *TAG = "voice_service";
 
 static void post_fsm_event(fsm_event_t event)
@@ -82,8 +81,8 @@ typedef enum {
 } voice_job_type_t;
 
 typedef struct {
-    voice_job_type_t type;                  /**< 作业类型。 */
-    size_t len;                             /**< data 的有效字节数。 */
+    voice_job_type_t type;
+    size_t len;
     uint8_t data[WSS_TRANSPORT_MAX_PAYLOAD]; /**< URI 或控制消息内容。 */
 } voice_job_t;
 
@@ -975,14 +974,8 @@ static void voice_service_on_session_end(wss_transport_end_reason_t reason)
     julia_idle_display_set_busy(false);
 }
 
-/**
- * @brief 把一条作业复制到有界命令队列。
- *
- * @param[in] type 作业类型。
- * @param[in] data 作业数据首地址，len 为 0 时可为 NULL。
- * @param[in] len  数据长度，不超过队列块数据容量。
- * @return ESP_OK 已入队；ESP_ERR_NO_MEM 队列已满；ESP_ERR_INVALID_STATE 尚未启动。
- */
+/* data 在返回前完成复制，len 为 0 时允许为 NULL。成功只表示控制队列已接收，
+ * 不表示 WSS 已发送或业务状态已经生效。 */
 static esp_err_t voice_service_enqueue(voice_job_type_t type, const uint8_t *data, size_t len)
 {
     if (len > WSS_TRANSPORT_MAX_PAYLOAD) {

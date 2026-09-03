@@ -113,7 +113,6 @@
 #include "wss_transport.h"
 #include "wss_tx_writer.h"
 
-/** 本模块统一使用的日志标签。 */
 static const char *TAG = "wss_transport";
 
 /** WebSocket 帧头最长字节数（2 基础 + 8 扩展长度 + 4 掩码 key）。 */
@@ -515,7 +514,7 @@ static esp_err_t wss_ws_send(uint8_t opcode, const uint8_t *payload, size_t len)
     }
     uint8_t hdr[WSS_FRAME_HDR_SIZE];
     size_t h = 0;
-    hdr[h++] = 0x80 | opcode;               /* FIN + opcode */
+    hdr[h++] = 0x80 | opcode;
 
     uint8_t mask_key[4];
     esp_fill_random(mask_key, sizeof(mask_key));
@@ -906,11 +905,11 @@ static bool wss_ws_validate_response(const char *resp, size_t resp_len, const ch
         }
         size_t line_len = (size_t)(eol - p);
         if (line_len == 0) {
-            break;                          /* 空行：头部结束 */
+            break;
         }
         const char *colon = memchr(p, ':', line_len);
         if (colon == NULL) {
-            return false;                   /* 非法的头部行 */
+            return false;
         }
         size_t name_len = (size_t)(colon - p);
         const char *val = colon + 1;
@@ -1259,7 +1258,8 @@ static void wss_run_session(void)
         /* 先收一帧再处理上行：持续 MIC 上传时也要优先看到服务端 CLOSE，避免服务端
          * 停止读取后，本机先因排队 PCM 写失败而跳过关闭握手。空闲读取仅阻塞 20ms。 */
         uint8_t op = 0;
-        static uint8_t frame_payload[WSS_TRANSPORT_MAX_PAYLOAD + 1]; /* 大缓冲留在静态区 */
+        /* 会话任务是唯一使用者，因此可复用静态缓冲以避免占用任务栈。 */
+        static uint8_t frame_payload[WSS_TRANSPORT_MAX_PAYLOAD + 1];
         size_t len = 0;
         bool idle = false;
         bool fin = true;
@@ -1363,7 +1363,6 @@ static void wss_run_session(void)
                 wss_send_protocol_close(1002);
                 break;
             }
-            /* PONG（0xA）：待定探测已在上方统一清除。 */
             if (!wss_service_outbound()) break;
             continue;
         }
@@ -1398,7 +1397,7 @@ static void wss_run_session(void)
         memcpy(s_msg_payload + s_msg_len, frame_payload, len);
         s_msg_len += len;
         if (!fin) {
-            continue;                       /* 等待后续分片 */
+            continue;
         }
 
         uint8_t msg_opcode = s_msg_opcode;
@@ -1413,14 +1412,12 @@ static void wss_run_session(void)
                 break;
             }
             if (s_config.on_text != NULL) {
-                /* 完整文本消息交给上层业务回调。 */
                 s_config.on_text(s_msg_payload, msg_len);
                 if (s_session_failed) {
                     break;
                 }
             }
         } else if (msg_opcode == 0x2) {
-            /* 服务端二进制消息（下行 PCM 等）交给上层业务回调。 */
             if (s_config.on_binary != NULL) {
                 s_config.on_binary(s_msg_payload, msg_len);
                 if (s_session_failed) {

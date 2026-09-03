@@ -28,7 +28,6 @@
 #include "ota_engine.h"
 #include "ota_types.h"
 
-/** 本模块统一使用的日志标签。 */
 static const char *TAG = "audio_service";
 
 /**
