@@ -46,16 +46,16 @@
 | BOOT-03 | 动画任务创建失败、显示初始化失败、网络很快取得 IP | 动画任务失败顺序回退；关键显示初始化失败进入 S7，网络回调不能提前开放交互 |
 | BOOT-04 | 板级音频、语音服务或 FSM 初始化失败 | 保存 `julia_fault` NVS 快照；可呈现时进入 S7 三秒后复位 |
 | BOOT-05 | 连续制造相同关键初始化故障 | 每次记录递增 sequence；核对不会被误分类为普通网络故障 |
-| UI-01 | 正常 MIC_START → MIC_STOP → SPKS／PCM → SPKE | 听／想／说／待机相位、嘴型和忙碌标志一致 |
-| UI-01A | S3/S5/S6 检测唤醒词 | 进入复用“听”呈现的 S4；本地 `EVT_USER_CALL` 不得代替服务端语义判定 |
-| UI-01B | 收到 MQTT `intent_result` | `normal` 不改变状态；S4/S2 听想阶段中 `goodnight` 直接进入 S6，`dismiss` 进入 S5；随后 `MIC_STOP` 不再推进对话 |
-| UI-02 | 非 busy 陪伴达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 600 秒） | 进入 S3 待机、闭眼与背光呼吸；同时检查 MIC 仍按服务器模式上传 |
-| UI-02A | S3 连续驻留达到 `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS`（默认 1800 秒） | 投递 `EVT_STANDBY_TIMEOUT` 并进入 S6；中途唤醒会取消旧计时 |
+| UI-01 | S4 中有效话语 MIC_START → MIC_STOP → SPKS／PCM → SPKE | MIC_START 保持 S4；MIC_STOP 进入 S2.2；正常 SPKS 进入 S2.3；实际播完回 S1 |
+| UI-01A | S3/S5/S6 收到 `wake_detected` | 先提交 S4 并回匹配 `interaction_id` 的 `state_ready`；唤醒回应期间闭眼底图上的独立嘴型随 PCM 动作；播完闭嘴并仍保持 S4 |
+| UI-01B | 收到 MQTT `intent_result` | `normal` 不改变状态；`goodnight` 零语音进入 S6；`dismiss` 零语音进入 S5，背光固定为配置值（默认 50%）；随后 `MIC_STOP` 不再推进对话 |
+| UI-02 | 非 busy 陪伴达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 600 秒） | 从 S1 的 50% 固定背光进入 S3 待机、闭眼与 5%–30% 背光呼吸；同时检查 MIC 仍按服务器模式上传 |
+| UI-02A | S3 连续驻留达到 `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS`（默认 300 秒） | 投递 `EVT_STANDBY_TIMEOUT` 并进入 S6，停止呼吸、背光熄灭且面板进入睡眠；中途唤醒会取消旧计时 |
 | UI-02B | S5 连续驻留达到 `CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS`（默认 1800 秒） | 投递 `EVT_SILENT_TIMEOUT` 并回到 S3；中途唤醒会取消旧计时 |
 | UI-03 | 听音、思考或播放超过普通闲置阈值 | 不被普通闲置策略抢占；业务等待超时按已知限制记录 |
 | UI-04 | 有效 RTC／SNTP，覆盖 22 点、23 点、07 点 | 22 点事件当前不迁移；夜间宽限进入 S6；07 点只恢复显示，仍等待唤醒词 |
 | UI-05 | 无效 RTC／未同步时间 | 夜间调度不依赖无效墙钟误触发 |
-| UI-06 | S6 中轻触、桌面振动和明显搬动设备 | 轻微振动不触发；持续明显运动约 800ms 后恢复显示；FSM 仍为 S6；10 秒内不重复触发 |
+| UI-06 | S6 中轻触、桌面振动和明显搬动设备 | 200ms 采样下轻微振动不触发；持续明显运动约 800ms 后唤醒面板并恢复显示；FSM 仍为 S6；10 秒内不重复触发 |
 | UI-07 | OTA 任务成功、普通任务失败、链路失败、严重本机故障 | 分别验证 S8→S0、S8→S1、保持 S8、S8→S7 |
 | UI-08 | 连续观察左右眼半闭／全闭／睁眼循环 | 闭眼时底图下缘无残留；睁眼恢复原坐标；上下边缘无新的接缝 |
 | UI-09 | 依次覆盖 S0～S8 和 S2.1／S2.2／S2.3 | `(60,100)` 黑色状态码完整显示且始终置顶；S3 保持闭眼待机；S5/S7/S8 共用 Companion 调试底图 |
@@ -67,6 +67,7 @@
 | VOICE-01 | 默认模式建立 WSS | 未发 MIC_START 前已有 PCM1，界面保持待机 |
 | VOICE-02 | 接收一段 PCM1 | 魔数、载荷长度、序号、字节和正确；记录缺口，不假设跨会话清零 |
 | VOICE-03 | MIC_STOP 后观察上行 | 仍有 PCM1，进入思考；不得按“麦克风静音”验收 |
+| VOICE-03A | 输入固定声压的测试音，检查 AFE 与 PCM1 | 两路都应用 70% 数字增益；峰值无削波，PCM1 dBFS 与缩放后样本一致 |
 | VOICE-04 | 16kHz／24kHz 播放 | 顺序为 SPKS → 偶数字节 PCM → SPKE；音量、声音和嘴型合理 |
 | VOICE-05 | 未开播 PCM、奇数字节 PCM、超长消息 | 不把非法音频送入播放；连接关闭与忽略行为按协议记录 |
 | VOICE-06 | 首包／播放中暂停 1 秒，再继续 PCM；另测 15 秒无数据 | 短暂停顿继续播放；15 秒且缓冲为空时明确超时，中止后回到可交互状态 |

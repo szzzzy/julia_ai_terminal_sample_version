@@ -42,7 +42,7 @@
 #warning "JULIA_BACKLIGHT_GPIO undefined; falling back to GPIO 38"
 #endif
 #ifndef JULIA_DISPLAY_LOG
-#define JULIA_DISPLAY_LOG 1
+#define JULIA_DISPLAY_LOG 0
 #endif
 
 #define BL_MODE LEDC_LOW_SPEED_MODE

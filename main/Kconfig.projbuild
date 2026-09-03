@@ -347,6 +347,23 @@ menu "Example Configuration"
             (FILE_SEND SD:/<name>, MIC_START, MIC_STOP). Commands are routed to
             the voice_service module and never touch the OTA control plane.
 
+    config JULIA_MIC_GAIN_PERCENT
+        int "Microphone digital gain (percent)"
+        range 0 200
+        default 70
+        help
+            Digital scale applied to microphone PCM before both the local AFE
+            and WSS upload paths. 100 percent is unity gain; values below 100
+            attenuate and values above 100 amplify with saturation.
+
+    config JULIA_SPEAKER_VOLUME_PERCENT
+        int "Default speaker volume (percent)"
+        range 0 100
+        default 50
+        help
+            Speaker volume applied at startup. The server can still override
+            this value at runtime with a valid SPKV command.
+
     menu "WSS voice stream configuration"
 
         config JULIA_SERVER_WAKE_ENABLE
@@ -570,7 +587,7 @@ menu "Example Configuration"
         config JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS
             int "Seconds in S3 before sleep"
             range 60 86400
-            default 1800
+            default 300
             help
                 Continuous time in S3 standby before entering S6 sleep.
                 The RTC night schedule remains an independent earlier trigger.
@@ -581,6 +598,22 @@ menu "Example Configuration"
             default 1800
             help
                 Continuous time in S5 silent state before returning to S3 standby.
+
+        config JULIA_COMPANION_BRIGHTNESS_PERCENT
+            int "S1 companion-state brightness (percent)"
+            range 0 100
+            default 50
+            help
+                Fixed backlight level used in the resident S1 companion state.
+                Interactive states remain at full brightness.
+
+        config JULIA_SILENT_BRIGHTNESS_PERCENT
+            int "S5 silent-state brightness (percent)"
+            range 0 100
+            default 50
+            help
+                Fixed backlight level used in S5. The default is deliberately
+                lower than active states so silent mode is visually distinct.
 
         config JULIA_FAULT_RESET_DELAY_MS
             int "S7 reset delay (ms)"
@@ -607,17 +640,17 @@ menu "Example Configuration"
                 to zero to hold the first recorded serious fault in S7.
 
         config JULIA_DISPLAY_BREATHE_MIN_PERCENT
-            int "Active breathing minimum percentage"
+            int "S3 standby breathing minimum percentage"
             range 0 100
             default 5
 
         config JULIA_DISPLAY_BREATHE_MAX_PERCENT
-            int "Active breathing maximum percentage"
+            int "S3 standby breathing maximum percentage"
             range 0 100
-            default 100
+            default 30
 
         config JULIA_DISPLAY_BREATHE_PERIOD_MS
-            int "Active breathing period (ms)"
+            int "S3 standby breathing period (ms)"
             range 500 30000
             default 4000
 
@@ -675,13 +708,13 @@ menu "Example Configuration"
         config JULIA_IMU_MOTION_SAMPLE_MS
             int "IMU motion sample period (ms)"
             range 20 1000
-            default 100
+            default 200
             depends on JULIA_IMU_MOTION_ENABLE
 
         config JULIA_IMU_MOTION_CONFIRM_FRAMES
             int "Consecutive IMU motion frames"
             range 1 100
-            default 8
+            default 4
             depends on JULIA_IMU_MOTION_ENABLE
 
         config JULIA_IMU_MOTION_COOLDOWN_MS

@@ -90,11 +90,14 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_tls.h"
 #include "esp_tls_errors.h"
+#include "esp_wifi.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/md.h"
 #include "psa/crypto.h"
@@ -172,6 +175,81 @@ static size_t s_msg_len;
 static uint8_t s_msg_opcode;
 static bool s_msg_active;
 
+/* 会话诊断计数仅由 WSS 会话任务读写，用于在断链瞬间还原现场。 */
+static int64_t s_session_started_us;
+static int64_t s_last_rx_us;
+static int64_t s_last_tx_us;
+static uint64_t s_tx_frames;
+static uint64_t s_tx_payload_bytes;
+static uint64_t s_rx_frames;
+
+/** 在销毁 TLS 句柄前记录一次有界现场快照，不在正常音频路径刷日志。 */
+static void wss_log_session_probe(const char *reason)
+{
+    int64_t now_us = esp_timer_get_time();
+    int64_t session_ms = s_session_started_us > 0
+                             ? (now_us - s_session_started_us) / 1000LL
+                             : -1;
+    int64_t rx_age_ms = s_last_rx_us > 0 ? (now_us - s_last_rx_us) / 1000LL : -1;
+    int64_t tx_age_ms = s_last_tx_us > 0 ? (now_us - s_last_tx_us) / 1000LL : -1;
+    UBaseType_t audio_queued = s_cmd_queue != NULL ? uxQueueMessagesWaiting(s_cmd_queue) : 0;
+    UBaseType_t control_queued =
+        s_control_queue != NULL ? uxQueueMessagesWaiting(s_control_queue) : 0;
+    wifi_ap_record_t ap_info;
+    int rssi = esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK ? ap_info.rssi : INT_MIN;
+
+    ESP_LOGW(TAG,
+             "WSS probe reason=%s session_ms=%" PRIi64
+             " rx_age_ms=%" PRIi64 " tx_age_ms=%" PRIi64
+             " tx_frames=%" PRIu64 " tx_payload_bytes=%" PRIu64
+             " rx_frames=%" PRIu64 " q_audio=%u q_control=%u",
+             reason, session_ms, rx_age_ms, tx_age_ms, s_tx_frames,
+             s_tx_payload_bytes, s_rx_frames, (unsigned)audio_queued,
+             (unsigned)control_queued);
+    ESP_LOGW(TAG,
+             "WSS probe resources free_heap=%u min_free_heap=%u internal_free=%u "
+             "internal_min=%u internal_largest=%u stack_hwm_words=%u rssi=%d",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)esp_get_minimum_free_heap_size(),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)uxTaskGetStackHighWaterMark(NULL), rssi);
+}
+
+/** 读取并清除 ESP-TLS 保存的最后错误；仅在写失败、会话即将重建时调用。 */
+static void wss_log_tls_write_probe(const char *phase, int opcode,
+                                    size_t frame_payload_len, int result,
+                                    int saved_errno, bool would_block,
+                                    size_t sent, size_t requested)
+{
+    int tls_system_error = 0;
+    int tls_mbedtls_error = 0;
+    int tls_esp_error = 0;
+    esp_tls_error_handle_t error_handle = NULL;
+    if (s_tls != NULL &&
+        esp_tls_get_error_handle(s_tls, &error_handle) == ESP_OK &&
+        error_handle != NULL) {
+        (void)esp_tls_get_and_clear_error_type(
+            error_handle, ESP_TLS_ERR_TYPE_SYSTEM, &tls_system_error);
+        (void)esp_tls_get_and_clear_error_type(
+            error_handle, ESP_TLS_ERR_TYPE_MBEDTLS, &tls_mbedtls_error);
+        (void)esp_tls_get_and_clear_error_type(
+            error_handle, ESP_TLS_ERR_TYPE_ESP, &tls_esp_error);
+    }
+
+    ESP_LOGE(TAG,
+             "WSS TLS write probe phase=%s opcode=0x%x frame_payload=%u "
+             "progress=%u/%u result=%d errno=%d would_block=%u "
+             "tls_system=%d tls_mbedtls=-0x%x tls_esp=0x%x",
+             phase, opcode, (unsigned)frame_payload_len, (unsigned)sent,
+             (unsigned)requested, result, saved_errno, (unsigned)would_block,
+             tls_system_error,
+             tls_mbedtls_error < 0 ? -tls_mbedtls_error : tls_mbedtls_error,
+             tls_esp_error);
+    wss_log_session_probe("tls_write_failure");
+}
+
 /** esp-tls 在超时时可能返回 WANT_READ/WANT_WRITE，也可能保留 socket errno。 */
 static bool wss_tls_would_block(int result)
 {
@@ -207,15 +285,22 @@ static void wss_set_receive_timeout(int sockfd, unsigned timeout_ms)
  * @param[in] len  数据长度。
  * @return ESP_OK 全部写出；ESP_FAIL 会话无效或写出失败。
  */
-static esp_err_t wss_tls_write_all(const void *data, size_t len)
+static esp_err_t wss_tls_write_all(const void *data, size_t len,
+                                   const char *phase, int opcode,
+                                   size_t frame_payload_len)
 {
     size_t sent = 0;
     while (sent < len) {
         if (s_tls == NULL) {
             return ESP_FAIL;
         }
+        errno = 0;
         int n = esp_tls_conn_write(s_tls, (const char *)data + sent, len - sent);
         if (n <= 0) {
+            int saved_errno = errno;
+            bool would_block = wss_tls_would_block(n);
+            wss_log_tls_write_probe(phase, opcode, frame_payload_len, n,
+                                    saved_errno, would_block, sent, len);
             return ESP_FAIL;
         }
         sent += (size_t)n;
@@ -350,7 +435,7 @@ static esp_err_t wss_ws_send(uint8_t opcode, const uint8_t *payload, size_t len)
     memcpy(hdr + h, mask_key, sizeof(mask_key)); /* 客户端帧必须掩码 */
     h += sizeof(mask_key);
 
-    if (wss_tls_write_all(hdr, h) != ESP_OK) {
+    if (wss_tls_write_all(hdr, h, "ws_header", opcode, len) != ESP_OK) {
         return ESP_FAIL;
     }
     if (len > 0) {
@@ -362,10 +447,13 @@ static esp_err_t wss_ws_send(uint8_t opcode, const uint8_t *payload, size_t len)
         for (size_t i = 0; i < len; i++) {
             masked[i] = payload[i] ^ mask_key[i % 4];
         }
-        if (wss_tls_write_all(masked, len) != ESP_OK) {
+        if (wss_tls_write_all(masked, len, "ws_payload", opcode, len) != ESP_OK) {
             return ESP_FAIL;
         }
     }
+    s_last_tx_us = esp_timer_get_time();
+    s_tx_frames++;
+    s_tx_payload_bytes += len;
     return ESP_OK;
 }
 
@@ -782,7 +870,8 @@ static esp_err_t wss_ws_handshake(void)
         ESP_LOGE(TAG, "WSS upgrade request too long");
         return ESP_FAIL;
     }
-    if (wss_tls_write_all(req, (size_t)n) != ESP_OK) {
+    if (wss_tls_write_all(req, (size_t)n, "http_upgrade", -1,
+                          (size_t)n) != ESP_OK) {
         return ESP_FAIL;
     }
 
@@ -1015,6 +1104,12 @@ static void wss_run_session(void)
     int64_t last_rx_us = esp_timer_get_time();
     int64_t last_ping_us = last_rx_us;
     bool pong_pending = false;
+    s_session_started_us = last_rx_us;
+    s_last_rx_us = last_rx_us;
+    s_last_tx_us = last_rx_us;
+    s_tx_frames = 0;
+    s_tx_payload_bytes = 0;
+    s_rx_frames = 0;
 
     /* Do not replay audio or control requests left by a disconnected session. */
     xQueueReset(s_cmd_queue);
@@ -1071,6 +1166,8 @@ static void wss_run_session(void)
         /* 有下行帧：链路确认存活；取消待定 PONG 探测并重置保活计时。RFC 6455
          * 只要求对 PING 回 PONG，但任何下行帧都能证明链路可用，因此不限于 PONG。 */
         last_rx_us = esp_timer_get_time();
+        s_last_rx_us = last_rx_us;
+        s_rx_frames++;
         pong_pending = false;
 
         if (op >= 0x8) {                    /* 控制帧：CLOSE/PING/PONG */
@@ -1195,6 +1292,7 @@ static void wss_run_session(void)
     portENTER_CRITICAL(&s_start_lock);
     s_session_ready = false;
     portEXIT_CRITICAL(&s_start_lock);
+    wss_log_session_probe("session_end");
     (void)esp_tls_conn_destroy(s_tls);
     s_tls = NULL;
     s_msg_active = false;

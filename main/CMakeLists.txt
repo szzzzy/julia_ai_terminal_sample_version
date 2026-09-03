@@ -39,6 +39,7 @@ set(srcs
     # 存储与板级硬件。
     "storage/sd_card.c"
     "hardware/tca9554.c"
+    "hardware/julia_power.c"
     "hardware/breathing_led.c"
     "hardware/julia_led.c"
     "hardware/pcf85063_shared.c"

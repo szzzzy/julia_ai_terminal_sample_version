@@ -24,6 +24,8 @@ int main(void)
                                     JULIA_S2_SUB_STATE_NONE));
     assert(strcmp(julia_fsm_s2_sub_state_name(JULIA_S2_SUB_STATE_S2_1_LISTENING),
                   "S2.1_LISTENING") == 0);
+    assert(strcmp(julia_fsm_event_name(EVT_WIFI_DISCONNECTED),
+                  "EVT_WIFI_DISCONNECTED") == 0);
 
     /* 主状态之间的允许迁移关系。 */
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S0_BOOT, JULIA_S2_SUB_STATE_NONE,
@@ -40,6 +42,15 @@ int main(void)
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S2_DIALOG,
                                     JULIA_S2_SUB_STATE_S2_3_SPEAKING,
                                     JULIA_MAIN_STATE_S1_COMPANION, JULIA_S2_SUB_STATE_NONE));
+    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S2_DIALOG,
+                                    JULIA_S2_SUB_STATE_S2_1_LISTENING,
+                                    JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE));
+    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S2_DIALOG,
+                                    JULIA_S2_SUB_STATE_S2_2_THINKING,
+                                    JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE));
+    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S2_DIALOG,
+                                    JULIA_S2_SUB_STATE_S2_3_SPEAKING,
+                                    JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE));
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S4_INTERACTION, JULIA_S2_SUB_STATE_NONE));
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE,
@@ -50,6 +61,9 @@ int main(void)
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S4_INTERACTION,
                                     JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S6_SLEEP, JULIA_S2_SUB_STATE_NONE));
+    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S4_INTERACTION,
+                                    JULIA_S2_SUB_STATE_NONE,
+                                    JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE));
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S4_INTERACTION,
                                     JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S2_DIALOG,
@@ -98,10 +112,10 @@ int main(void)
                                     JULIA_S2_SUB_STATE_S2_2_THINKING,
                                     JULIA_MAIN_STATE_S5_SILENT,
                                     JULIA_S2_SUB_STATE_NONE));
-    assert(!julia_fsm_can_transition(JULIA_MAIN_STATE_S2_DIALOG,
-                                     JULIA_S2_SUB_STATE_S2_3_SPEAKING,
-                                     JULIA_MAIN_STATE_S6_SLEEP,
-                                     JULIA_S2_SUB_STATE_NONE));
+    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S2_DIALOG,
+                                    JULIA_S2_SUB_STATE_S2_3_SPEAKING,
+                                    JULIA_MAIN_STATE_S6_SLEEP,
+                                    JULIA_S2_SUB_STATE_NONE));
 
     /* 所有其他状态都能进入故障态；S7 只能返回 S0。 */
     for (julia_main_state_t state = JULIA_MAIN_STATE_S0_BOOT;
@@ -199,6 +213,69 @@ int main(void)
     assert(julia_fsm_handle_event(&dialog_goodnight_fsm,
                                   EVT_INTENT_GOODNIGHT, NULL));
     assert(dialog_goodnight_fsm.main_state == JULIA_MAIN_STATE_S6_SLEEP);
+
+    /* 跨链路迟到的终止语义可从 S2.3 收尾；语音服务会先取消残留播放。 */
+    julia_fsm_t speaking_dismiss_fsm;
+    julia_fsm_init(&speaking_dismiss_fsm);
+    assert(julia_fsm_transition_to(&speaking_dismiss_fsm,
+                                   JULIA_MAIN_STATE_S1_COMPANION,
+                                   JULIA_S2_SUB_STATE_NONE, EVT_NONE));
+    assert(julia_fsm_handle_event(&speaking_dismiss_fsm, EVT_USER_CALL, NULL));
+    assert(julia_fsm_handle_event(&speaking_dismiss_fsm, EVT_START_DIALOG, NULL));
+    assert(julia_fsm_handle_event(&speaking_dismiss_fsm,
+                                  EVT_MULTI_TURN_DETECTED, NULL));
+    assert(julia_fsm_handle_event(&speaking_dismiss_fsm,
+                                  EVT_INTENT_DISMISS, NULL));
+    assert(speaking_dismiss_fsm.main_state == JULIA_MAIN_STATE_S5_SILENT);
+
+    /* Wi-Fi 断联使所有网络交互态统一回到 S3，并清除 S2 子状态。 */
+    const julia_s2_sub_state_t disconnected_s2_states[] = {
+        JULIA_S2_SUB_STATE_S2_1_LISTENING,
+        JULIA_S2_SUB_STATE_S2_2_THINKING,
+        JULIA_S2_SUB_STATE_S2_3_SPEAKING,
+    };
+    for (size_t i = 0; i < sizeof(disconnected_s2_states) /
+                            sizeof(disconnected_s2_states[0]); ++i) {
+        julia_fsm_t disconnected_fsm;
+        julia_fsm_init(&disconnected_fsm);
+        assert(julia_fsm_transition_to(&disconnected_fsm,
+                                       JULIA_MAIN_STATE_S1_COMPANION,
+                                       JULIA_S2_SUB_STATE_NONE, EVT_NONE));
+        assert(julia_fsm_handle_event(&disconnected_fsm, EVT_USER_CALL, NULL));
+        if (disconnected_s2_states[i] >= JULIA_S2_SUB_STATE_S2_2_THINKING) {
+            assert(julia_fsm_handle_event(&disconnected_fsm,
+                                          EVT_START_DIALOG, NULL));
+        }
+        if (disconnected_s2_states[i] >= JULIA_S2_SUB_STATE_S2_3_SPEAKING) {
+            assert(julia_fsm_handle_event(&disconnected_fsm,
+                                          EVT_MULTI_TURN_DETECTED, NULL));
+        }
+        assert(disconnected_fsm.s2_sub_state == disconnected_s2_states[i]);
+        assert(julia_fsm_handle_event(&disconnected_fsm,
+                                      EVT_WIFI_DISCONNECTED, NULL));
+        assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
+        assert(disconnected_fsm.s2_sub_state == JULIA_S2_SUB_STATE_NONE);
+    }
+
+    julia_fsm_t disconnected_fsm;
+    julia_fsm_init(&disconnected_fsm);
+    assert(julia_fsm_transition_to(&disconnected_fsm,
+                                   JULIA_MAIN_STATE_S1_COMPANION,
+                                   JULIA_S2_SUB_STATE_NONE, EVT_NONE));
+    assert(julia_fsm_handle_event(&disconnected_fsm,
+                                  EVT_WIFI_DISCONNECTED, NULL));
+    assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
+
+    julia_fsm_t disconnected_s4_fsm;
+    julia_fsm_init(&disconnected_s4_fsm);
+    assert(julia_fsm_transition_to(&disconnected_s4_fsm,
+                                   JULIA_MAIN_STATE_S1_COMPANION,
+                                   JULIA_S2_SUB_STATE_NONE, EVT_NONE));
+    assert(julia_fsm_handle_event(&disconnected_s4_fsm, EVT_USER_LEAVE, NULL));
+    assert(julia_fsm_handle_event(&disconnected_s4_fsm, EVT_WAKEUP, NULL));
+    assert(julia_fsm_handle_event(&disconnected_s4_fsm,
+                                  EVT_WIFI_DISCONNECTED, NULL));
+    assert(disconnected_s4_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
 
     /* 纯 FSM 测试只验证 S7 迁移边；记录与复位由运行时故障通道负责。 */
     assert(julia_fsm_transition_to(&fsm, JULIA_MAIN_STATE_S7_FAULT,

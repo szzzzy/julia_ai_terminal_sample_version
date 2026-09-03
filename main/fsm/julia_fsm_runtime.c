@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 #include "julia_avatar.h"
 #include "julia_backlight.h"
+#include "lvgl_port.h"
 #include "sdkconfig.h"
 
 #define FSM_EVENT_QUEUE_DEPTH 16
@@ -35,7 +36,9 @@ typedef struct {
 
 typedef enum {
     FSM_PRESENT_DEFAULT = 0,
+    FSM_PRESENT_S1_COMPANION,
     FSM_PRESENT_S3_STANDBY,
+    FSM_PRESENT_S5_SILENT,
     FSM_PRESENT_S6_SLEEP,
     FSM_PRESENT_S2_1_LISTENING,
     FSM_PRESENT_S2_2_THINKING,
@@ -51,6 +54,8 @@ static julia_main_state_t s_committed_main_state = JULIA_MAIN_STATE_S0_BOOT;
 static julia_s2_sub_state_t s_committed_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
 static esp_timer_handle_t s_standby_timer;
 static esp_timer_handle_t s_silent_timer;
+static julia_fsm_state_observer_t s_state_observer;
+static void *s_state_observer_ctx;
 
 static void standby_timer_callback(void *argument)
 {
@@ -86,16 +91,20 @@ static fsm_presentation_t presentation_for(julia_main_state_t main_state,
     /* S4 保持独立状态身份，只复用 S2.1 对应的现有行为实现。 */
     if (main_state == JULIA_MAIN_STATE_S4_INTERACTION)
         return FSM_PRESENT_S2_1_LISTENING;
+    if (main_state == JULIA_MAIN_STATE_S1_COMPANION) return FSM_PRESENT_S1_COMPANION;
     if (main_state == JULIA_MAIN_STATE_S3_STANDBY) return FSM_PRESENT_S3_STANDBY;
+    if (main_state == JULIA_MAIN_STATE_S5_SILENT) return FSM_PRESENT_S5_SILENT;
     if (main_state == JULIA_MAIN_STATE_S6_SLEEP) return FSM_PRESENT_S6_SLEEP;
-    /* 调试阶段 S0/S1/S5/S7/S8 共用 Companion 基础 UI，由状态叠字区分。 */
+    /* 调试阶段 S0/S7/S8 共用 Companion 基础 UI，由状态叠字区分。 */
     return FSM_PRESENT_DEFAULT;
 }
 
 static const char *presentation_name(fsm_presentation_t presentation)
 {
     switch (presentation) {
+    case FSM_PRESENT_S1_COMPANION: return "S1_COMPANION";
     case FSM_PRESENT_S3_STANDBY: return "S3_STANDBY";
+    case FSM_PRESENT_S5_SILENT: return "S5_SILENT";
     case FSM_PRESENT_S6_SLEEP: return "S6_SLEEP";
     case FSM_PRESENT_S2_1_LISTENING: return "S2.1_LISTENING";
     case FSM_PRESENT_S2_2_THINKING: return "S2.2_THINKING";
@@ -137,9 +146,20 @@ static void apply_presentation(julia_main_state_t main_state,
                                julia_s2_sub_state_t s2_sub_state)
 {
     fsm_presentation_t presentation = presentation_for(main_state, s2_sub_state);
+    if (presentation != FSM_PRESENT_S6_SLEEP) {
+        esp_err_t display_err = lvgl_port_set_display_off(false);
+        if (display_err != ESP_OK) {
+            ESP_LOGW(TAG, "display wake failed: %s", esp_err_to_name(display_err));
+        }
+    }
     switch (presentation) {
-    case FSM_PRESENT_S3_STANDBY:
-    case FSM_PRESENT_S6_SLEEP: {
+    case FSM_PRESENT_S1_COMPANION:
+        julia_backlight_breathe_stop();
+        julia_backlight_set(CONFIG_JULIA_COMPANION_BRIGHTNESS_PERCENT);
+        julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_IDLE);
+        julia_avatar_set_dozing(false);
+        break;
+    case FSM_PRESENT_S3_STANDBY: {
         julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_IDLE);
         julia_avatar_set_dozing(true);
         esp_err_t err = julia_backlight_breathe_start(
@@ -147,11 +167,30 @@ static void apply_presentation(julia_main_state_t main_state,
             CONFIG_JULIA_DISPLAY_BREATHE_MAX_PERCENT,
             CONFIG_JULIA_DISPLAY_BREATHE_PERIOD_MS);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "standby/sleep breathing start failed: %s",
+            ESP_LOGW(TAG, "standby breathing start failed: %s",
                      esp_err_to_name(err));
         }
         break;
     }
+    case FSM_PRESENT_S6_SLEEP:
+        julia_backlight_breathe_stop();
+        julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_IDLE);
+        julia_avatar_set_dozing(true);
+        julia_backlight_set(0);
+        {
+            esp_err_t display_err = lvgl_port_set_display_off(true);
+            if (display_err != ESP_OK) {
+                ESP_LOGW(TAG, "display sleep failed: %s", esp_err_to_name(display_err));
+            }
+        }
+        break;
+    case FSM_PRESENT_S5_SILENT:
+        /* S5 继续复用 Companion 基础立绘，但用固定低亮度明确区分静默状态。 */
+        julia_backlight_breathe_stop();
+        julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_IDLE);
+        julia_avatar_set_dozing(false);
+        julia_backlight_set(CONFIG_JULIA_SILENT_BRIGHTNESS_PERCENT);
+        break;
     case FSM_PRESENT_S2_1_LISTENING:
         /* 复用现有“听”呈现：闭眼立绘、停止嘴型播放并保持屏幕唤醒。 */
         julia_backlight_breathe_stop();
@@ -196,6 +235,10 @@ static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
     s_committed_main_state = main_state;
     s_committed_s2_sub_state = s2_sub_state;
     portEXIT_CRITICAL(&s_state_lock);
+    /* 状态已提交后再通知语音层；观察者只能有界入队，不能阻塞 FSM 呈现。 */
+    if (s_state_observer != NULL) {
+        s_state_observer(main_state, s2_sub_state, event, s_state_observer_ctx);
+    }
     ESP_LOGI(TAG, "enter %s/%s by %s", julia_fsm_main_state_name(main_state),
              julia_fsm_s2_sub_state_name(s2_sub_state), julia_fsm_event_name(event));
     julia_avatar_set_status_text(state_status_text(main_state, s2_sub_state));
@@ -267,10 +310,19 @@ static void fsm_task(void *argument)
             continue;
         }
         if (!julia_fsm_handle_event(&s_fsm, message.event, NULL)) {
-            ESP_LOGD(TAG, "ignored event=%s state=%s/%s",
-                     julia_fsm_event_name(message.event),
-                     julia_fsm_main_state_name(s_fsm.main_state),
-                     julia_fsm_s2_sub_state_name(s_fsm.s2_sub_state));
+            if (message.event == EVT_WAKEUP ||
+                message.event == EVT_INTENT_GOODNIGHT ||
+                message.event == EVT_INTENT_DISMISS) {
+                ESP_LOGW(TAG, "关键交互事件被忽略：event=%s state=%s/%s",
+                         julia_fsm_event_name(message.event),
+                         julia_fsm_main_state_name(s_fsm.main_state),
+                         julia_fsm_s2_sub_state_name(s_fsm.s2_sub_state));
+            } else {
+                ESP_LOGD(TAG, "ignored event=%s state=%s/%s",
+                         julia_fsm_event_name(message.event),
+                         julia_fsm_main_state_name(s_fsm.main_state),
+                         julia_fsm_s2_sub_state_name(s_fsm.s2_sub_state));
+            }
         }
     }
     vTaskDelete(NULL);
@@ -335,17 +387,30 @@ esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready)
         s_event_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "ready initial=%s/%s queue=%u s3_sleep=%ds s5_standby=%ds "
-                  "fault_reset=%dms quick_fault=%ds/%d",
+    ESP_LOGI(TAG, "ready initial=%s/%s queue=%u s1_bl=%d%% "
+                  "s3_breathe=%d-%d%% s3_sleep=%ds s5_standby=%ds "
+                  "s6_bl=0%% fault_reset=%dms quick_fault=%ds/%d",
              julia_fsm_main_state_name(s_fsm.main_state),
              julia_fsm_s2_sub_state_name(s_fsm.s2_sub_state),
              (unsigned)FSM_EVENT_QUEUE_DEPTH,
+             CONFIG_JULIA_COMPANION_BRIGHTNESS_PERCENT,
+             CONFIG_JULIA_DISPLAY_BREATHE_MIN_PERCENT,
+             CONFIG_JULIA_DISPLAY_BREATHE_MAX_PERCENT,
              CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS,
              CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS,
              CONFIG_JULIA_FAULT_RESET_DELAY_MS,
              CONFIG_JULIA_FAULT_QUICK_UPTIME_SECONDS,
              CONFIG_JULIA_FAULT_AUTO_RESET_LIMIT);
     return ESP_OK;
+}
+
+void julia_fsm_runtime_set_state_observer(julia_fsm_state_observer_t observer,
+                                          void *ctx)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    s_state_observer = observer;
+    s_state_observer_ctx = ctx;
+    portEXIT_CRITICAL(&s_state_lock);
 }
 
 esp_err_t julia_fsm_runtime_post(fsm_event_t event)

@@ -26,7 +26,7 @@
 
 以 [app/main.c](app/main.c) 的实际调用顺序为准：
 
-1. `ota_boot_flow_run()` 初始化 NVS、网络基础设施与事件循环，处理镜像健康检查、启动确认／回滚和报告对账。
+1. 进入 `app_main()` 后立即把 GPIO7 `BAT_Control` 拉高以锁存电池供电，并启用 CPU 240/80MHz 动态调频（不开自动 Light-sleep）；然后由 `ota_boot_flow_run()` 初始化 NVS、网络基础设施与事件循环，处理镜像健康检查、启动确认／回滚和报告对账。
 2. 初始化背光、LCD、LVGL、Avatar，交由独立 `boot_animation` 任务执行眨眼序列。
 3. 主任务同时注册语音命令、初始化板级音频与独立播放任务、音频素材服务和 RTC，并挂载 SD。
 4. 注册 IP-ready 回调并启动 Wi-Fi；扫描／连接及可用时的 SNTP 与动画重叠。
@@ -54,7 +54,7 @@
 
 MIC 使用 8 槽发送队列，MQTT 控制作业使用独立 4 槽队列。每次会话循环最多各处理 4 条，给下行与保活留出机会；MIC 入队失败有累计日志。FILE_SEND 每轮最多发送一个 1200 字节块，文件区间暂不发送 PCM1。
 
-下行 PCM 写入 64KiB PSRAM 环形缓冲，播放任务独占 I2S；共享互斥只保护缓冲和状态，不覆盖 I2S 或 UI。正常 SPKE 只标记输入结束，播放完成事件回到 WSS 任务后才清 busy。MIC_START／断链使本地播放代次失效并清空缓冲，旧完成事件不能将新监听恢复成待机。
+下行 PCM 写入 64KiB PSRAM 环形缓冲，播放任务独占 I2S；共享互斥只保护缓冲和状态，不覆盖 I2S 或 UI。播放分为唤醒回应、正常回答和自检三种角色：唤醒回应播完保持 S4，只有正常回答播完才由 S2.3 回 S1。MIC_START／断链使旧播放代次失效并清空缓冲。
 
 ### 实时音频模块边界
 
@@ -70,15 +70,20 @@ MIC 使用 8 槽发送队列，MQTT 控制作业使用独立 4 槽队列。每�
 
 播放任务的完成信息包含本地 generation；它只防止设备内部的旧任务结果覆盖新状态，不是服务端的 turn_id。具体参数与推流约束见 [通信协议](../docs/PROTOCOL.md)。
 
-普通跨模块行为通过 `julia_fsm_runtime_post()` 投递，严重故障通过 `julia_fsm_runtime_raise_fault()` 投递到队首。S3 的驻留计时由 FSM 运行时持有，默认 30 分钟，由 `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS` 配置；语音播放结束仍由现有 `EVT_SILENCE_TIMEOUT` 生产者推进。
+普通跨模块行为通过 `julia_fsm_runtime_post()` 投递，严重故障通过 `julia_fsm_runtime_raise_fault()` 投递到队首。S3 的驻留计时由 FSM 运行时持有，默认 5 分钟，由 `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS` 配置；语音播放结束仍由现有 `EVT_SILENCE_TIMEOUT` 生产者推进。
 
 ## 语音状态与显示状态
 
 `s_mic_streaming` 表示是否上传音频，`s_dialog_listening` 表示是否处于用户听音阶段；两者不等价。
 
-默认服务器唤醒模式中，WSS 建连后 streaming 为真，界面保持陪伴。S1 的 `MIC_START` 进入 S2.1“听”，`MIC_STOP` 进入 S2.2“想”，正常回答 `SPKS` 进入 S2.3“说”；`SPKE` 排空音频后回到 S1。S3/S5/S6 检测到唤醒词后先进入 S4，普通话语结束由 `MIC_STOP` 进入 S2.2；MQTT `intent_result=goodnight` 从 S4/S2 听想阶段直接进入 S6，`dismiss` 进入 S5。细节与时序见 [通信协议](../docs/PROTOCOL.md)。
+麦克风 I2S 原始采样在送入本地 AFE 和 WSS 上行前统一应用 `CONFIG_JULIA_MIC_GAIN_PERCENT` 数字增益，当前默认 70%；100% 表示不缩放。
+扬声器上电默认音量为 50%，由 `CONFIG_JULIA_SPEAKER_VOLUME_PERCENT` 配置；连接后服务端仍可通过 `SPKV` 命令动态覆盖。
 
-FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发起交互、S5 静默、S6 睡眠、S7 故障、S8 OTA。只有 S2 有 S2.1“听”、S2.2“想”、S2.3“说”三个子状态。当前默认值为：S1 连续空闲 10 分钟进入 S3，S3 连续驻留 30 分钟或命中 23:00～07:00 夜间条件进入 S6；这些时间均由 `CONFIG_JULIA_*` 配置项控制。
+默认服务器唤醒模式中，WSS 建连后 streaming 为真。服务器命中唤醒词后发送带 `interaction_id` 的 `wake_detected`；设备提交 S3/S5/S6→S4 并回 `state_ready`，随后唤醒回应的 `SPKS` 临时启用闭眼底图上的独立嘴层，播完闭嘴并仍停留 S4。实际有效话语以 `MIC_START` 标记开始、`MIC_STOP` 进入 S2.2“想”，正常回答 `SPKS` 进入 S2.3“说”，实际播完回 S1。MQTT `goodnight`／`dismiss` 不播语音，分别直接进入 S6／S5。细节与时序见 [通信协议](../docs/PROTOCOL.md)。
+
+FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发起交互、S5 静默、S6 睡眠、S7 故障、S8 OTA。只有 S2 有 S2.1“听”、S2.2“想”、S2.3“说”三个子状态。当前默认值为：S1 连续空闲 10 分钟进入 S3，S3 连续驻留 5 分钟或命中 23:00～07:00 夜间条件进入 S6；这些时间均由 `CONFIG_JULIA_*` 配置项控制。
+
+当前背光策略为：常驻 S1 固定 50%，S3 在 5%–30% 间呼吸，S5 固定 50%，S6 熄灭；交互状态和非常驻的 S0/S7/S8 保持 100%。
 
 | 当前来源 | 生效状态 | 目标状态 |
 | --- | --- | --- |
@@ -89,10 +94,11 @@ FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发�
 | `EVT_INTERRUPT`／`EVT_USER_CALL` | S2.3 | S2.1 |
 | `EVT_SILENCE_TIMEOUT` | S2.3 | S1 |
 | `EVT_USER_LEAVE` | S1 | S3 |
+| Wi-Fi 断联 `EVT_WIFI_DISCONNECTED` | S1／S2 任一阶段／S4 | S3 |
 | 唤醒词 `EVT_WAKEUP` | S3／S5／S6 | S4 |
 | `EVT_NIGHT_TIME`／`EVT_STANDBY_TIMEOUT` | S3 | S6 |
-| MQTT `intent_result=goodnight` | S4／S2.1／S2.2 | S6 |
-| MQTT `intent_result=dismiss` | S4／S2.1／S2.2 | S5 |
+| MQTT `intent_result=goodnight` | S4／S2 任一阶段 | S6 |
+| MQTT `intent_result=dismiss` | S4／S2 任一阶段 | S5（Companion 底图，默认 50% 亮度） |
 | `EVT_SILENT_TIMEOUT`（默认 30 分钟） | S5 | S3 |
 | OTA 引擎接受升级 | S0／S1 | S8 |
 | OTA 任务失败（非链路、非严重故障） | S8 | S1 |

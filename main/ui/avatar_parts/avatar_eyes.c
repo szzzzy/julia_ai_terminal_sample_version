@@ -31,7 +31,7 @@
 #include "lvgl_port.h"
 
 #ifndef JULIA_AVATAR_LOG
-#define JULIA_AVATAR_LOG 1
+#define JULIA_AVATAR_LOG 0
 #endif
 
 /* ---- 模块级状态 ---- */
@@ -163,8 +163,8 @@ static void blink_task(void *argument)
         if (s_transition_active || s_idle_closed ||
             (s_main_state != 1 && s_main_state != 3)) continue;
         uint32_t generation = s_generation;
-        int64_t started = esp_timer_get_time();
 #if JULIA_AVATAR_LOG
+        int64_t started = esp_timer_get_time();
         ESP_LOGI("JULIA_AVATAR", "blink trigger state=S%u", s_main_state);
 #endif
         avatar_eyes_show(AVATAR_EYES_CLOSED);

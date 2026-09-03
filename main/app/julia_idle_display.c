@@ -25,6 +25,7 @@
 #include "julia_backlight.h"
 #include "julia_avatar.h"
 #include "julia_fsm_runtime.h"
+#include "lvgl_port.h"
 #include "sdkconfig.h"
 
 #define DISPLAY_THEME_TASK_STACK_SIZE 3072
@@ -74,6 +75,10 @@ static bool transition_is_current(display_activity_state_t state, uint32_t gener
  */
 static void display_restore(void)
 {
+    esp_err_t err = lvgl_port_set_display_off(false);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "panel wake failed: %s", esp_err_to_name(err));
+    }
     julia_backlight_breathe_stop();
     julia_backlight_set(100);
     julia_avatar_set_dozing(false);

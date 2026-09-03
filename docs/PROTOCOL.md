@@ -40,13 +40,14 @@ WSS 使用 `server_certs/ca_cert.pem` 验证证书链；当前传输实现设置
 
 ### 3.1 唤醒模式
 
-`CONFIG_JULIA_SERVER_WAKE_ENABLE=y` 为默认模式：WSS 会话建立后立即打开持续上传，界面保持待机。服务器检测唤醒或确认新的用户话语后发送 `MIC_START`。
+`CONFIG_JULIA_SERVER_WAKE_ENABLE=y` 为默认模式：WSS 会话建立后立即打开持续上传，界面保持当前行为状态。服务器命中唤醒词后先通过同一 WSS 连接发送 `wake_detected` JSON；设备提交 S3/S5/S6→S4 后回 `state_ready`，服务器收到回执后才能发送唤醒回应。实际用户话语开始再发送 `MIC_START`。
 
 关闭该开关时，设备编译本地 WakeNet，模型名称为 `wn9_nihaoxiaozhi_tts`、显示唤醒词为“你好小智”。本地命中后请求打开上传；该动作不是向服务器发送一条 `MIC_START` 文本。模型是否已正确烧入 `model` 分区必须单独验证。两种模式是编译选择，没有自动断网切换。
 
 语义边界：
 
-- `MIC_START`：确认进入听音，必要时打开上传，并停止当前扬声器播放。
+- `wake_detected`：只建立 S4，不等同于实际用户话语开始。
+- `MIC_START`：确认实际话语开始，必要时打开上传，并停止当前扬声器播放；S4 中保持 S4。
 - `MIC_STOP`：确认当前话语结束，进入思考；保留音频上传。
 - `SPKE`：标记音频输入结束，排空已接收的 PCM 和 DMA 尾音后回到待机；默认服务器唤醒模式继续上传。
 - 本地唤醒模式在播放完成后启动陪伴上传计时，达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 600 秒）无后续对话时停止上传。
@@ -75,9 +76,10 @@ PCM1 不包含会话编号、话语编号或采样时间戳。服务器应把连
 
 | 命令 | 设备行为 |
 | --- | --- |
-| `MIC_START` | 清空待播 PCM、使旧播放代次失效并进入听音；播放任务在当前小块写入返回后停止 I2S |
+| `{"type":"wake_detected","interaction_id":"wake_<ms>"}` | S3/S5/S6 投递 `EVT_WAKEUP`；FSM 提交 S4 后设备回 `state_ready` |
+| `MIC_START` | 清空待播 PCM、使旧播放代次失效并标记实际话语开始；S4 中不改变主状态 |
 | `MIC_STOP` | 结束当前监听并进入思考；没有活动话语时忽略；不关闭 streaming |
-| `SPKS <rate>` | 配置扬声器并开播；正常对话中发送 FSM 事件进入 SPEAK；联调使用 16000 或 24000 |
+| `SPKS <rate>` | S4 且等待唤醒回应时作为 WAKE_REPLY，播放完成仍留 S4；S2.2 时作为正常回答并进入 S2.3；其他状态拒绝 |
 | `SPKV <n>` | 设置音量，合法整数范围 0–100；越界值被拒绝，文本入口不做钳位 |
 | `SPKE` | 有序结束：先排空待播数据，再停播／闭嘴／回待机；不存在活动播放代次时忽略 |
 | `SPKT` | 独立播放任务生成 440／660／880Hz 三音，可被 MIC_START 或断链取消 |
@@ -89,19 +91,21 @@ PCM1 不包含会话编号、话语编号或采样时间戳。服务器应把连
 
 下行 binary 是不带 PCM1 头的单声道、小端 PCM16，非空、长度为偶数、完整消息最多 1200 字节。采样率与前面的 `SPKS` 一致。
 
-正常对话顺序：
+唤醒与正常对话顺序：
 
 ```text
-WSS 建立       设备 → 服务器：连续 PCM1（默认模式）
-唤醒确认       服务器 → 设备：MIC_START
-用户话语结束   服务器 → 设备：MIC_STOP
-回答开播       服务器 → 设备：SPKS 24000
-回答音频       服务器 → 设备：binary PCM × N
-回答结束       服务器 → 设备：SPKE
-待机           设备 → 服务器：继续 PCM1（默认模式）
+WSS 建立          设备 → 服务器：连续 PCM1（默认模式）
+命中唤醒词       服务器 → 设备：{"type":"wake_detected","interaction_id":"wake_<ms>"}
+S4 已提交         设备 → 服务器：{"type":"state_ready","interaction_id":"wake_<ms>","state":"S4"}
+唤醒回应          服务器 → 设备：SPKS 24000 → binary PCM × N → SPKE
+回应实际播完      设备：保持 S4，不进入 S2/S1
+有效话语开始      服务器 → 设备：MIC_START（S4 内只标记 listening）
+用户话语结束      服务器 → 设备：MIC_STOP（S4 → S2.2）
+正常回答          服务器 → 设备：SPKS 24000 → binary PCM × N → SPKE（S2.2 → S2.3）
+回答实际播完      设备：S2.3 → S1；默认模式继续 PCM1
 ```
 
-不要把裸 `SPKS` 当作任意 FSM 状态下的完整对话启动命令。播放期间服务端确认用户插话时可发送 `MIC_START`，同时应停止发送旧回答。设备用本地播放代次隔离取消后的缓冲及完成事件，未开新播放时迟到的 SPKE 不结束监听。但网络消息本身没有轮次编号，迟到旧 SPKS 或新播放期间迟到旧 SPKE 仍需服务器避免。
+服务器应等待匹配 `interaction_id` 的 `state_ready` 再发送唤醒回应；当前服务器配置可在 2 秒超时后降级发送，设备届时若已处于 S4 仍可接受。不要把裸 `SPKS` 当作任意状态下的对话启动命令。播放期间服务端确认用户插话时可发送 `MIC_START`，设备会取消当前播放；迟到旧 SPKS 或新播放期间迟到旧 SPKE 仍需服务器按轮次避免。
 
 播放任务使用 64KiB PSRAM 缓冲：启动／欠载后以 80ms 音频量为预缓冲目标，从首个缓冲数据开始最多等待 120ms；SPKE 可立即放行不足目标的短尾段。播放小块为 160 样本，I2S 写入使用 50ms 等待参数并校验短写。750ms 断流不会自动关播；在无待播数据时，距最近输入／开播达到 15 秒则报告播放超时。
 
@@ -116,6 +120,7 @@ WSS 建立       设备 → 服务器：连续 PCM1（默认模式）
 | `ERROR playback_overflow` | 未消费 PCM 超出固定缓冲；该次播放中止，应停止继续发送并调整推流速度 |
 | `ERROR playback_timeout` | 播放等待超时，包括空缓冲缺少输入或底层 I2S 返回超时；需结合设备日志定位 |
 | `ERROR playback_failed` | 其他扬声器初始化／写入错误；当前播放中止，不继续沿用该次 SPKS |
+| `ERROR playback_state` | 当前不是等待唤醒回应的 S4，也不是 S2.2；服务器应停止该轮 PCM 并核对时序 |
 | `ERROR file_busy` | 文件请求与监听、播放或既有传输冲突；该文件请求未开始 |
 | `ERROR file_cancelled` | 文件外发被语音启动终止；丢弃部分文件，退出文件接收状态 |
 
@@ -172,13 +177,13 @@ FILE_SEND SD:/sample.wav
 {"type":"intent_result","intent":"dismiss"}
 ```
 
-`type` 必须严格等于 `intent_result`，以后增加语义只扩展 `intent` 值，不改变消息类型。`intent=normal` 表示没有特殊语义，当前不改变状态，正常流程继续由 `MIC_STOP` 推进；`intent=goodnight` 在 S4 或 S2 的听／想阶段直接进入 S6，`intent=dismiss` 在相同阶段进入 S5。S2.3 已开始播放后收到的迟到特殊语义由 FSM 忽略，避免睡眠状态与旧回答播放并存。
+`type` 必须严格等于 `intent_result`，以后增加语义只扩展 `intent` 值，不改变消息类型。`intent=normal` 表示没有特殊语义，正常流程继续由 `MIC_STOP` 推进；`intent=goodnight` 直接进入 S6，`intent=dismiss` 直接进入 S5，二者都不播放回应。为容忍 MQTT 与 WSS 的跨链路竞态，S2.3 收到终止语义时也会先取消残留播放再迁移。
 
-正常对话不发送 `intent_result`：服务端直接发送 `MIC_STOP`，设备由 S4 或 S2.1 进入 S2.2。识别到 `goodnight` 或 `dismiss` 时，服务器必须在 `SPKS` 前发送 `intent_result`；设备收到特殊语义时会结束当前监听，随后到达的 `MIC_STOP` 在 S5/S6 中被忽略。
+正常对话不发送 `intent_result`：服务端直接发送 `MIC_STOP`，设备由 S4 或 S2.1 进入 S2.2。识别到 `goodnight` 或 `dismiss` 时，服务器只发送语义结果，不发送 `SPKS`；设备结束监听并直接切换显示，随后到达的幂等 `MIC_STOP` 在 S5/S6 中被忽略。
 
 处理器允许纯文本命令末尾带空白和换行，不支持一条消息中的多行命令列表。注册载荷上限为 128 字节，FILE_SEND URI 缓冲区含 NUL 共 128 字节；语义 JSON 必须是单个完整对象。
 
-三类纯文本命令进入独立 4 槽控制队列，不与 MIC 的 8 槽队列争用容量，仍须由 WSS 会话执行；会话未就绪或队列已满时拒绝，连接边界清理队列，不重放断链期间的命令。`intent_result` JSON 不进入 WSS 队列，而是在 MQTT 回调中零等待投递 FSM 事件。当前没有 `vstatus` 发布，也没有 `mic_started`／`mic_stopped` 或语义应用回执；MQTT PUBACK 只表示 broker 收到消息，不表示状态迁移已执行。
+纯文本命令、`state_ready` 和 MQTT 终止语义进入独立 4 槽控制队列，不与 MIC 的 8 槽队列争用容量，并统一在 WSS 会话任务中执行；会话未就绪或队列已满时拒绝，连接边界清理队列，不重放断链期间的命令。MQTT PUBACK 只表示 broker 收到消息，不表示状态迁移已执行；`state_ready` 只确认设备已提交 S4。
 
 ## 7. OTA 检查、清单与通知
 

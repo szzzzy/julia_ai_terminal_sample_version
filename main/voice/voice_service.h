@@ -5,7 +5,8 @@
  * 本模块是语音命令语法的唯一解析点，两条入口共用同一套处理：
  * - MQTT 语音命令 topic（FILE_SEND <uri> / MIC_START / MIC_STOP）：由
  *   voice_service_init() 注册到通信层 topic 注册表；
- * - WSS 服务端文本帧（FILE_SEND <uri>）：作为 wss_transport 的 on_text 回调执行。
+ * - WSS 服务端文本帧（wake_detected、FILE_SEND、MIC/SPK 控制）：作为
+ *   wss_transport 的 on_text 回调执行；S4 提交后通过同一连接回 state_ready。
  *
  * 文件推送协议（BEGIN FILE <size> <name> -> 1200 B 二进制帧 -> END <bytes>）
  * 在本模块内实现，传输交给纯传输层 wss_transport；URI 到本地路径的受控映射
@@ -19,8 +20,8 @@
  *   wss_transport_send_now()；
  * - MIC 上行 PCM1 帧由 board_audio 的 mic_task 经 voice_service_send_chunk() 入队，
  *   实际发送也在会话任务。
- * MIC上传状态与LISTEN语义分离：SPKE后可在IDLE继续上传，服务器确认新一轮
- * 说话后再以MIC_START驱动LISTEN。
+ * MIC上传状态与LISTEN语义分离：SPKE后可在IDLE继续上传；服务器先以
+ * wake_detected 建立 S4，再以 MIC_START 标记实际用户话语开始。
  */
 #pragma once
 
@@ -41,7 +42,7 @@ extern "C" {
 
 /**
  * @brief 板级音频接入：把 board_audio 的 PCM1 帧挂到 WSS sink，
- * 并接管 WSS 下行 SPKS/SPKV/SPKE/SPKT/MICS/MICW 命令 → board_audio_* API。
+ * 并接管 WSS 下行 wake_detected、SPKS/SPKV/SPKE/SPKT/MICS/MICW 命令。
  *
  * @note 须在 board_audio_init() 之后、voice_service_ip_ready() 之前调用。
  * @note WSS 下行的二进制 PCM 帧（voice_service_on_binary）由此路由到扬声器。
@@ -109,8 +110,9 @@ esp_err_t voice_service_send_chunk(const uint8_t *buf, size_t len);
 /**
  * @brief 确认用户开始一轮说话（对应 MIC_START 语音命令）。
  *
- * 命令仅入队，真正生效在WSS会话任务。服务器唤醒模式下PCM从WSS认证成功起
- * 已持续上传；MIC_START只确认唤醒/语句开始并驱动UI/FSM进入LISTEN。
+ * 命令仅入队，真正生效在 WSS 会话任务。服务器唤醒模式下 PCM 从 WSS 认证
+ * 成功起已持续上传；S4 中 MIC_START 只标记实际话语开始，S1 中进入 S2.1；
+ * 旧服务端或本地 WakeNet 从 S3/S5/S6 发起时仍兼容推进到 S4。
  *
  * @return ESP_OK 命令已入队；ESP_ERR_NO_MEM 命令队列已满；ESP_ERR_INVALID_STATE 尚未启动。
  */

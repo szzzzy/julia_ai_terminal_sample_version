@@ -47,6 +47,7 @@ static const char *const s_event_names[EVT_COUNT] = {
     [EVT_WAKEUP] = "EVT_WAKEUP",
     [EVT_INTENT_GOODNIGHT] = "EVT_INTENT_GOODNIGHT",
     [EVT_INTENT_DISMISS] = "EVT_INTENT_DISMISS",
+    [EVT_WIFI_DISCONNECTED] = "EVT_WIFI_DISCONNECTED",
     [EVT_OTA_AVAILABLE] = "EVT_OTA_AVAILABLE",
     [EVT_OTA_SUCCEEDED] = "EVT_OTA_SUCCEEDED",
     [EVT_OTA_TASK_FAILED] = "EVT_OTA_TASK_FAILED",
@@ -126,13 +127,14 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
         if (from_s2_sub_state == JULIA_S2_SUB_STATE_S2_3_SPEAKING &&
             target_is(to_main_state, to_s2_sub_state,
                       JULIA_MAIN_STATE_S1_COMPANION)) return true;
-        /* 服务端特殊语义在听/想阶段结束当前轮次：晚安进入 S6，结束沟通进入 S5。
-         * 说话阶段不接受迟到语义，避免状态已睡眠但旧回答仍在播放。 */
-        if (from_s2_sub_state != JULIA_S2_SUB_STATE_S2_3_SPEAKING &&
-            (target_is(to_main_state, to_s2_sub_state,
-                       JULIA_MAIN_STATE_S5_SILENT) ||
-             target_is(to_main_state, to_s2_sub_state,
-                       JULIA_MAIN_STATE_S6_SLEEP))) return true;
+        /* 终止语义由语音服务先取消残留播放，再进入 S5/S6；允许所有 S2 阶段，
+         * 以容忍 MQTT 语义与 WSS 音频之间的跨链路到达竞态。 */
+        if (target_is(to_main_state, to_s2_sub_state,
+                      JULIA_MAIN_STATE_S5_SILENT) ||
+            target_is(to_main_state, to_s2_sub_state,
+                      JULIA_MAIN_STATE_S6_SLEEP) ||
+            target_is(to_main_state, to_s2_sub_state,
+                      JULIA_MAIN_STATE_S3_STANDBY)) return true;
         if (to_main_state != JULIA_MAIN_STATE_S2_DIALOG) return false;
         return (from_s2_sub_state == JULIA_S2_SUB_STATE_S2_1_LISTENING &&
                 to_s2_sub_state == JULIA_S2_SUB_STATE_S2_2_THINKING) ||
@@ -149,6 +151,8 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
 
     case JULIA_MAIN_STATE_S4_INTERACTION:
         return target_is(to_main_state, to_s2_sub_state,
+                         JULIA_MAIN_STATE_S3_STANDBY) ||
+               target_is(to_main_state, to_s2_sub_state,
                          JULIA_MAIN_STATE_S5_SILENT) ||
                target_is(to_main_state, to_s2_sub_state,
                          JULIA_MAIN_STATE_S6_SLEEP) ||
@@ -225,7 +229,14 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
     julia_main_state_t target_main_state = JULIA_MAIN_STATE_COUNT;
     julia_s2_sub_state_t target_s2_sub_state = JULIA_S2_SUB_STATE_COUNT;
 
-    if (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION &&
+    if ((fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
+         fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG ||
+         fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION) &&
+        event == EVT_WIFI_DISCONNECTED) {
+        /* 网络交互态在 Wi-Fi 断联后统一收敛到待机，等待网络生命周期自动重连。 */
+        target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
+    } else if (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION &&
                event == EVT_USER_LEAVE) {
         /* 复用显示空闲策略的用户离开事件，由陪伴态进入待机态。 */
         target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
@@ -257,15 +268,13 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
         target_main_state = JULIA_MAIN_STATE_S2_DIALOG;
         target_s2_sub_state = JULIA_S2_SUB_STATE_S2_2_THINKING;
     } else if ((fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
-                (fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG &&
-                 fsm->s2_sub_state != JULIA_S2_SUB_STATE_S2_3_SPEAKING)) &&
+                fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG) &&
                event == EVT_INTENT_GOODNIGHT) {
         /* “晚安”结束本轮沟通并立即进入睡眠，不再绕经 S5/S3 计时。 */
         target_main_state = JULIA_MAIN_STATE_S6_SLEEP;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if ((fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
-                (fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG &&
-                 fsm->s2_sub_state != JULIA_S2_SUB_STATE_S2_3_SPEAKING)) &&
+                fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG) &&
                event == EVT_INTENT_DISMISS) {
         /* 明确结束沟通进入静默，仍按 S5 的独立计时策略返回 S3。 */
         target_main_state = JULIA_MAIN_STATE_S5_SILENT;

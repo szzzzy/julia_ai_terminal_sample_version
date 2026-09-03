@@ -21,7 +21,7 @@
 #include "lvgl_port.h"
 
 #ifndef JULIA_AVATAR_LOG
-#define JULIA_AVATAR_LOG 1
+#define JULIA_AVATAR_LOG 0
 #endif
 
 /* ---- 模块级状态 ---- */
@@ -95,8 +95,12 @@ void avatar_mouth_set_transition_active(bool active)
 void avatar_mouth_set_visible(bool visible)
 {
     if (!s_mouth || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
-    if (visible) lv_obj_clear_flag(s_mouth, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(s_mouth, LV_OBJ_FLAG_HIDDEN);
+    bool currently_visible = !lv_obj_has_flag(s_mouth, LV_OBJ_FLAG_HIDDEN);
+    if (visible != currently_visible) {
+        if (visible) lv_obj_clear_flag(s_mouth, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_mouth, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_invalidate(s_mouth);
+    }
     lvgl_port_unlock();
 }
 

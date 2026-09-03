@@ -17,6 +17,7 @@
 #include "julia_avatar.h"
 #include "julia_night_schedule.h"
 #include "julia_motion.h"
+#include "julia_power.h"
 #include "julia_time.h"
 #include "julia_display.h"
 #include "julia_idle_display.h"
@@ -82,6 +83,16 @@ static esp_err_t boot_voice_ip_ready(void *arg)
  */
 void app_main(void)
 {
+    esp_err_t power_hold_err = julia_power_hold_enable();
+    if (power_hold_err != ESP_OK) {
+        ESP_LOGE(TAG, "Battery power hold init failed: %s",
+                 esp_err_to_name(power_hold_err));
+    }
+    esp_err_t power_management_err = julia_power_management_init();
+    if (power_management_err != ESP_OK) {
+        ESP_LOGW(TAG, "Dynamic frequency scaling init failed: %s",
+                 esp_err_to_name(power_management_err));
+    }
     ESP_LOGI(TAG, "Julia application start");
 
     ota_boot_flow_run();

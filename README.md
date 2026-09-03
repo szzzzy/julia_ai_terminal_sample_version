@@ -33,7 +33,7 @@ Julia Fused-Base 是面向 ESP32-S3 陪伴终端的设备固件，提供麦克�
 | 显示库 | 仓库内 LVGL 8.3.11 |
 | Flash | 16MiB，两个 7MiB OTA 应用分区 |
 | PSRAM | 板级配置为 8MiB Octal／OPI，80MHz；实机容量以启动日志确认 |
-| CPU | 当前配置 240MHz |
+| CPU | 峰值 240MHz，空闲时动态降至 80MHz，不启用自动 Light-sleep |
 | 应用镜像名 | `julia_fused_base` |
 | OTA 产品／硬件标识 | `julia-ai-device`／`1.0` |
 

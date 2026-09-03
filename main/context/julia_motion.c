@@ -36,16 +36,43 @@ static void motion_task(void *argument)
 {
     (void)argument;
     board_imu_sample_t previous = {0};
-    if (board_imu_read(&previous) != ESP_OK) {
-        ESP_LOGW(TAG, "initial baseline read failed");
-    }
+    bool baseline_valid = false;
     unsigned consecutive = 0;
     TickType_t cooldown_until = 0;
 
     for (;;) {
+        julia_main_state_t state = julia_fsm_runtime_get_state();
+        TickType_t now = xTaskGetTickCount();
+        if (!motion_wake_state(state)) {
+            baseline_valid = false;
+            consecutive = 0;
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+        if (board_audio_speaker_is_playing() ||
+            (cooldown_until != 0 && now < cooldown_until)) {
+            baseline_valid = false;
+            consecutive = 0;
+            vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_IMU_MOTION_SAMPLE_MS));
+            continue;
+        }
+
         vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_IMU_MOTION_SAMPLE_MS));
+        if (!motion_wake_state(julia_fsm_runtime_get_state())) {
+            baseline_valid = false;
+            consecutive = 0;
+            continue;
+        }
         board_imu_sample_t current;
         if (board_imu_read(&current) != ESP_OK) {
+            baseline_valid = false;
+            consecutive = 0;
+            continue;
+        }
+
+        if (!baseline_valid) {
+            previous = current;
+            baseline_valid = true;
             consecutive = 0;
             continue;
         }
@@ -58,14 +85,6 @@ static void motion_task(void *argument)
                            current.gz_dps * current.gz_dps);
         previous = current;
 
-        julia_main_state_t state = julia_fsm_runtime_get_state();
-        TickType_t now = xTaskGetTickCount();
-        if (!motion_wake_state(state) || board_audio_speaker_is_playing() ||
-            (cooldown_until != 0 && now < cooldown_until)) {
-            consecutive = 0;
-            continue;
-        }
-
         bool detected = delta >= MOTION_ACCEL_DELTA_G ||
                         gyro >= (float)CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS;
         consecutive = detected ? consecutive + 1U : 0U;
@@ -75,6 +94,8 @@ static void motion_task(void *argument)
                  julia_fsm_main_state_name(state), (double)delta, (double)gyro);
         julia_idle_display_note_activity();
         consecutive = 0;
+        baseline_valid = false;
+        now = xTaskGetTickCount();
         cooldown_until = now + pdMS_TO_TICKS(CONFIG_JULIA_IMU_MOTION_COOLDOWN_MS);
     }
 }
@@ -89,7 +110,7 @@ esp_err_t julia_motion_init(void)
         s_task = NULL;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "ready sample=%dms confirm=%d accel=%.2fg gyro=%.1fdps",
+    ESP_LOGI(TAG, "ready s6_only=1 sample=%dms confirm=%d accel=%.2fg gyro=%.1fdps",
              CONFIG_JULIA_IMU_MOTION_SAMPLE_MS,
              CONFIG_JULIA_IMU_MOTION_CONFIRM_FRAMES,
              (double)MOTION_ACCEL_DELTA_G,

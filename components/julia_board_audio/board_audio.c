@@ -27,6 +27,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 
 #define TAG "board_audio"
 
@@ -41,12 +42,10 @@
 #define SLEEP_PREROLL_FRAMES 25
 #define SLEEP_TRIGGER_FRAMES 6
 #define SLEEP_THRESHOLD_DELTA_X100 500
-/* 保守的上电默认音量；服务端仍可通过 SPKV 设为 0-100。 */
-#define DEFAULT_SPEAKER_VOLUME_PERCENT 25
-
 static i2s_chan_handle_t mic_rx, spk_tx;
 static volatile bool playing;
-static volatile uint32_t speaker_volume = DEFAULT_SPEAKER_VOLUME_PERCENT;
+/* 服务端仍可通过 SPKV 在运行时覆盖上电默认值。 */
+static volatile uint32_t speaker_volume = CONFIG_JULIA_SPEAKER_VOLUME_PERCENT;
 static int32_t mic_raw[MIC_SAMPLES];
 static int16_t mic_pcm[MIC_SAMPLES];
 static int16_t sleep_preroll[SLEEP_PREROLL_FRAMES][MIC_SAMPLES];
@@ -169,7 +168,9 @@ static void mic_task(void *arg)
         size_t count = got / 4;
         if (count > MIC_SAMPLES) count = MIC_SAMPLES;
         for (size_t i = 0; i < count; i++) {
-            int32_t v = mic_raw[i] >> 14;
+            int32_t v = (int32_t)(((int64_t)mic_raw[i] *
+                                   CONFIG_JULIA_MIC_GAIN_PERCENT) /
+                                  (100LL << 14));
             if (v > 32767) v = 32767;
             if (v < -32768) v = -32768;
             mic_pcm[i] = (int16_t)v;
@@ -238,8 +239,9 @@ esp_err_t board_audio_init(void)
         err = ESP_ERR_NO_MEM;
         goto failed;
     }
-    ESP_LOGI(TAG, "ready mic=I2S0(15/2/39) spk=I2S1(48/38/47) volume=%u%%",
-             (unsigned)speaker_volume);
+    ESP_LOGI(TAG, "ready mic=I2S0(15/2/39) gain=%d%% "
+                  "spk=I2S1(48/38/47) volume=%u%%",
+             CONFIG_JULIA_MIC_GAIN_PERCENT, (unsigned)speaker_volume);
     return ESP_OK;
 
 failed:
