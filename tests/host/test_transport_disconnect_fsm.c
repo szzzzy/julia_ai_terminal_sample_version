@@ -12,11 +12,8 @@ static void set_state(julia_fsm_t *fsm, julia_main_state_t main_state,
     fsm->s2_sub_state = sub_state;
 }
 
-int main(void)
+static void verify_disconnect_event(fsm_event_t event)
 {
-    assert(strcmp(julia_fsm_event_name(EVT_WSS_DISCONNECTED),
-                  "EVT_WSS_DISCONNECTED") == 0);
-
     const julia_s2_sub_state_t s2_states[] = {
         JULIA_S2_SUB_STATE_S2_1_LISTENING,
         JULIA_S2_SUB_STATE_S2_2_THINKING,
@@ -25,7 +22,7 @@ int main(void)
     for (size_t i = 0; i < sizeof(s2_states) / sizeof(s2_states[0]); ++i) {
         julia_fsm_t fsm;
         set_state(&fsm, JULIA_MAIN_STATE_S2_DIALOG, s2_states[i]);
-        assert(julia_fsm_handle_event(&fsm, EVT_WSS_DISCONNECTED, NULL));
+        assert(julia_fsm_handle_event(&fsm, event, NULL));
         assert(fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
         assert(fsm.s2_sub_state == JULIA_S2_SUB_STATE_NONE);
     }
@@ -37,7 +34,7 @@ int main(void)
     for (size_t i = 0; i < sizeof(active_states) / sizeof(active_states[0]); ++i) {
         julia_fsm_t fsm;
         set_state(&fsm, active_states[i], JULIA_S2_SUB_STATE_NONE);
-        assert(julia_fsm_handle_event(&fsm, EVT_WSS_DISCONNECTED, NULL));
+        assert(julia_fsm_handle_event(&fsm, event, NULL));
         assert(fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
     }
 
@@ -53,10 +50,20 @@ int main(void)
          i < sizeof(unaffected_states) / sizeof(unaffected_states[0]); ++i) {
         julia_fsm_t fsm;
         set_state(&fsm, unaffected_states[i], JULIA_S2_SUB_STATE_NONE);
-        assert(!julia_fsm_handle_event(&fsm, EVT_WSS_DISCONNECTED, NULL));
+        assert(!julia_fsm_handle_event(&fsm, event, NULL));
         assert(fsm.main_state == unaffected_states[i]);
         assert(fsm.s2_sub_state == JULIA_S2_SUB_STATE_NONE);
     }
+}
 
+int main(void)
+{
+    assert(strcmp(julia_fsm_event_name(EVT_MQTT_DISCONNECTED),
+                  "EVT_MQTT_DISCONNECTED") == 0);
+    assert(strcmp(julia_fsm_event_name(EVT_WSS_DISCONNECTED),
+                  "EVT_WSS_DISCONNECTED") == 0);
+
+    verify_disconnect_event(EVT_MQTT_DISCONNECTED);
+    verify_disconnect_event(EVT_WSS_DISCONNECTED);
     return 0;
 }

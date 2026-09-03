@@ -52,7 +52,7 @@ typedef enum {
     EVT_WAKEUP,                   /**< 语音链路确认唤醒词。 */
     EVT_INTENT_GOODNIGHT,         /**< MQTT：晚安意图，S4/S2 进入 S6。 */
     EVT_INTENT_DISMISS,           /**< MQTT：结束沟通意图，S4/S2 进入 S5。 */
-    EVT_WIFI_DISCONNECTED,        /**< Wi-Fi 断联，S1/S2/S4 进入 S3。 */
+    EVT_MQTT_DISCONNECTED,        /**< MQTT 会话断开，S1/S2/S4 进入 S3。 */
     EVT_WSS_DISCONNECTED,         /**< WSS transport 结束，S1/S2/S4 进入 S3。 */
     EVT_OTA_AVAILABLE,            /**< OTA 引擎已接受升级任务。 */
     EVT_OTA_SUCCEEDED,            /**< OTA 镜像已提交，即将复位。 */

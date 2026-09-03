@@ -96,7 +96,7 @@ FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发�
 | `EVT_INTERRUPT`／`EVT_USER_CALL` | S2.3 | S2.1 |
 | `EVT_SILENCE_TIMEOUT` | S2.3 | S1 |
 | `EVT_USER_LEAVE` | S1 | S3 |
-| Wi-Fi 断联 `EVT_WIFI_DISCONNECTED` | S1／S2 任一阶段／S4 | S3 |
+| MQTT 会话断开 `EVT_MQTT_DISCONNECTED` | S1／S2 任一阶段／S4 | S3 |
 | WSS 会话结束 `EVT_WSS_DISCONNECTED` | S1／S2 任一阶段／S4 | S3 |
 | 唤醒词 `EVT_WAKEUP` | S3／S5／S6 | S4 |
 | `EVT_NIGHT_TIME`／`EVT_STANDBY_TIMEOUT` | S3 | S6 |

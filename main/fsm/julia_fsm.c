@@ -47,7 +47,7 @@ static const char *const s_event_names[EVT_COUNT] = {
     [EVT_WAKEUP] = "EVT_WAKEUP",
     [EVT_INTENT_GOODNIGHT] = "EVT_INTENT_GOODNIGHT",
     [EVT_INTENT_DISMISS] = "EVT_INTENT_DISMISS",
-    [EVT_WIFI_DISCONNECTED] = "EVT_WIFI_DISCONNECTED",
+    [EVT_MQTT_DISCONNECTED] = "EVT_MQTT_DISCONNECTED",
     [EVT_WSS_DISCONNECTED] = "EVT_WSS_DISCONNECTED",
     [EVT_OTA_AVAILABLE] = "EVT_OTA_AVAILABLE",
     [EVT_OTA_SUCCEEDED] = "EVT_OTA_SUCCEEDED",
@@ -235,8 +235,8 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
     if ((fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
          fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG ||
          fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION) &&
-        (event == EVT_WIFI_DISCONNECTED || event == EVT_WSS_DISCONNECTED)) {
-        /* 网络交互态在 Wi-Fi/WSS 断联后统一收敛到待机，等待对应链路自动重连。 */
+        (event == EVT_MQTT_DISCONNECTED || event == EVT_WSS_DISCONNECTED)) {
+        /* 任一业务传输会话断开都使网络交互态收敛到待机，等待对应链路重连。 */
         target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION &&

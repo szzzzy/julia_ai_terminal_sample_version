@@ -20,11 +20,11 @@ target_include_directories(test_julia_fsm PRIVATE stubs ../../main/fsm)
 set_property(TARGET test_julia_fsm PROPERTY C_STANDARD 99)
 add_test(NAME julia_fsm COMMAND test_julia_fsm)
 
-add_executable(test_wss_disconnect_fsm test_wss_disconnect_fsm.c
+add_executable(test_transport_disconnect_fsm test_transport_disconnect_fsm.c
     ../../main/fsm/julia_fsm.c)
-target_include_directories(test_wss_disconnect_fsm PRIVATE stubs ../../main/fsm)
-set_property(TARGET test_wss_disconnect_fsm PROPERTY C_STANDARD 99)
-add_test(NAME wss_disconnect_fsm COMMAND test_wss_disconnect_fsm)
+target_include_directories(test_transport_disconnect_fsm PRIVATE stubs ../../main/fsm)
+set_property(TARGET test_transport_disconnect_fsm PROPERTY C_STANDARD 99)
+add_test(NAME transport_disconnect_fsm COMMAND test_transport_disconnect_fsm)
 
 add_executable(test_wss_tx_writer test_wss_tx_writer.c
     ../../main/voice/wss_tx_writer.c)

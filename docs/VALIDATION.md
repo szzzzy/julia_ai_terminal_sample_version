@@ -78,6 +78,7 @@
 | VOICE-09B | 服务端制造小于 2 秒的真实发送背压，并确认设备出现 WANT_READ／WANT_WRITE／EAGAIN | 同一写入区间有限重试并记录 recovered，不因暂时错误重连；约 5.12 秒 PSRAM ring 吸收积压，服务恢复后 PCM 序号连续 |
 | VOICE-09C | ring 中存在未发送 PCM 时强制断开并重连 WSS | 旧 generation 全部丢弃；新连接从空 ring 和连接建立后的新采集帧开始，绝不重放旧唤醒词或尾音 |
 | VOICE-09D | 限制服务端读取直至 256 帧 ring 满 | producer 关闭当前代次但不清ring/TLS；WSS owner 记录 `audio_overflow`、统一 teardown，FSM 从 S1/S2/S4 进入 S3；新连接不发送任何旧帧 |
+| VOICE-09E | 分别断开 WSS、MQTT，同时覆盖 S1/S2/S4 | 任一业务会话断开都进入 S3 并清除 S2 子状态；仅 Wi-Fi 事件不直接驱动 FSM |
 | VOICE-10 | MQTT 单命令及不支持命令 | 只有三类作业可执行；不等待不存在的 vstatus 回执 |
 | VOICE-11 | 本地唤醒配置单独构建／烧录 | 模型分区、识别与采音链路有效；不得仅凭服务器模式构建认定通过 |
 | VOICE-12 | 服务端一次发送超过 64KiB 未消费数据 | 显式 playback_overflow、清空缓冲并回到可交互状态；服务端按播放速率节流 |

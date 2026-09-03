@@ -9,7 +9,8 @@
  * 3. 连接就绪后立即上报设备身份、硬件版本和当前固件版本，之后按配置周期检查；
  * 4. 提供通用 mqtt_comm_publish()（QoS 1 尽力而为）供辅助状态上报。
  *
- * 本模块不感知任何具体业务：不解析语音命令、不解析音频清单、不下载固件、不写 Flash。
+ * 本模块不解析具体业务：不解析语音命令、不解析音频清单、不下载固件、不写 Flash；
+ * 仅把 MQTT 会话断开作为传输健康信号投递给行为 FSM。
  *
  * ── 上下游与生命周期 ────────────────────────────────────────────────
  * 由 network_lifecycle 在取得 IPv4 后通过 mqtt_comm_ip_ready() 回调拉起
@@ -41,7 +42,7 @@
  * 状态）。语音命令（vcmd）语法解析、与 WSS 会话共用的状态转换、以及语音回执等语音
  * 面语义均由 voice_service 实现：它把 vcmd topic 注册进本模块注册表（非 critical），
  * 仅复用本层的订阅/分片路由，并不在本模块内分发或回执。音频 PCM 流向由 WSS 传输层
- * 承载，不在本模块内。故本模块对业务语义零感知。
+ * 承载，不在本模块内。除通用的 MQTT 断线事件外，本模块不感知业务状态语义。
  *
  * ── 依赖 ───────────────────────────────────────────────────────────
  * FreeRTOS（任务/事件组/队列/信号量/自旋锁）、esp-mqtt 客户端、cJSON（仅解析
@@ -72,6 +73,7 @@
 #include "mqtt_client.h"
 
 #include "mqtt_comm.h"
+#include "julia_fsm_runtime.h"
 #include "ota_control_plane.h"
 #include "ota_engine.h"
 #include "ota_report.h"
@@ -1288,8 +1290,8 @@ static void mqtt_handle_data(const esp_mqtt_event_handle_t event)
  * @brief 处理 ESP-MQTT 客户端事件。
  *
  * CONNECTED 时订阅设备专属响应 topic；SUBSCRIBED 时设置就绪位并唤醒主动检查；
- * DATA 时交给分片重组函数；断线时清除接收状态并暂停周期检查；ERROR 时记录官方
- * 错误句柄提供的 TLS 和 socket 诊断信息。
+ * DATA 时交给分片重组函数；断线时清除接收状态、暂停周期检查并通知行为 FSM；
+ * ERROR 时记录官方错误句柄提供的 TLS 和 socket 诊断信息。
  *
  * @param[in] handler_args 注册事件时提供的用户参数，本实现未使用。
  * @param[in] base         事件基，正常情况下为 MQTT_EVENTS。
@@ -1363,6 +1365,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         mqtt_check_request_session_reset();
         if (s_check_task != NULL) {
             xTaskNotifyGive(s_check_task);
+        }
+        esp_err_t fsm_err = julia_fsm_runtime_post(EVT_MQTT_DISCONNECTED);
+        if (fsm_err != ESP_OK) {
+            ESP_LOGW(TAG, "MQTT disconnect FSM event rejected: %s",
+                     esp_err_to_name(fsm_err));
         }
         break;
     case MQTT_EVENT_SUBSCRIBED: {

@@ -29,7 +29,6 @@
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
 
-#include "julia_fsm_runtime.h"
 #include "network_lifecycle.h"
 #include "protocol_examples_common.h"
 
@@ -282,11 +281,6 @@ static void network_wifi_event_handler(void *arg, esp_event_base_t event_base,
         portEXIT_CRITICAL(&s_state_lock);
         ESP_LOGW(TAG, "Wi-Fi disconnected (reason=%d); retry #%" PRIu32 " in %" PRIu32 " ms",
                  reason, retry_attempt, delay_ms);
-        esp_err_t fsm_err = julia_fsm_runtime_post(EVT_WIFI_DISCONNECTED);
-        if (fsm_err != ESP_OK) {
-            ESP_LOGW(TAG, "Wi-Fi disconnect FSM event rejected: %s",
-                     esp_err_to_name(fsm_err));
-        }
         xTaskNotifyGive(s_network_task);
     }
 }

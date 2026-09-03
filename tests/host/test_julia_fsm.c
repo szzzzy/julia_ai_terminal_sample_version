@@ -41,8 +41,8 @@ int main(void)
                                     JULIA_S2_SUB_STATE_NONE));
     assert(strcmp(julia_fsm_s2_sub_state_name(JULIA_S2_SUB_STATE_S2_1_LISTENING),
                   "S2.1_LISTENING") == 0);
-    assert(strcmp(julia_fsm_event_name(EVT_WIFI_DISCONNECTED),
-                  "EVT_WIFI_DISCONNECTED") == 0);
+    assert(strcmp(julia_fsm_event_name(EVT_MQTT_DISCONNECTED),
+                  "EVT_MQTT_DISCONNECTED") == 0);
 
     /* 主状态之间的允许迁移关系。 */
     assert(!julia_fsm_can_transition(JULIA_MAIN_STATE_S0_BOOT, JULIA_S2_SUB_STATE_NONE,
@@ -248,7 +248,7 @@ int main(void)
                                   EVT_INTENT_DISMISS, NULL));
     assert(speaking_dismiss_fsm.main_state == JULIA_MAIN_STATE_S5_SILENT);
 
-    /* Wi-Fi 断联使所有网络交互态统一回到 S3，并清除 S2 子状态。 */
+    /* MQTT 断联使所有网络交互态统一回到 S3，并清除 S2 子状态。 */
     const julia_s2_sub_state_t disconnected_s2_states[] = {
         JULIA_S2_SUB_STATE_S2_1_LISTENING,
         JULIA_S2_SUB_STATE_S2_2_THINKING,
@@ -269,7 +269,7 @@ int main(void)
         }
         assert(disconnected_fsm.s2_sub_state == disconnected_s2_states[i]);
         assert(julia_fsm_handle_event(&disconnected_fsm,
-                                      EVT_WIFI_DISCONNECTED, NULL));
+                                      EVT_MQTT_DISCONNECTED, NULL));
         assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
         assert(disconnected_fsm.s2_sub_state == JULIA_S2_SUB_STATE_NONE);
     }
@@ -277,14 +277,14 @@ int main(void)
     julia_fsm_t disconnected_fsm;
     enter_companion(&disconnected_fsm);
     assert(julia_fsm_handle_event(&disconnected_fsm,
-                                  EVT_WIFI_DISCONNECTED, NULL));
+                                  EVT_MQTT_DISCONNECTED, NULL));
     assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
 
     julia_fsm_t disconnected_s4_fsm;
     enter_standby(&disconnected_s4_fsm);
     assert(julia_fsm_handle_event(&disconnected_s4_fsm, EVT_WAKEUP, NULL));
     assert(julia_fsm_handle_event(&disconnected_s4_fsm,
-                                  EVT_WIFI_DISCONNECTED, NULL));
+                                  EVT_MQTT_DISCONNECTED, NULL));
     assert(disconnected_s4_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
 
     /* 纯 FSM 测试只验证 S7 迁移边；记录与复位由运行时故障通道负责。 */

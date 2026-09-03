@@ -53,6 +53,7 @@ WSS 使用 `server_certs/ca_cert.pem` 验证证书链；当前传输实现设置
 - 本地唤醒模式在播放完成后启动陪伴上传计时，达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 600 秒）无后续对话时停止上传。
 - `MIC_STOP`、闭眼表情、夜间状态均不是隐私静音命令。
 - WSS transport 会话结束时关闭上传、停止播放、丢弃旧 generation PCM 并清除监听／忙碌状态；S1/S2/S4 通过 `EVT_WSS_DISCONNECTED` 进入 S3。新连接从空 ring 按所选唤醒模式启动，不恢复旧业务轮次。
+- MQTT 会话断开时，S1/S2/S4 通过 `EVT_MQTT_DISCONNECTED` 进入 S3；Wi-Fi 仅负责承载与重连，不再直接驱动行为状态。
 
 ### 3.2 PCM1 格式
 
