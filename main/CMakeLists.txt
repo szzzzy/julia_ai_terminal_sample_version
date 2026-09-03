@@ -31,6 +31,7 @@ set(srcs
     # 语音服务：纯传输层 + 业务协议 + URI 映射 + 演示。
     "voice/wss_transport.c"
     "voice/wss_tx_writer.c"
+    "voice/voice_uplink_ring.c"
     "voice/voice_service.c"
     "voice/voice_playback.c"
     "voice/pcm_buffer.c"

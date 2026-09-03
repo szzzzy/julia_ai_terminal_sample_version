@@ -75,7 +75,8 @@
 | VOICE-08 | 服务器持续心跳但不返回回答 | 检查是否长期停在 THINK；当前没有业务超时兜底 |
 | VOICE-09 | WSS 断开并恢复 | 上传／播放停止和重连正确；确认 UI、队列与首批新音频行为 |
 | VOICE-09A | 持续 MIC 上行期间由服务器发送带 code/reason 的 CLOSE | 板卡优先读取并回显完整 CLOSE 载荷；服务器能观察到正常关闭而非仅 TCP 异常断开；达到 `CONFIG_WSS_CLOSE_WAIT_MS`（默认 500ms）仍未完成时设备强制清理并重连 |
-| VOICE-09B | 服务端制造小于 2 秒的真实发送背压，并确认设备出现 WANT_READ／WANT_WRITE／EAGAIN | 同一写入区间有限重试并记录 recovered，不因暂时错误重连；V1 仍保留 8 帧队列，队满丢帧属于本阶段已知限制，不作为最终发布验收结果 |
+| VOICE-09B | 服务端制造小于 2 秒的真实发送背压，并确认设备出现 WANT_READ／WANT_WRITE／EAGAIN | 同一写入区间有限重试并记录 recovered，不因暂时错误重连；约 5.12 秒 PSRAM ring 吸收积压，服务恢复后 PCM 序号连续 |
+| VOICE-09C | ring 中存在未发送 PCM 时强制断开并重连 WSS | 旧 generation 全部丢弃；新连接从空 ring 和连接建立后的新采集帧开始，绝不重放旧唤醒词或尾音 |
 | VOICE-10 | MQTT 单命令及不支持命令 | 只有三类作业可执行；不等待不存在的 vstatus 回执 |
 | VOICE-11 | 本地唤醒配置单独构建／烧录 | 模型分区、识别与采音链路有效；不得仅凭服务器模式构建认定通过 |
 | VOICE-12 | 服务端一次发送超过 64KiB 未消费数据 | 显式 playback_overflow、清空缓冲并回到可交互状态；服务端按播放速率节流 |

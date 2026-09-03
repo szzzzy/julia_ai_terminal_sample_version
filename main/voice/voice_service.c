@@ -12,7 +12,7 @@
  * 并发/上下文：
  * - MQTT 事件任务：voice_service_on_mqtt_command 解析命令 -> voice_service_* 入队；
  * - mic_task：board_audio 的 PCM1 帧 -> voice_service_on_board_audio_frame ->
- *   voice_service_send_chunk() 入队；
+ *   voice_service_send_chunk() 写入 PSRAM ring；
  * - WSS 会话任务处理控制、收发和文件块；voice_playback 独立消费 PCM，
  *   完成事件由 on_poll 收回，FSM 对话阶段仍只由 WSS 会话推进。
  * - 对话阶段只由 WSS 会话任务推进；陪伴上传超时由 esp_timer 回调关闭，
@@ -28,6 +28,7 @@
 #include <strings.h>
 
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "cJSON.h"
@@ -39,6 +40,7 @@
 #include "julia_fsm_runtime.h"
 #include "mqtt_comm.h"
 #include "voice_uri.h"
+#include "voice_uplink_ring.h"
 #include "voice_playback.h"
 #include "wss_transport.h"
 #include "sdkconfig.h"
@@ -63,15 +65,14 @@ static void post_fsm_event(fsm_event_t event)
     }
 }
 
-/**
- * WSS 作业队列深度。MIC 每 20 ms 产生一帧，8 槽可吸收约 160 ms 的
- * 短时网络/调度抖动；队列仍保持有界，避免弱网时无限占用内部 RAM。
- */
-#define VOICE_QUEUE_DEPTH 8
+#define VOICE_TRANSPORT_QUEUE_DEPTH 1
 #define VOICE_INTERACTION_ID_MAX_LEN 64
+#define VOICE_UPLINK_FRAME_CAPACITY 256U
+#define VOICE_UPLINK_FRAME_MAX_BYTES 656U
+#define VOICE_UPLINK_DRAIN_BATCH 4U
 
 /**
- * @brief 命令队列中的一条作业：文件 URI（含 NUL）或一块 MIC 数据。
+ * @brief 控制队列中的一条作业：文件 URI（含 NUL）或语音控制命令。
  *
  * 作业对传输层是纯不透明条目；本模块在 on_queue_item 回调中解释它。
  */
@@ -79,7 +80,6 @@ typedef enum {
     VOICE_JOB_SEND_FILE = 0, /**< FILE_SEND：推送一个音频文件。 */
     VOICE_JOB_MIC_START,     /**< MIC_START：确认用户开始一轮说话。 */
     VOICE_JOB_MIC_STOP,      /**< MIC_STOP：确认本轮用户说话结束。 */
-    VOICE_JOB_SEND_CHUNK,    /**< 发送一个 MIC 音频块。 */
     VOICE_JOB_SEND_TEXT,     /**< FSM 已提交状态后的 WSS 文本通知。 */
     VOICE_JOB_INTENT_GOODNIGHT, /**< MQTT 晚安语义，转交 WSS 任务串行收尾。 */
     VOICE_JOB_INTENT_DISMISS,   /**< MQTT 结束沟通语义，转交 WSS 任务串行收尾。 */
@@ -88,7 +88,7 @@ typedef enum {
 typedef struct {
     voice_job_type_t type;                  /**< 作业类型。 */
     size_t len;                             /**< data 的有效字节数。 */
-    uint8_t data[WSS_TRANSPORT_MAX_PAYLOAD]; /**< URI 或音频块内容。 */
+    uint8_t data[WSS_TRANSPORT_MAX_PAYLOAD]; /**< URI 或控制消息内容。 */
 } voice_job_t;
 
 /** 上传与语义监听解耦：陪伴期可 streaming=true、listening=false。 */
@@ -114,6 +114,12 @@ static FILE *s_file;
 static uint64_t s_file_size;
 static uint64_t s_file_sent;
 static uint32_t s_uplink_dropped;
+static voice_uplink_ring_t s_uplink_ring;
+static uint8_t *s_uplink_storage;
+static uint16_t s_uplink_lengths[VOICE_UPLINK_FRAME_CAPACITY];
+static uint32_t s_uplink_generations[VOICE_UPLINK_FRAME_CAPACITY];
+static uint32_t s_uplink_generation;
+static bool s_uplink_ring_ready;
 #if !CONFIG_JULIA_SERVER_WAKE_ENABLE
 static bool s_companion_timer_armed;
 static esp_timer_handle_t s_companion_timer;
@@ -134,6 +140,59 @@ static bool voice_service_mic_is_streaming(void)
     streaming = s_mic_streaming;
     portEXIT_CRITICAL(&s_mic_state_lock);
     return streaming;
+}
+
+static esp_err_t voice_service_uplink_ring_init(void)
+{
+    if (s_uplink_ring_ready) return ESP_OK;
+    const size_t storage_bytes =
+        VOICE_UPLINK_FRAME_CAPACITY * VOICE_UPLINK_FRAME_MAX_BYTES;
+    s_uplink_storage = heap_caps_malloc(
+        storage_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_uplink_storage == NULL) return ESP_ERR_NO_MEM;
+    if (!voice_uplink_ring_init(&s_uplink_ring, s_uplink_storage,
+                                s_uplink_lengths, s_uplink_generations,
+                                VOICE_UPLINK_FRAME_CAPACITY,
+                                VOICE_UPLINK_FRAME_MAX_BYTES)) {
+        heap_caps_free(s_uplink_storage);
+        s_uplink_storage = NULL;
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_uplink_ring_ready = true;
+    ESP_LOGI(TAG, "MIC uplink ring ready: %u frames, %u bytes in PSRAM",
+             (unsigned)VOICE_UPLINK_FRAME_CAPACITY, (unsigned)storage_bytes);
+    return ESP_OK;
+}
+
+static uint32_t voice_service_next_uplink_generation(void)
+{
+    s_uplink_generation++;
+    if (s_uplink_generation == 0U) {
+        s_uplink_generation++;
+    }
+    return s_uplink_generation;
+}
+
+/** 文件二进制区间内暂停并清空 MIC ring；只由 WSS owner 调用。 */
+static void voice_service_pause_uplink_for_file(void)
+{
+    if (s_uplink_ring_ready) voice_uplink_ring_stop_generation(&s_uplink_ring);
+    portENTER_CRITICAL(&s_mic_state_lock);
+    board_audio_enable_wss_mic(false);
+    portEXIT_CRITICAL(&s_mic_state_lock);
+}
+
+/** 文件 END 后从空 ring 恢复同一条 WSS 连接的实时 MIC。 */
+static void voice_service_resume_uplink_after_file(void)
+{
+    if (!s_uplink_ring_ready) {
+        return;
+    }
+    uint32_t generation = voice_service_next_uplink_generation();
+    if (!voice_uplink_ring_start_generation(&s_uplink_ring, generation)) return;
+    portENTER_CRITICAL(&s_mic_state_lock);
+    if (s_mic_streaming) board_audio_enable_wss_mic(true);
+    portEXIT_CRITICAL(&s_mic_state_lock);
 }
 
 #if CONFIG_JULIA_SERVER_WAKE_ENABLE
@@ -211,16 +270,18 @@ static void voice_service_arm_companion_timer(void)
 #endif
 
 /**
- * @brief board_audio 的 WSS sink 适配器：完整 PCM1 帧（16 B 头 + PCM）
- * 作为一个二进制 WSS 消息入队。WSS 未启动时静默丢弃，不阻塞 mic_task。
+ * @brief board_audio 的 WSS sink 适配器：完整 PCM1 帧复制到 PSRAM ring。
+ * WSS 未启动或文件区间暂停时不接收；任何情况都不阻塞 mic_task。
  */
 static void voice_service_on_board_audio_frame(const uint8_t *frame, size_t bytes, void *ctx)
 {
     (void)ctx;
-    if (voice_service_send_chunk(frame, bytes) != ESP_OK) {
-        /* 只有该 MIC 回调写计数器；按累计值节流日志，避免每帧刷屏。 */
+    esp_err_t err = voice_service_send_chunk(frame, bytes);
+    if (err == ESP_ERR_NO_MEM) {
+        /* 只有真正 ring full 才计为容量丢帧；文件区间和连接边界的暂停不计入。 */
         if ((++s_uplink_dropped & 255U) == 1U) {
-            ESP_LOGW(TAG, "MIC enqueue drops=%lu", (unsigned long)s_uplink_dropped);
+            ESP_LOGW(TAG, "MIC uplink ring full drops=%lu",
+                     (unsigned long)s_uplink_dropped);
         }
     }
 }
@@ -330,6 +391,7 @@ static esp_err_t voice_service_push_file(const char *uri)
     s_file = f;
     s_file_size = (uint64_t)size;
     s_file_sent = 0;
+    voice_service_pause_uplink_for_file();
     return ESP_OK;
 }
 
@@ -347,6 +409,7 @@ static void voice_service_cancel_file(void)
     if (s_file != NULL) {
         voice_service_close_file();
         (void)voice_service_send_error("ERROR file_cancelled");
+        voice_service_resume_uplink_after_file();
     }
 }
 
@@ -376,7 +439,9 @@ static void voice_service_file_poll(void)
     }
     char end[48];
     int n = snprintf(end, sizeof(end), "END %" PRIu64, s_file_sent);
-    (void)wss_transport_send_now(0x1, (const uint8_t *)end, (size_t)n);
+    if (wss_transport_send_now(0x1, (const uint8_t *)end, (size_t)n) == ESP_OK) {
+        voice_service_resume_uplink_after_file();
+    }
 }
 
 static void voice_service_speaker_done(void)
@@ -415,6 +480,34 @@ static void voice_service_speaker_done(void)
 #endif
 }
 
+/** WSS owner 每轮最多发送 4 个 ring 帧，保持与 V1 队列批次相同的调度上限。 */
+static void voice_service_uplink_poll(void)
+{
+    if (!s_uplink_ring_ready || s_uplink_generation == 0U ||
+        !voice_service_mic_is_streaming()) {
+        return;
+    }
+    for (unsigned i = 0; i < VOICE_UPLINK_DRAIN_BATCH; ++i) {
+        const uint8_t *frame = NULL;
+        size_t bytes = 0;
+        if (!voice_uplink_ring_peek(&s_uplink_ring,
+                                    s_uplink_generation,
+                                    &frame, &bytes)) {
+            break;
+        }
+        if (wss_transport_send_now(0x2, frame, bytes) != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to send %u-byte MIC ring frame",
+                     (unsigned)bytes);
+            return;
+        }
+        if (!voice_uplink_ring_consume(&s_uplink_ring)) {
+            ESP_LOGE(TAG, "MIC uplink ring lost consumer ownership");
+            wss_transport_fail_session();
+            return;
+        }
+    }
+}
+
 static void voice_service_poll(void)
 {
     uint32_t generation;
@@ -428,7 +521,11 @@ static void voice_service_poll(void)
                                                                      "ERROR playback_failed");
         }
     }
-    voice_service_file_poll();
+    if (s_file != NULL) {
+        voice_service_file_poll();
+        return;
+    }
+    voice_service_uplink_poll();
 }
 
 static void voice_service_played_pcm(const int16_t *pcm, size_t samples, void *ctx)
@@ -746,8 +843,7 @@ static void voice_service_on_binary(const uint8_t *data, size_t len)
 /**
  * @brief 处理命令队列中的一条作业（wss_transport on_queue_item 回调）。
  *
- * 在会话任务上下文中执行；FILE_SEND 启动分块传输，MIC 块仅在流式状态
- * 开启且会话有效时发送。
+ * 在会话任务上下文中执行控制作业；MIC PCM 使用独立 PSRAM ring。
  *
  * @param[in] item      队列条目，不允许为 NULL。
  * @param[in] item_size 条目大小，必须等于 sizeof(voice_job_t)。
@@ -781,27 +877,23 @@ static void voice_service_on_queue_item(void *item, size_t item_size)
     case VOICE_JOB_INTENT_DISMISS:
         voice_service_apply_terminal_intent(EVT_INTENT_DISMISS, "dismiss");
         break;
-    case VOICE_JOB_SEND_CHUNK:
-        if (s_file != NULL) {
-            /* BEGIN FILE..END is a file-only binary interval. */
-            break;
-        } else if (!voice_service_mic_is_streaming()) {
-            ESP_LOGW(TAG, "Dropping %u-byte MIC chunk: streaming is not active",
-                     (unsigned)job->len);
-        } else if (wss_transport_send_now(0x2, job->data, job->len) != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to send %u-byte MIC chunk", (unsigned)job->len);
-        }
-        break;
     default:
         ESP_LOGW(TAG, "Unknown queued voice job type %d", (int)job->type);
         break;
     }
 }
 
-#if CONFIG_JULIA_SERVER_WAKE_ENABLE
-/** Authenticated WSS means the server becomes the sole wake-word detector. */
+/** 新 WSS 连接从空 ring 开始；任何旧连接积压都不得跨 generation 重放。 */
 static void voice_service_on_session_start(void)
 {
+    uint32_t generation = voice_service_next_uplink_generation();
+    if (!s_uplink_ring_ready ||
+        !voice_uplink_ring_start_generation(&s_uplink_ring, generation)) {
+        ESP_LOGE(TAG, "Cannot start MIC uplink generation=%" PRIu32, generation);
+        wss_transport_fail_session();
+        return;
+    }
+#if CONFIG_JULIA_SERVER_WAKE_ENABLE
     portENTER_CRITICAL(&s_mic_state_lock);
     s_mic_streaming = true;
     s_dialog_listening = false;
@@ -813,9 +905,13 @@ static void voice_service_on_session_start(void)
 
     /* 后台唤醒监听只属于传输层；服务端发送 wake_detected 前，
      * 保持当前主状态与呈现不变。 */
-    ESP_LOGI(TAG, "WSS session ready: IDLE PCM upload enabled for server wake detection");
-}
+    ESP_LOGI(TAG, "WSS session ready: generation=%" PRIu32
+                  " IDLE PCM upload enabled for server wake detection",
+             generation);
+#else
+    ESP_LOGI(TAG, "WSS session ready: generation=%" PRIu32, generation);
 #endif
+}
 
 /**
  * @brief WSS 会话结束回调：链路关闭后复位会话级 MIC 流式状态。
@@ -823,6 +919,11 @@ static void voice_service_on_session_start(void)
 static void voice_service_on_session_end(void)
 {
     voice_service_disarm_companion_timer();
+    size_t discarded_frames = 0;
+    if (s_uplink_ring_ready) {
+        discarded_frames = voice_uplink_ring_count(&s_uplink_ring);
+        voice_uplink_ring_stop_generation(&s_uplink_ring);
+    }
     portENTER_CRITICAL(&s_mic_state_lock);
     s_mic_streaming = false;
     s_dialog_listening = false;
@@ -836,6 +937,9 @@ static void voice_service_on_session_end(void)
     s_playback_generation = 0;
     s_playback_role = VOICE_PLAYBACK_ROLE_NONE;
     julia_avatar_talking_stop();
+    ESP_LOGI(TAG, "WSS uplink generation=%" PRIu32
+                  " ended; discarded MIC ring frames=%u",
+             s_uplink_generation, (unsigned)discarded_frames);
     post_fsm_event(EVT_SILENCE_TIMEOUT);
     julia_idle_display_note_activity();
     julia_idle_display_set_busy(false);
@@ -861,8 +965,7 @@ static esp_err_t voice_service_enqueue(voice_job_type_t type, const uint8_t *dat
     if (data != NULL && len > 0U) {
         memcpy(job.data, data, len);
     }
-    return type == VOICE_JOB_SEND_CHUNK ? wss_transport_enqueue(&job, sizeof(job))
-                                       : wss_transport_enqueue_control(&job, sizeof(job));
+    return wss_transport_enqueue_control(&job, sizeof(job));
 }
 
 /** FSM 提交 S4 后才排队 state_ready，保证服务器不会在状态尚未生效时开始播回应。 */
@@ -1068,6 +1171,8 @@ esp_err_t voice_service_init(void)
 
 esp_err_t voice_service_init_board_audio(void)
 {
+    ESP_RETURN_ON_ERROR(voice_service_uplink_ring_init(), TAG,
+                        "init MIC uplink ring");
     ESP_RETURN_ON_ERROR(voice_playback_init(voice_service_played_pcm, NULL),
                         TAG, "init playback worker");
     /* 板级MIC把PCM1帧路由到WSS。服务器唤醒模式在WSS认证完成时立即打开
@@ -1085,13 +1190,12 @@ esp_err_t voice_service_ip_ready(void *arg)
         .on_text = voice_service_on_server_text,
         .on_binary = voice_service_on_binary,
         .on_queue_item = voice_service_on_queue_item,
-#if CONFIG_JULIA_SERVER_WAKE_ENABLE
         .on_session_start = voice_service_on_session_start,
-#endif
         .on_session_end = voice_service_on_session_end,
         .on_poll = voice_service_poll,
         .queue_item_size = sizeof(voice_job_t),
-        .queue_depth = VOICE_QUEUE_DEPTH,
+        /* MIC 已迁移到 PSRAM ring；保留 1 槽通用队列满足传输层接口。 */
+        .queue_depth = VOICE_TRANSPORT_QUEUE_DEPTH,
     };
     return wss_transport_start(&transport_cfg);
 }
@@ -1114,10 +1218,19 @@ esp_err_t voice_service_send_chunk(const uint8_t *buf, size_t len)
     if (buf == NULL || len == 0U) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (len > WSS_TRANSPORT_MAX_PAYLOAD) {
+    if (len > VOICE_UPLINK_FRAME_MAX_BYTES) {
         return ESP_ERR_INVALID_SIZE;
     }
-    return voice_service_enqueue(VOICE_JOB_SEND_CHUNK, buf, len);
+    if (!s_uplink_ring_ready) return ESP_ERR_INVALID_STATE;
+    voice_uplink_push_result_t result = voice_uplink_ring_push(
+        &s_uplink_ring, buf, len);
+    switch (result) {
+    case VOICE_UPLINK_PUSH_OK: return ESP_OK;
+    case VOICE_UPLINK_PUSH_FULL: return ESP_ERR_NO_MEM;
+    case VOICE_UPLINK_PUSH_INACTIVE: return ESP_ERR_INVALID_STATE;
+    case VOICE_UPLINK_PUSH_INVALID:
+    default: return ESP_ERR_INVALID_ARG;
+    }
 }
 
 esp_err_t voice_service_mic_start(void)

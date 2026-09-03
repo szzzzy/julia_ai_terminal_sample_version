@@ -44,7 +44,7 @@
 | 执行上下文 | 所有权／限制 |
 | --- | --- |
 | `board_mic` | 从 I2S 读取 MIC，转换为 PCM16，通过回调入队；播放时 WSS 上行与本地 AFE 均持续接收，以支持唤醒和语音打断 |
-| WSS 会话任务 | 独占 TLS 句柄；分批处理控制／PCM 队列、接收数据、轮询播放完成事件和推进一个文件块 |
+| WSS 会话任务 | 独占 TLS 句柄；分批处理控制队列／PCM PSRAM ring、接收数据、轮询播放完成事件和推进一个文件块 |
 | `voice_playback` | 独占运行时扬声器操作，160 样本一块消费 PCM，负责预缓冲、尾音排空、取消和异常完成 |
 | MQTT 事件上下文 | 分片重组与路由；语音命令入队；PUBACK 交给报告处理流程 |
 | `julia_fsm` | 从 16 槽消息队列读取行为事件或严重故障；修改唯一运行实例、管理 S3 计时并应用呈现 |
@@ -52,7 +52,7 @@
 | 闲置／夜间／运动任务 | 闲置和夜间任务投递 FSM 事件；IMU 只恢复显示，不改变行为状态 |
 | OTA 下载与报告任务 | 下载／Flash 工作与 MQTT 事件处理分离；报告按 event_id 关联 PUBACK |
 
-MIC 使用 8 槽发送队列，MQTT 控制作业使用独立 4 槽队列。每次会话循环最多各处理 4 条，给下行与保活留出机会；MIC 入队失败有累计日志。FILE_SEND 每轮最多发送一个 1200 字节块，文件区间暂不发送 PCM1。
+MIC 使用 256 槽（约 5.12 秒、168KB）的 PSRAM SPSC ring，MQTT 控制作业使用独立 4 槽队列。2 的幂容量保证 32 位序号回绕后槽位映射仍连续。每次会话循环最多处理 4 个 MIC 帧和 4 条控制，给下行与保活留出机会；ring 满有累计日志。FILE_SEND 每轮最多发送一个 1200 字节块，文件区间暂停并清空 MIC ring，END 后从实时新帧恢复。
 
 下行 PCM 写入 64KiB PSRAM 环形缓冲，播放任务独占 I2S；共享互斥只保护缓冲和状态，不覆盖 I2S 或 UI。播放分为唤醒回应、正常回答和自检三种角色：唤醒回应播完保持 S4，只有正常回答播完才由 S2.3 回 S1。MIC_START／断链使旧播放代次失效并清空缓冲。
 
@@ -63,10 +63,11 @@ MIC 使用 8 槽发送队列，MQTT 控制作业使用独立 4 槽队列。每�
 | `voice_service.c` | 网络命令语义、播放请求、完成事件收尾、FSM 事件和分块文件外发 | 不直接执行播放 I2S 写入 |
 | `voice_playback.c` | 单一播放任务、预缓冲、代次取消、超时、溢出处理、尾音排空 | 不访问 TLS，不直接推进行为 FSM |
 | `pcm_buffer.c` | PCM16 环形 FIFO、边界检查、输入结束与重置 | 不包含 RTOS 同步或硬件调用；调用方提供锁 |
-| `wss_transport.c` | TLS／WebSocket、独立控制与 MIC 队列、有限批次分派和 on_poll | 不解释 MIC／SPK／文件内容 |
+| `wss_transport.c` | TLS／WebSocket、独立控制队列、有限批次分派和 on_poll | 不解释 MIC／SPK／文件内容 |
+| `voice_uplink_ring.c` | 连接 generation 隔离的 PSRAM PCM SPSC ring | 不访问 TLS、FSM 或板级 MIC |
 | `components/julia_board_audio` | MIC I2S 采集、PCM1 打包、同步扬声器底层操作 | 不承担 WSS 接收或语音播放调度 |
 
-会话结束以及新会话开始时清理发送队列，未就绪会话拒绝新作业；这些队列不是断线后的可靠重放存储。文件传输期间只发送文件 binary，语音启动通过 `ERROR file_cancelled` 结束文件区间，防止将文件字节与 MIC PCM1 混淆。
+会话结束以及新会话开始时清理控制队列和 MIC ring，未就绪会话拒绝新作业。MIC ring 只允许同一 WSS generation 内继续发送；重连后的新 generation 从空 ring 开始，绝不重放断线前 PCM。文件传输期间只发送文件 binary，语音启动通过 `ERROR file_cancelled` 结束文件区间，防止将文件字节与 MIC PCM1 混淆。
 
 播放任务的完成信息包含本地 generation；它只防止设备内部的旧任务结果覆盖新状态，不是服务端的 turn_id。具体参数与推流约束见 [通信协议](../docs/PROTOCOL.md)。
 

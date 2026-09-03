@@ -11,10 +11,11 @@ tests/host/
 ├─ test_voice_playback.c  实际播放控制代码的确定性场景
 ├─ test_julia_fsm.c       行为状态迁移图与事件映射
 ├─ test_wss_tx_writer.c   TLS 部分写、暂时错误重试与绝对截止时间
+├─ test_voice_uplink_ring.c PSRAM上行ring顺序、回绕、容量与连接代次
 └─ stubs/                 仅供测试的 ESP 错误码、时间、内存与 RTOS 接口
 ```
 
-四个测试程序分别注册为独立 CTest 目标。stub 不实现真实 FreeRTOS 调度和 I2S DMA，禁止加入固件的全局头文件搜索路径。
+五个测试程序分别注册为独立 CTest 目标。stub 不实现真实 FreeRTOS 调度、PSRAM硬件和 I2S DMA，禁止加入固件的全局头文件搜索路径。
 
 ## 执行方法
 
@@ -41,5 +42,7 @@ ctest --test-dir build-host --output-on-failure
 - 溢出终止、I2S 错误终止、异步自检结束。
 - TLS 单次／部分写入，WANT_READ、WANT_WRITE、EAGAIN 的同区间重试，
   绝对截止时间以及永久错误退出。
+- 上行ring的FIFO、回绕、满缓冲、消费确认、会话停止，以及旧 connection
+  generation 数据不得进入新连接。
 
 模拟写入不是物理扬声器输出；测试不能证明 DMA 排空时间、音质、多核最坏调度延迟或开机速度。这些项目仍按 [设备验收](../../docs/VALIDATION.md) 上板执行。

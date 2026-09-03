@@ -25,3 +25,9 @@ add_executable(test_wss_tx_writer test_wss_tx_writer.c
 target_include_directories(test_wss_tx_writer PRIVATE ../../main/voice)
 set_property(TARGET test_wss_tx_writer PROPERTY C_STANDARD 99)
 add_test(NAME wss_tx_writer COMMAND test_wss_tx_writer)
+
+add_executable(test_voice_uplink_ring test_voice_uplink_ring.c
+    ../../main/voice/voice_uplink_ring.c)
+target_include_directories(test_voice_uplink_ring PRIVATE ../../main/voice)
+set_property(TARGET test_voice_uplink_ring PROPERTY C_STANDARD 99)
+add_test(NAME voice_uplink_ring COMMAND test_voice_uplink_ring)

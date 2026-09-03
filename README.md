@@ -100,7 +100,7 @@ VS Code 的 ESP-IDF 构建路径与 IntelliSense 均使用 `build/`。只需生�
 
 ```mermaid
 flowchart LR
-    MIC[麦克风 I2S] --> PCM[PCM1 有界队列]
+    MIC[麦克风 I2S] --> PCM[PCM1 PSRAM Ring]
     PCM --> WSS[WSS 会话]
     WSS <--> SERVER[外部语音服务]
     WSS --> PLAY[64KiB PCM 缓冲与播放任务]

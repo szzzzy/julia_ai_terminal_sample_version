@@ -204,7 +204,7 @@ static void wss_log_session_probe(const char *reason)
              "WSS probe reason=%s session_ms=%" PRIi64
              " rx_age_ms=%" PRIi64 " tx_age_ms=%" PRIi64
              " tx_frames=%" PRIu64 " tx_payload_bytes=%" PRIu64
-             " rx_frames=%" PRIu64 " q_audio=%u q_control=%u",
+             " rx_frames=%" PRIu64 " q_data=%u q_control=%u",
              reason, session_ms, rx_age_ms, tx_age_ms, s_tx_frames,
              s_tx_payload_bytes, s_rx_frames, (unsigned)audio_queued,
              (unsigned)control_queued);
