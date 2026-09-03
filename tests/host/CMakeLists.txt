@@ -20,6 +20,12 @@ target_include_directories(test_julia_fsm PRIVATE stubs ../../main/fsm)
 set_property(TARGET test_julia_fsm PROPERTY C_STANDARD 99)
 add_test(NAME julia_fsm COMMAND test_julia_fsm)
 
+add_executable(test_wss_disconnect_fsm test_wss_disconnect_fsm.c
+    ../../main/fsm/julia_fsm.c)
+target_include_directories(test_wss_disconnect_fsm PRIVATE stubs ../../main/fsm)
+set_property(TARGET test_wss_disconnect_fsm PROPERTY C_STANDARD 99)
+add_test(NAME wss_disconnect_fsm COMMAND test_wss_disconnect_fsm)
+
 add_executable(test_wss_tx_writer test_wss_tx_writer.c
     ../../main/voice/wss_tx_writer.c)
 target_include_directories(test_wss_tx_writer PRIVATE ../../main/voice)
@@ -31,3 +37,17 @@ add_executable(test_voice_uplink_ring test_voice_uplink_ring.c
 target_include_directories(test_voice_uplink_ring PRIVATE ../../main/voice)
 set_property(TARGET test_voice_uplink_ring PROPERTY C_STANDARD 99)
 add_test(NAME voice_uplink_ring COMMAND test_voice_uplink_ring)
+
+add_executable(test_voice_uplink_pump test_voice_uplink_pump.c
+    ../../main/voice/voice_uplink_pump.c
+    ../../main/voice/voice_uplink_ring.c)
+target_include_directories(test_voice_uplink_pump PRIVATE ../../main/voice)
+set_property(TARGET test_voice_uplink_pump PROPERTY C_STANDARD 99)
+add_test(NAME voice_uplink_pump COMMAND test_voice_uplink_pump)
+
+add_executable(test_voice_session_recovery test_voice_session_recovery.c
+    ../../main/voice/voice_uplink_pump.c
+    ../../main/voice/voice_uplink_ring.c)
+target_include_directories(test_voice_session_recovery PRIVATE ../../main/voice)
+set_property(TARGET test_voice_session_recovery PROPERTY C_STANDARD 99)
+add_test(NAME voice_session_recovery COMMAND test_voice_session_recovery)

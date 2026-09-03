@@ -44,6 +44,7 @@
  *       |                              · 对端 CLOSE（回送后退出）
  *       |                              · PING 后 CONFIG_WSS_PONG_TIMEOUT_SECONDS
  *       |                                内无任何下行帧（判死）
+ *       |                              · 外部任务请求 owner 以明确原因结束会话
  *       |                              v
  *       +-----[重连等待 vTaskDelay(RECONNECT_INTERVAL)]---→ 重新 wss_connect()
  *
@@ -65,16 +66,18 @@
  * - FILE_SEND（上行推送）：BEGIN FILE/Binary/END 的字节含义在上层
  *   voice_service.c；本模块只保证"作为若干连续且不超限的 WebSocket 帧写出去"，
  *   不解释 URI、不分块文件。
+ * - MIC PCM 位于上层 PSRAM ring，由 on_poll 在会话任务内调用 send_now 发送；
+ *   ring overflow 只跨任务提交结束请求，TLS 仍由本任务独占 teardown。
  *
  * 并发模型：
  * - s_tls、s_rx_extra*、s_msg_*（分片重组）、s_session_failed 只在会话任务
  *   上下文中读写，天然无需锁。mbedTLS 会话句柄绝不跨任务共享，是"收发全部
  *   收敛到会话任务"的根本原因。
- * - s_started / s_starting / s_start_lock 专门保护 wss_transport_start() 的
- *   幂等启动，允许任意普通任务调用（如 IP 就绪回调）。
+ * - s_started / s_starting / s_session_ready / s_requested_end_reason 由
+ *   s_start_lock 保护，允许普通任务提交结束请求但不直接修改 owner 状态。
  * - s_cmd_queue 是跨任务的有界通道：外部任务入队（非阻塞），会话任务出队。
- * - 除入队外没有任何会阻塞任务的操作；会话任务只在 recv/send 上受 20ms/5s
- *   套接字超时约束，其余全部有界。
+ * - 会话任务只在 recv/send 上分别受 20ms 读取超时和 2s 帧写期限约束；
+ *   控制分派和上层 on_poll 也必须保持有界。
  */
 
 #include <errno.h>
@@ -176,6 +179,10 @@ static uint8_t s_msg_payload[WSS_TRANSPORT_MAX_PAYLOAD + 1];
 static size_t s_msg_len;
 static uint8_t s_msg_opcode;
 static bool s_msg_active;
+/** 当前结束原因和跨任务请求；前者仅 owner 写，后者由 s_start_lock 保护。 */
+static wss_transport_end_reason_t s_session_end_reason;
+static wss_transport_end_reason_t s_last_write_end_reason;
+static wss_transport_end_reason_t s_requested_end_reason;
 
 /* 会话诊断计数仅由 WSS 会话任务读写，用于在断链瞬间还原现场。 */
 static int64_t s_session_started_us;
@@ -184,6 +191,28 @@ static int64_t s_last_tx_us;
 static uint64_t s_tx_frames;
 static uint64_t s_tx_payload_bytes;
 static uint64_t s_rx_frames;
+
+static void wss_set_owner_end_reason(wss_transport_end_reason_t reason)
+{
+    if (s_session_end_reason == WSS_TRANSPORT_END_NONE &&
+        reason > WSS_TRANSPORT_END_NONE &&
+        reason < WSS_TRANSPORT_END_REASON_COUNT) {
+        s_session_end_reason = reason;
+    }
+}
+
+static bool wss_take_requested_end(wss_transport_end_reason_t *reason)
+{
+    bool requested = false;
+    portENTER_CRITICAL(&s_start_lock);
+    if (s_requested_end_reason != WSS_TRANSPORT_END_NONE) {
+        *reason = s_requested_end_reason;
+        s_requested_end_reason = WSS_TRANSPORT_END_NONE;
+        requested = true;
+    }
+    portEXIT_CRITICAL(&s_start_lock);
+    return requested;
+}
 
 /** 在销毁 TLS 句柄前记录一次有界现场快照，不在正常音频路径刷日志。 */
 static void wss_log_session_probe(const char *reason)
@@ -369,6 +398,9 @@ static esp_err_t wss_tls_write_all(const void *data, size_t len,
         phase, opcode, frame_payload_len, probe_result,
         probe_system_error, would_block, stats.bytes_sent, len,
         stats.transient_retries, elapsed_us);
+    s_last_write_end_reason = result == WSS_TX_WRITE_TIMEOUT
+                                  ? WSS_TRANSPORT_END_TX_STALL
+                                  : WSS_TRANSPORT_END_TX_ERROR;
     return ESP_FAIL;
 }
 
@@ -448,7 +480,9 @@ static esp_err_t wss_tls_read_exact(void *data, size_t len)
  */
 static esp_err_t wss_ws_send(uint8_t opcode, const uint8_t *payload, size_t len)
 {
+    s_last_write_end_reason = WSS_TRANSPORT_END_NONE;
     if (s_tls == NULL) {
+        s_last_write_end_reason = WSS_TRANSPORT_END_TX_ERROR;
         return ESP_FAIL;
     }
     switch (opcode) {                   /* RFC 6455 5.2：只允许已定义的操作码 */
@@ -546,6 +580,12 @@ static esp_err_t wss_send_close(uint16_t code)
     return wss_ws_send(0x8, payload, len);
 }
 
+static void wss_send_protocol_close(uint16_t code)
+{
+    wss_set_owner_end_reason(WSS_TRANSPORT_END_PROTOCOL_ERROR);
+    (void)wss_send_close(code);
+}
+
 /**
  * @brief 回送服务端的完整 CLOSE 载荷，并有限等待对端关闭底层连接。
  *
@@ -640,7 +680,7 @@ static esp_err_t wss_ws_recv(uint8_t *opcode_out, uint8_t *payload, size_t cap,
     *fin_out = (hdr[0] & 0x80) != 0;
     if ((hdr[0] & 0x70) != 0) {             /* RSV1-3：未协商任何扩展 */
         ESP_LOGW(TAG, "WS frame with unsupported RSV extension bits rejected");
-        (void)wss_send_close(1002);
+        wss_send_protocol_close(1002);
         return ESP_FAIL;
     }
     /* 扩展长度先按 uint64_t 解析（ESP32 的 size_t 只有 32 位，直接左移写入
@@ -654,7 +694,7 @@ static esp_err_t wss_ws_recv(uint8_t *opcode_out, uint8_t *payload, size_t cap,
         len64 = ((uint64_t)b[0] << 8) | b[1];
         if (len64 < 126) {                  /* RFC 6455 5.2：长度必须使用最短编码 */
             ESP_LOGW(TAG, "WS frame with non-minimal length encoding rejected");
-            (void)wss_send_close(1002);
+            wss_send_protocol_close(1002);
             return ESP_FAIL;
         }
     } else if (len64 == 127) {
@@ -664,7 +704,7 @@ static esp_err_t wss_ws_recv(uint8_t *opcode_out, uint8_t *payload, size_t cap,
         }
         if ((b[0] & 0x80) != 0) {           /* RFC 6455：64 位长度最高位必须为 0 */
             ESP_LOGW(TAG, "WS frame with high bit set in 64-bit length rejected");
-            (void)wss_send_close(1002);
+            wss_send_protocol_close(1002);
             return ESP_FAIL;
         }
         len64 = 0;
@@ -673,24 +713,24 @@ static esp_err_t wss_ws_recv(uint8_t *opcode_out, uint8_t *payload, size_t cap,
         }
         if (len64 <= 0xFFFF) {              /* RFC 6455 5.2：长度必须使用最短编码 */
             ESP_LOGW(TAG, "WS frame with non-minimal length encoding rejected");
-            (void)wss_send_close(1002);
+            wss_send_protocol_close(1002);
             return ESP_FAIL;
         }
     }
     if ((hdr[1] & 0x80) != 0) {             /* RFC 6455：服务端帧不得掩码 */
         ESP_LOGW(TAG, "Masked server WS frame rejected");
-        (void)wss_send_close(1002);
+        wss_send_protocol_close(1002);
         return ESP_FAIL;
     }
     if (op >= 0x8 && len64 > 125) {         /* RFC 6455：控制帧载荷不得超过 125 */
         ESP_LOGW(TAG, "Oversized WS control frame (%" PRIu64 ")", len64);
-        (void)wss_send_close(1002);
+        wss_send_protocol_close(1002);
         return ESP_FAIL;
     }
     /* 读取载荷前先把超长声明拒掉，再安全收窄为 size_t。 */
     if (len64 > cap) {
         ESP_LOGW(TAG, "Oversized WS frame (%" PRIu64 ")", len64);
-        (void)wss_send_close(1002);
+        wss_send_protocol_close(1002);
         return ESP_FAIL;
     }
     size_t len = (size_t)len64;
@@ -1070,15 +1110,30 @@ static void wss_drain_queue(void)
     }
 }
 
+static bool wss_apply_requested_end(void)
+{
+    wss_transport_end_reason_t reason = WSS_TRANSPORT_END_NONE;
+    if (!wss_take_requested_end(&reason)) return false;
+    wss_set_owner_end_reason(reason);
+    ESP_LOGW(TAG, "WSS owner accepted session end request: %s",
+             wss_transport_end_reason_name(reason));
+    return true;
+}
+
 /** 接收一轮之后处理有界上行批次和业务轮询，防止上行压力遮住对端 CLOSE。 */
 static bool wss_service_outbound(void)
 {
+    if (wss_apply_requested_end()) return false;
     wss_drain_queue();
+    if (wss_apply_requested_end()) return false;
     if (!s_session_failed && s_config.on_poll != NULL) {
         s_config.on_poll();
     }
+    if (wss_apply_requested_end()) return false;
     if (s_session_failed) {
-        ESP_LOGW(TAG, "WSS write failure during queued item handling; closing session");
+        wss_set_owner_end_reason(WSS_TRANSPORT_END_APPLICATION_ERROR);
+        ESP_LOGW(TAG, "WSS session failed during outbound handling: %s",
+                 wss_transport_end_reason_name(s_session_end_reason));
         return false;
     }
     return true;
@@ -1169,6 +1224,8 @@ static void wss_run_session(void)
 {
     /* 会话级状态复位：写失败标志、分片重组进度与保活计时。 */
     s_session_failed = false;
+    s_session_end_reason = WSS_TRANSPORT_END_NONE;
+    s_last_write_end_reason = WSS_TRANSPORT_END_NONE;
     s_msg_active = false;
     s_msg_len = 0;
     int64_t last_rx_us = esp_timer_get_time();
@@ -1185,6 +1242,7 @@ static void wss_run_session(void)
     xQueueReset(s_cmd_queue);
     xQueueReset(s_control_queue);
     portENTER_CRITICAL(&s_start_lock);
+    s_requested_end_reason = WSS_TRANSPORT_END_NONE;
     s_session_ready = true;
     portEXIT_CRITICAL(&s_start_lock);
 
@@ -1193,6 +1251,8 @@ static void wss_run_session(void)
     }
 
     while (s_tls != NULL && !s_session_failed) {
+        (void)ulTaskNotifyTake(pdTRUE, 0);
+        if (wss_apply_requested_end()) break;
         /* 先收一帧再处理上行：持续 MIC 上传时也要优先看到服务端 CLOSE，避免服务端
          * 停止读取后，本机先因排队 PCM 写失败而跳过关闭握手。空闲读取仅阻塞 20ms。 */
         uint8_t op = 0;
@@ -1202,9 +1262,11 @@ static void wss_run_session(void)
         bool fin = true;
         if (wss_ws_recv(&op, frame_payload, sizeof(frame_payload) - 1,
                         &len, &idle, &fin) != ESP_OK) {
+            wss_set_owner_end_reason(WSS_TRANSPORT_END_RX_ERROR);
             ESP_LOGW(TAG, "WSS receive failed; closing session");
             break;
         }
+        if (wss_apply_requested_end()) break;
 
         if (idle) {
             /* 空闲窗口：处理上行和主动保活，不把空闲当作断线。 */
@@ -1215,6 +1277,7 @@ static void wss_run_session(void)
             if (pong_pending) {
                 int64_t pong_timeout_us = (int64_t)CONFIG_WSS_PONG_TIMEOUT_SECONDS * 1000000LL;
                 if (now_us - last_ping_us >= pong_timeout_us) {
+                    wss_set_owner_end_reason(WSS_TRANSPORT_END_KEEPALIVE_TIMEOUT);
                     ESP_LOGW(TAG, "WSS keepalive: no downlink frame within %d s after PING; reconnecting",
                              CONFIG_WSS_PONG_TIMEOUT_SECONDS);
                     break;
@@ -1223,6 +1286,10 @@ static void wss_run_session(void)
                 int64_t keepalive_us = (int64_t)CONFIG_WSS_KEEPALIVE_INTERVAL_SECONDS * 1000000LL;
                 if (now_us - last_rx_us >= keepalive_us) {
                     if (wss_ws_send(0x9, NULL, 0) != ESP_OK) {
+                        wss_set_owner_end_reason(
+                            s_last_write_end_reason != WSS_TRANSPORT_END_NONE
+                                ? s_last_write_end_reason
+                                : WSS_TRANSPORT_END_TX_ERROR);
                         ESP_LOGW(TAG, "WSS keepalive PING send failed; reconnecting");
                         break;
                     }
@@ -1243,11 +1310,15 @@ static void wss_run_session(void)
         if (op >= 0x8) {                    /* 控制帧：CLOSE/PING/PONG */
             if (!fin || len > 125) {
                 ESP_LOGW(TAG, "Invalid WS control frame (fragmented or oversized)");
-                (void)wss_send_close(1002);
+                wss_send_protocol_close(1002);
                 break;
             }
             if (op == 0x9) {                /* PING -> PONG */
                 if (wss_ws_send(0xA, frame_payload, len) != ESP_OK) {
+                    wss_set_owner_end_reason(
+                        s_last_write_end_reason != WSS_TRANSPORT_END_NONE
+                            ? s_last_write_end_reason
+                            : WSS_TRANSPORT_END_TX_ERROR);
                     break;
                 }
                 if (!wss_service_outbound()) break;
@@ -1257,7 +1328,7 @@ static void wss_run_session(void)
                 uint16_t close_code = 0;
                 if (len == 1) {             /* RFC 6455 5.5.1：CLOSE 载荷要么为空要么 ≥2 字节 */
                     ESP_LOGW(TAG, "Invalid WS CLOSE frame (1-byte payload); closing with 1002");
-                    (void)wss_send_close(1002);
+                    wss_send_protocol_close(1002);
                     break;
                 }
                 if (len >= 2) {
@@ -1266,17 +1337,18 @@ static void wss_run_session(void)
                     if (!wss_close_code_is_valid(close_code)) {
                         ESP_LOGW(TAG, "Invalid WS CLOSE status code 0x%04X; closing with 1002",
                                  close_code);
-                        (void)wss_send_close(1002);
+                        wss_send_protocol_close(1002);
                         break;
                     }
                     /* RFC 6455 5.5.1：状态码之后的 reason 必须是合法 UTF-8 */
                     if (!wss_text_is_valid_utf8(frame_payload + 2, len - 2)) {
                         ESP_LOGW(TAG, "WS CLOSE reason is not valid UTF-8; closing with 1002");
-                        (void)wss_send_close(1002);
+                        wss_send_protocol_close(1002);
                         break;
                     }
                 }
                 ESP_LOGI(TAG, "WSS server sent CLOSE (code 0x%04X); replying CLOSE", close_code);
+                wss_set_owner_end_reason(WSS_TRANSPORT_END_PEER_CLOSE);
                 portENTER_CRITICAL(&s_start_lock);
                 s_session_ready = false;    /* 拒绝关闭等待期间产生的新上行条目。 */
                 portEXIT_CRITICAL(&s_start_lock);
@@ -1285,7 +1357,7 @@ static void wss_run_session(void)
             }
             if (op != 0xA) {                /* 保留控制操作码 0xB-0xF：协议错误（RFC 6455 5.5） */
                 ESP_LOGW(TAG, "Reserved WS control opcode 0x%x rejected", op);
-                (void)wss_send_close(1002);
+                wss_send_protocol_close(1002);
                 break;
             }
             /* PONG（0xA）：待定探测已在上方统一清除。 */
@@ -1297,18 +1369,18 @@ static void wss_run_session(void)
         if (s_msg_active) {
             if (op != 0x0) {                /* 重组过程中不允许新消息帧 */
                 ESP_LOGW(TAG, "New data frame during fragmented message; closing session");
-                (void)wss_send_close(1002);
+                wss_send_protocol_close(1002);
                 break;
             }
         } else {
             if (op == 0x0) {
                 ESP_LOGW(TAG, "Continuation frame without a message start; closing session");
-                (void)wss_send_close(1002);
+                wss_send_protocol_close(1002);
                 break;
             }
             if (op != 0x1 && op != 0x2) {   /* 保留数据操作码 0x3-0x7：协议错误（RFC 6455 5.5） */
                 ESP_LOGW(TAG, "Reserved WS data opcode 0x%x rejected", op);
-                (void)wss_send_close(1002);
+                wss_send_protocol_close(1002);
                 break;
             }
             s_msg_active = true;
@@ -1317,7 +1389,7 @@ static void wss_run_session(void)
         }
         if (len > WSS_TRANSPORT_MAX_PAYLOAD - s_msg_len) {
             ESP_LOGW(TAG, "Reassembled WS message exceeds payload cap");
-            (void)wss_send_close(1002);
+            wss_send_protocol_close(1002);
             break;
         }
         memcpy(s_msg_payload + s_msg_len, frame_payload, len);
@@ -1334,7 +1406,7 @@ static void wss_run_session(void)
             /* RFC 6455 8.1：文本消息必须携带合法 UTF-8，否则以 1007 失败连接。 */
             if (!wss_text_is_valid_utf8(s_msg_payload, msg_len)) {
                 ESP_LOGW(TAG, "WS text message is not valid UTF-8; closing with 1007");
-                (void)wss_send_close(1007);
+                wss_send_protocol_close(1007);
                 break;
             }
             if (s_config.on_text != NULL) {
@@ -1362,7 +1434,16 @@ static void wss_run_session(void)
     portENTER_CRITICAL(&s_start_lock);
     s_session_ready = false;
     portEXIT_CRITICAL(&s_start_lock);
-    wss_log_session_probe("session_end");
+    wss_transport_end_reason_t pending_reason = WSS_TRANSPORT_END_NONE;
+    if (wss_take_requested_end(&pending_reason)) {
+        wss_set_owner_end_reason(pending_reason);
+    }
+    if (s_session_end_reason == WSS_TRANSPORT_END_NONE) {
+        wss_set_owner_end_reason(s_session_failed
+                                     ? WSS_TRANSPORT_END_APPLICATION_ERROR
+                                     : WSS_TRANSPORT_END_RX_ERROR);
+    }
+    wss_log_session_probe(wss_transport_end_reason_name(s_session_end_reason));
     (void)esp_tls_conn_destroy(s_tls);
     s_tls = NULL;
     s_msg_active = false;
@@ -1371,11 +1452,12 @@ static void wss_run_session(void)
      * 上下文。上层借此复位会话级业务状态（如关闭 MIC 流、停止扬声器）；此时网络
      * 已不可用，任何基于"会话仍健康"的发送都会失败，属预期。 */
     if (s_config.on_session_end != NULL) {
-        s_config.on_session_end();
+        s_config.on_session_end(s_session_end_reason);
     }
     xQueueReset(s_cmd_queue);
     xQueueReset(s_control_queue);
-    ESP_LOGW(TAG, "WSS session ended; reconnecting in %d s",
+    ESP_LOGW(TAG, "WSS session ended reason=%s; reconnecting in %d s",
+             wss_transport_end_reason_name(s_session_end_reason),
              CONFIG_WSS_RECONNECT_INTERVAL_SECONDS);
 }
 
@@ -1532,7 +1614,51 @@ esp_err_t wss_transport_enqueue_control(const void *item, size_t item_size)
     return xQueueSend(s_control_queue, item, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
-void wss_transport_fail_session(void) { s_session_failed = true; }
+void wss_transport_fail_session(void)
+{
+    wss_set_owner_end_reason(WSS_TRANSPORT_END_APPLICATION_ERROR);
+    s_session_failed = true;
+}
+
+esp_err_t wss_transport_request_session_end(wss_transport_end_reason_t reason)
+{
+    if (reason <= WSS_TRANSPORT_END_NONE ||
+        reason >= WSS_TRANSPORT_END_REASON_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    TaskHandle_t owner = NULL;
+    portENTER_CRITICAL(&s_start_lock);
+    if (!s_session_ready) {
+        portEXIT_CRITICAL(&s_start_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_requested_end_reason == WSS_TRANSPORT_END_NONE) {
+        s_requested_end_reason = reason;
+    }
+    /* 立即拒绝新控制作业；TLS teardown 仍只能由 owner 执行。 */
+    s_session_ready = false;
+    owner = s_session_task;
+    portEXIT_CRITICAL(&s_start_lock);
+    if (owner != NULL) xTaskNotifyGive(owner);
+    return ESP_OK;
+}
+
+const char *wss_transport_end_reason_name(wss_transport_end_reason_t reason)
+{
+    switch (reason) {
+    case WSS_TRANSPORT_END_NONE: return "none";
+    case WSS_TRANSPORT_END_PEER_CLOSE: return "peer_close";
+    case WSS_TRANSPORT_END_RX_ERROR: return "rx_error";
+    case WSS_TRANSPORT_END_TX_ERROR: return "tx_error";
+    case WSS_TRANSPORT_END_TX_STALL: return "tx_stall";
+    case WSS_TRANSPORT_END_KEEPALIVE_TIMEOUT: return "keepalive_timeout";
+    case WSS_TRANSPORT_END_PROTOCOL_ERROR: return "protocol_error";
+    case WSS_TRANSPORT_END_APPLICATION_ERROR: return "application_error";
+    case WSS_TRANSPORT_END_AUDIO_OVERFLOW: return "audio_overflow";
+    case WSS_TRANSPORT_END_REASON_COUNT:
+    default: return "unknown";
+    }
+}
 
 /**
  * @brief 在会话任务上下文中直接发送一帧 WebSocket 消息（封装 wss_ws_send）。
@@ -1552,6 +1678,10 @@ esp_err_t wss_transport_send_now(uint8_t opcode, const uint8_t *payload, size_t 
     if (err != ESP_OK) {
         /* 只有会话级写失败才标记链路故障并重连；参数非法不是会话故障。 */
         if (err == ESP_FAIL) {
+            wss_set_owner_end_reason(
+                s_last_write_end_reason != WSS_TRANSPORT_END_NONE
+                    ? s_last_write_end_reason
+                    : WSS_TRANSPORT_END_TX_ERROR);
             s_session_failed = true;
         }
         return err;

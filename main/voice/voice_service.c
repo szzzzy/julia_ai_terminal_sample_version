@@ -40,6 +40,7 @@
 #include "julia_fsm_runtime.h"
 #include "mqtt_comm.h"
 #include "voice_uri.h"
+#include "voice_uplink_pump.h"
 #include "voice_uplink_ring.h"
 #include "voice_playback.h"
 #include "wss_transport.h"
@@ -69,7 +70,10 @@ static void post_fsm_event(fsm_event_t event)
 #define VOICE_INTERACTION_ID_MAX_LEN 64
 #define VOICE_UPLINK_FRAME_CAPACITY 256U
 #define VOICE_UPLINK_FRAME_MAX_BYTES 656U
-#define VOICE_UPLINK_DRAIN_BATCH 4U
+#define VOICE_UPLINK_NORMAL_BATCH 1U
+#define VOICE_UPLINK_CATCHUP_BATCH 8U
+#define VOICE_UPLINK_CATCHUP_THRESHOLD 2U
+#define VOICE_UPLINK_RUN_BUDGET_US 8000LL
 
 /**
  * @brief 控制队列中的一条作业：文件 URI（含 NUL）或语音控制命令。
@@ -120,6 +124,7 @@ static uint16_t s_uplink_lengths[VOICE_UPLINK_FRAME_CAPACITY];
 static uint32_t s_uplink_generations[VOICE_UPLINK_FRAME_CAPACITY];
 static uint32_t s_uplink_generation;
 static bool s_uplink_ring_ready;
+static voice_uplink_pump_t s_uplink_pump;
 #if !CONFIG_JULIA_SERVER_WAKE_ENABLE
 static bool s_companion_timer_armed;
 static esp_timer_handle_t s_companion_timer;
@@ -132,6 +137,9 @@ static esp_err_t voice_service_enqueue(voice_job_type_t type,
                                        const uint8_t *data, size_t len);
 static void voice_service_apply_terminal_intent(fsm_event_t event,
                                                 const char *intent);
+static bool voice_service_send_uplink_frame(void *ctx, const uint8_t *data,
+                                            size_t len);
+static int64_t voice_service_uplink_now_us(void *ctx);
 
 static bool voice_service_mic_is_streaming(void)
 {
@@ -158,6 +166,23 @@ static esp_err_t voice_service_uplink_ring_init(void)
         s_uplink_storage = NULL;
         return ESP_ERR_INVALID_STATE;
     }
+    const voice_uplink_pump_ops_t pump_ops = {
+        .ctx = NULL,
+        .send = voice_service_send_uplink_frame,
+        .now_us = voice_service_uplink_now_us,
+    };
+    const voice_uplink_pump_config_t pump_config = {
+        .normal_batch = VOICE_UPLINK_NORMAL_BATCH,
+        .catchup_batch = VOICE_UPLINK_CATCHUP_BATCH,
+        .catchup_threshold_frames = VOICE_UPLINK_CATCHUP_THRESHOLD,
+        .run_budget_us = VOICE_UPLINK_RUN_BUDGET_US,
+    };
+    if (!voice_uplink_pump_init(&s_uplink_pump, &s_uplink_ring,
+                                &pump_ops, &pump_config)) {
+        heap_caps_free(s_uplink_storage);
+        s_uplink_storage = NULL;
+        return ESP_ERR_INVALID_STATE;
+    }
     s_uplink_ring_ready = true;
     ESP_LOGI(TAG, "MIC uplink ring ready: %u frames, %u bytes in PSRAM",
              (unsigned)VOICE_UPLINK_FRAME_CAPACITY, (unsigned)storage_bytes);
@@ -176,6 +201,7 @@ static uint32_t voice_service_next_uplink_generation(void)
 /** 文件二进制区间内暂停并清空 MIC ring；只由 WSS owner 调用。 */
 static void voice_service_pause_uplink_for_file(void)
 {
+    voice_uplink_pump_stop(&s_uplink_pump);
     if (s_uplink_ring_ready) voice_uplink_ring_stop_generation(&s_uplink_ring);
     portENTER_CRITICAL(&s_mic_state_lock);
     board_audio_enable_wss_mic(false);
@@ -190,6 +216,7 @@ static void voice_service_resume_uplink_after_file(void)
     }
     uint32_t generation = voice_service_next_uplink_generation();
     if (!voice_uplink_ring_start_generation(&s_uplink_ring, generation)) return;
+    voice_uplink_pump_start_generation(&s_uplink_pump, generation);
     portENTER_CRITICAL(&s_mic_state_lock);
     if (s_mic_streaming) board_audio_enable_wss_mic(true);
     portEXIT_CRITICAL(&s_mic_state_lock);
@@ -480,31 +507,45 @@ static void voice_service_speaker_done(void)
 #endif
 }
 
-/** WSS owner 每轮最多发送 4 个 ring 帧，保持与 V1 队列批次相同的调度上限。 */
+static bool voice_service_send_uplink_frame(void *ctx, const uint8_t *data,
+                                            size_t len)
+{
+    (void)ctx;
+    if (wss_transport_send_now(0x2, data, len) != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to send %u-byte MIC ring frame", (unsigned)len);
+        return false;
+    }
+    return true;
+}
+
+static int64_t voice_service_uplink_now_us(void *ctx)
+{
+    (void)ctx;
+    return esp_timer_get_time();
+}
+
+/** 正常发送 1 帧；出现积压后每轮在 8 帧/8ms 双重预算内追赶。 */
 static void voice_service_uplink_poll(void)
 {
     if (!s_uplink_ring_ready || s_uplink_generation == 0U ||
         !voice_service_mic_is_streaming()) {
         return;
     }
-    for (unsigned i = 0; i < VOICE_UPLINK_DRAIN_BATCH; ++i) {
-        const uint8_t *frame = NULL;
-        size_t bytes = 0;
-        if (!voice_uplink_ring_peek(&s_uplink_ring,
-                                    s_uplink_generation,
-                                    &frame, &bytes)) {
-            break;
-        }
-        if (wss_transport_send_now(0x2, frame, bytes) != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to send %u-byte MIC ring frame",
-                     (unsigned)bytes);
-            return;
-        }
-        if (!voice_uplink_ring_consume(&s_uplink_ring)) {
-            ESP_LOGE(TAG, "MIC uplink ring lost consumer ownership");
-            wss_transport_fail_session();
-            return;
-        }
+    voice_uplink_pump_result_t result = voice_uplink_pump_run(&s_uplink_pump);
+    if (result.status == VOICE_UPLINK_PUMP_RING_ERROR) {
+        ESP_LOGE(TAG, "MIC uplink pump lost ring ownership");
+        wss_transport_fail_session();
+        return;
+    }
+    if (result.catchup_completed &&
+        (result.catchup_peak_frames >= 5U ||
+         result.catchup_drain_us >= 50000LL)) {
+        ESP_LOGI(TAG,
+                 "MIC uplink backlog recovered generation=%" PRIu32
+                 " peak_frames=%u drain_ms=%" PRIi64,
+                 s_uplink_generation,
+                 (unsigned)result.catchup_peak_frames,
+                 result.catchup_drain_us / 1000LL);
     }
 }
 
@@ -893,6 +934,7 @@ static void voice_service_on_session_start(void)
         wss_transport_fail_session();
         return;
     }
+    voice_uplink_pump_start_generation(&s_uplink_pump, generation);
 #if CONFIG_JULIA_SERVER_WAKE_ENABLE
     portENTER_CRITICAL(&s_mic_state_lock);
     s_mic_streaming = true;
@@ -916,12 +958,13 @@ static void voice_service_on_session_start(void)
 /**
  * @brief WSS 会话结束回调：链路关闭后复位会话级 MIC 流式状态。
  */
-static void voice_service_on_session_end(void)
+static void voice_service_on_session_end(wss_transport_end_reason_t reason)
 {
     voice_service_disarm_companion_timer();
     size_t discarded_frames = 0;
     if (s_uplink_ring_ready) {
         discarded_frames = voice_uplink_ring_count(&s_uplink_ring);
+        voice_uplink_pump_stop(&s_uplink_pump);
         voice_uplink_ring_stop_generation(&s_uplink_ring);
     }
     portENTER_CRITICAL(&s_mic_state_lock);
@@ -938,9 +981,10 @@ static void voice_service_on_session_end(void)
     s_playback_role = VOICE_PLAYBACK_ROLE_NONE;
     julia_avatar_talking_stop();
     ESP_LOGI(TAG, "WSS uplink generation=%" PRIu32
-                  " ended; discarded MIC ring frames=%u",
-             s_uplink_generation, (unsigned)discarded_frames);
-    post_fsm_event(EVT_SILENCE_TIMEOUT);
+                  " ended reason=%s; discarded MIC ring frames=%u",
+             s_uplink_generation, wss_transport_end_reason_name(reason),
+             (unsigned)discarded_frames);
+    post_fsm_event(EVT_WSS_DISCONNECTED);
     julia_idle_display_note_activity();
     julia_idle_display_set_busy(false);
 }
@@ -1226,7 +1270,13 @@ esp_err_t voice_service_send_chunk(const uint8_t *buf, size_t len)
         &s_uplink_ring, buf, len);
     switch (result) {
     case VOICE_UPLINK_PUSH_OK: return ESP_OK;
-    case VOICE_UPLINK_PUSH_FULL: return ESP_ERR_NO_MEM;
+    case VOICE_UPLINK_PUSH_FULL: {
+        /* producer 只关闭入口并提交原因；ring/TLS 的清理由 WSS owner 串行完成。 */
+        voice_uplink_ring_close_generation(&s_uplink_ring);
+        (void)wss_transport_request_session_end(
+            WSS_TRANSPORT_END_AUDIO_OVERFLOW);
+        return ESP_ERR_NO_MEM;
+    }
     case VOICE_UPLINK_PUSH_INACTIVE: return ESP_ERR_INVALID_STATE;
     case VOICE_UPLINK_PUSH_INVALID:
     default: return ESP_ERR_INVALID_ARG;

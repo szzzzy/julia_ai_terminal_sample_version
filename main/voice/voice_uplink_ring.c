@@ -108,8 +108,14 @@ bool voice_uplink_ring_start_generation(voice_uplink_ring_t *ring,
 void voice_uplink_ring_stop_generation(voice_uplink_ring_t *ring)
 {
     if (ring == NULL) return;
-    store_bool_release(&ring->accepting, false);
+    voice_uplink_ring_close_generation(ring);
     discard_published(ring);
+}
+
+void voice_uplink_ring_close_generation(voice_uplink_ring_t *ring)
+{
+    if (ring == NULL) return;
+    store_bool_release(&ring->accepting, false);
 }
 
 voice_uplink_push_result_t voice_uplink_ring_push(voice_uplink_ring_t *ring,

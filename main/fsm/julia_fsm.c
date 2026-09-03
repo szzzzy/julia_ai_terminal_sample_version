@@ -48,6 +48,7 @@ static const char *const s_event_names[EVT_COUNT] = {
     [EVT_INTENT_GOODNIGHT] = "EVT_INTENT_GOODNIGHT",
     [EVT_INTENT_DISMISS] = "EVT_INTENT_DISMISS",
     [EVT_WIFI_DISCONNECTED] = "EVT_WIFI_DISCONNECTED",
+    [EVT_WSS_DISCONNECTED] = "EVT_WSS_DISCONNECTED",
     [EVT_OTA_AVAILABLE] = "EVT_OTA_AVAILABLE",
     [EVT_OTA_SUCCEEDED] = "EVT_OTA_SUCCEEDED",
     [EVT_OTA_TASK_FAILED] = "EVT_OTA_TASK_FAILED",
@@ -111,7 +112,7 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
     switch (from_main_state) {
     case JULIA_MAIN_STATE_S0_BOOT:
         return target_is(to_main_state, to_s2_sub_state,
-                         JULIA_MAIN_STATE_S1_COMPANION) ||
+                         JULIA_MAIN_STATE_S3_STANDBY) ||
                target_is(to_main_state, to_s2_sub_state,
                          JULIA_MAIN_STATE_S8_OTA);
 
@@ -147,7 +148,9 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
         return target_is(to_main_state, to_s2_sub_state,
                          JULIA_MAIN_STATE_S4_INTERACTION) ||
                target_is(to_main_state, to_s2_sub_state,
-                         JULIA_MAIN_STATE_S6_SLEEP);
+                         JULIA_MAIN_STATE_S6_SLEEP) ||
+               target_is(to_main_state, to_s2_sub_state,
+                         JULIA_MAIN_STATE_S8_OTA);
 
     case JULIA_MAIN_STATE_S4_INTERACTION:
         return target_is(to_main_state, to_s2_sub_state,
@@ -173,7 +176,7 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
         return target_is(to_main_state, to_s2_sub_state,
                          JULIA_MAIN_STATE_S0_BOOT) ||
                target_is(to_main_state, to_s2_sub_state,
-                         JULIA_MAIN_STATE_S1_COMPANION);
+                         JULIA_MAIN_STATE_S3_STANDBY);
     case JULIA_MAIN_STATE_S7_FAULT:
     case JULIA_MAIN_STATE_COUNT:
     default:
@@ -232,8 +235,8 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
     if ((fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
          fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG ||
          fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION) &&
-        event == EVT_WIFI_DISCONNECTED) {
-        /* 网络交互态在 Wi-Fi 断联后统一收敛到待机，等待网络生命周期自动重连。 */
+        (event == EVT_WIFI_DISCONNECTED || event == EVT_WSS_DISCONNECTED)) {
+        /* 网络交互态在 Wi-Fi/WSS 断联后统一收敛到待机，等待对应链路自动重连。 */
         target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION &&
@@ -242,7 +245,8 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
         target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if ((fsm->main_state == JULIA_MAIN_STATE_S0_BOOT ||
-                fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION) &&
+                fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
+                fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY) &&
                event == EVT_OTA_AVAILABLE) {
         target_main_state = JULIA_MAIN_STATE_S8_OTA;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
@@ -289,7 +293,8 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S8_OTA &&
                event == EVT_OTA_TASK_FAILED) {
-        target_main_state = JULIA_MAIN_STATE_S1_COMPANION;
+        /* OTA 普通失败回到需要唤醒词的待机态，避免让 S1 承担待唤醒语义。 */
+        target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     /* 复用现有语音链路事件驱动“听 -> 想 -> 说”，不新增阶段事件。 */
     } else if (event == EVT_USER_CALL &&

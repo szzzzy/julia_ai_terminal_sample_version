@@ -32,6 +32,7 @@ set(srcs
     "voice/wss_transport.c"
     "voice/wss_tx_writer.c"
     "voice/voice_uplink_ring.c"
+    "voice/voice_uplink_pump.c"
     "voice/voice_service.c"
     "voice/voice_playback.c"
     "voice/pcm_buffer.c"

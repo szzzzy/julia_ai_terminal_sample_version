@@ -1,9 +1,10 @@
 /**
  * @file    julia_idle_display.h
- * @brief   Julia 待机显示策略：陪伴常驻，长时间无交互后进入闭眼呼吸。
+ * @brief   Julia 待机显示策略：默认待机，交互后陪伴一段时间再回到闭眼呼吸。
  *
  * 职责边界：
- *   - 日常保持活跃陪伴显示；达到长休阈值后一次性切换到睡眠(闭眼+背光呼吸)，
+ *   - 启动时跟随 FSM 的 S3 待机；有效交互后保持活跃陪伴显示，达到长休阈值后
+ *     一次性切回待机（闭眼+背光呼吸），
  *     同时保证 LVGL/背光配合不打扰正在进行的
  *     对话播放。它只处理"屏幕该显示什么闲置状态"，不负责立绘内容本身（那是 julia_avatar/
  *     julia_ui 的职责）。
@@ -25,7 +26,7 @@
 extern "C" {
 #endif
 
-/** Start the companion -> far-standby policy task. */
+/** Start the default-standby and post-interaction companion-window policy task. */
 esp_err_t julia_idle_display_init(void);
 
 /** Record a valid user or voice interaction and wake the display if needed. */

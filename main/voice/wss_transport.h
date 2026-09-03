@@ -74,12 +74,26 @@ typedef void (*wss_transport_queue_item_cb_t)(void *item, size_t item_size);
  */
 typedef void (*wss_transport_session_start_cb_t)(void);
 
+typedef enum {
+    WSS_TRANSPORT_END_NONE = 0,
+    WSS_TRANSPORT_END_PEER_CLOSE,
+    WSS_TRANSPORT_END_RX_ERROR,
+    WSS_TRANSPORT_END_TX_ERROR,
+    WSS_TRANSPORT_END_TX_STALL,
+    WSS_TRANSPORT_END_KEEPALIVE_TIMEOUT,
+    WSS_TRANSPORT_END_PROTOCOL_ERROR,
+    WSS_TRANSPORT_END_APPLICATION_ERROR,
+    WSS_TRANSPORT_END_AUDIO_OVERFLOW,
+    WSS_TRANSPORT_END_REASON_COUNT,
+} wss_transport_end_reason_t;
+
 /**
  * @brief 会话结束回调：链路关闭、故障或保活超时后、重连等待之前调用。
  *
+ * @param[in] reason transport owner 记录的唯一结束原因。
  * @note 在会话任务上下文中同步执行；供上层复位会话级业务状态（如 MIC 流）。
  */
-typedef void (*wss_transport_session_end_cb_t)(void);
+typedef void (*wss_transport_session_end_cb_t)(wss_transport_end_reason_t reason);
 
 /**
  * @brief 传输层启动配置。
@@ -133,6 +147,13 @@ esp_err_t wss_transport_enqueue(const void *item, size_t item_size);
 esp_err_t wss_transport_enqueue_control(const void *item, size_t item_size);
 /** Mark the current session failed from a session callback (e.g. file read failure). */
 void wss_transport_fail_session(void);
+
+/**
+ * 跨任务请求 WSS owner 终止当前会话。调用方只提交原因，不得操作 TLS 或队列；
+ * owner 在完成当前不可拆分写入后统一 teardown。当前主要用于 MIC ring overflow。
+ */
+esp_err_t wss_transport_request_session_end(wss_transport_end_reason_t reason);
+const char *wss_transport_end_reason_name(wss_transport_end_reason_t reason);
 
 /**
  * @brief 在会话任务上下文中直接发送一帧 WebSocket 消息。

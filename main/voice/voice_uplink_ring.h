@@ -41,6 +41,8 @@ bool voice_uplink_ring_init(voice_uplink_ring_t *ring,
 /** 由 WSS owner 开始一个空的新上行代次；每条新连接必须使用新值。 */
 bool voice_uplink_ring_start_generation(voice_uplink_ring_t *ring,
                                         uint32_t generation);
+/** producer/owner 均可关闭新帧入口；不移动索引，最终清理由 owner 完成。 */
+void voice_uplink_ring_close_generation(voice_uplink_ring_t *ring);
 /** 由 WSS owner 停止当前代次并丢弃已发布积压。 */
 void voice_uplink_ring_stop_generation(voice_uplink_ring_t *ring);
 

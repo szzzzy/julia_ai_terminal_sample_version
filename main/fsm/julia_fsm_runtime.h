@@ -19,7 +19,7 @@ typedef void (*julia_fsm_state_observer_t)(julia_main_state_t main_state,
                                             void *ctx);
 
 /**
- * 初始化运行时。关键交互依赖已就绪时直接按允许迁移图从 S0 进入 S1；
+ * 初始化运行时。关键交互依赖已就绪时直接按允许迁移图从 S0 进入 S3；
  * 未就绪时保留在 S0，等待应用通过严重故障接口进入 S7。
  *
  * 同时创建 16 槽消息队列、FSM 任务和 S3 驻留计时器。重复调用幂等。

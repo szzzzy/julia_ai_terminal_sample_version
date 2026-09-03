@@ -30,7 +30,7 @@
 2. 初始化背光、LCD、LVGL、Avatar，交由独立 `boot_animation` 任务执行眨眼序列。
 3. 主任务同时注册语音命令、初始化板级音频与独立播放任务、音频素材服务和 RTC，并挂载 SD。
 4. 注册 IP-ready 回调并启动 Wi-Fi；扫描／连接及可用时的 SNTP 与动画重叠。
-5. 等动画完成后启动闲置显示和 FSM；关键显示、音频或语音依赖失败时进入 S7，否则由 S0 进入 S1。
+5. 等动画完成后启动闲置显示和 FSM；关键显示、音频或语音依赖失败时进入 S7，否则由 S0 直接进入等待唤醒词的 S3。
 6. FSM 就绪后启动夜间、运动及可选本地唤醒输入。
 7. 打开交互启动门槛，唤醒网络服务重试；MQTT／WSS 仅在此前置条件满足后启动，避免抢占开机画面。
 8. 仅在 `CONFIG_VOICE_PUSH_DEMO_ENABLE` 启用时启动文件推送演示。
@@ -43,7 +43,7 @@
 
 | 执行上下文 | 所有权／限制 |
 | --- | --- |
-| `board_mic` | 从 I2S 读取 MIC，转换为 PCM16，通过回调入队；播放时 WSS 上行与本地 AFE 均持续接收，以支持唤醒和语音打断 |
+| `board_mic` | 从 I2S 读取 MIC，转换为 PCM16，通过回调写入上行ring；播放时 WSS 上行与本地 AFE 均持续接收，以支持唤醒和语音打断 |
 | WSS 会话任务 | 独占 TLS 句柄；分批处理控制队列／PCM PSRAM ring、接收数据、轮询播放完成事件和推进一个文件块 |
 | `voice_playback` | 独占运行时扬声器操作，160 样本一块消费 PCM，负责预缓冲、尾音排空、取消和异常完成 |
 | MQTT 事件上下文 | 分片重组与路由；语音命令入队；PUBACK 交给报告处理流程 |
@@ -52,7 +52,7 @@
 | 闲置／夜间／运动任务 | 闲置和夜间任务投递 FSM 事件；IMU 只恢复显示，不改变行为状态 |
 | OTA 下载与报告任务 | 下载／Flash 工作与 MQTT 事件处理分离；报告按 event_id 关联 PUBACK |
 
-MIC 使用 256 槽（约 5.12 秒、168KB）的 PSRAM SPSC ring，MQTT 控制作业使用独立 4 槽队列。2 的幂容量保证 32 位序号回绕后槽位映射仍连续。每次会话循环最多处理 4 个 MIC 帧和 4 条控制，给下行与保活留出机会；ring 满有累计日志。FILE_SEND 每轮最多发送一个 1200 字节块，文件区间暂停并清空 MIC ring，END 后从实时新帧恢复。
+MIC 使用 256 槽（约 5.12 秒、168KB）的 PSRAM SPSC ring，MQTT 控制作业使用独立 4 槽队列。2 的幂容量保证 32 位序号回绕后槽位映射仍连续。正常每轮发送 1 个 MIC 帧；检测到积压后每轮最多 8 帧且不超过 8ms，控制队列仍优先处理且每轮最多 4 条。ring 满时 producer 只关闭入口并请求 `audio_overflow`，WSS owner 统一丢弃本轮、销毁连接和重连，不把缺帧音频继续交给 ASR。FILE_SEND 每轮最多发送一个 1200 字节块，文件区间暂停并清空 MIC ring，END 后从实时新帧恢复。
 
 下行 PCM 写入 64KiB PSRAM 环形缓冲，播放任务独占 I2S；共享互斥只保护缓冲和状态，不覆盖 I2S 或 UI。播放分为唤醒回应、正常回答和自检三种角色：唤醒回应播完保持 S4，只有正常回答播完才由 S2.3 回 S1。MIC_START／断链使旧播放代次失效并清空缓冲。
 
@@ -65,9 +65,10 @@ MIC 使用 256 槽（约 5.12 秒、168KB）的 PSRAM SPSC ring，MQTT 控制作
 | `pcm_buffer.c` | PCM16 环形 FIFO、边界检查、输入结束与重置 | 不包含 RTOS 同步或硬件调用；调用方提供锁 |
 | `wss_transport.c` | TLS／WebSocket、独立控制队列、有限批次分派和 on_poll | 不解释 MIC／SPK／文件内容 |
 | `voice_uplink_ring.c` | 连接 generation 隔离的 PSRAM PCM SPSC ring | 不访问 TLS、FSM 或板级 MIC |
+| `voice_uplink_pump.c` | 正常发送、积压追赶、批次／时间预算与恢复指标 | 不拥有 producer 或 TLS 生命周期 |
 | `components/julia_board_audio` | MIC I2S 采集、PCM1 打包、同步扬声器底层操作 | 不承担 WSS 接收或语音播放调度 |
 
-会话结束以及新会话开始时清理控制队列和 MIC ring，未就绪会话拒绝新作业。MIC ring 只允许同一 WSS generation 内继续发送；重连后的新 generation 从空 ring 开始，绝不重放断线前 PCM。文件传输期间只发送文件 binary，语音启动通过 `ERROR file_cancelled` 结束文件区间，防止将文件字节与 MIC PCM1 混淆。
+会话结束以及新会话开始时清理控制队列和 MIC ring，未就绪会话拒绝新作业。MIC ring 只允许同一 WSS generation 内继续发送；重连后的新 generation 从空 ring 开始，绝不重放断线前 PCM。transport 为 peer close、收发错误、写停滞、保活超时、协议错误、业务错误和音频溢出保留独立结束原因。文件传输期间只发送文件 binary，语音启动通过 `ERROR file_cancelled` 结束文件区间，防止将文件字节与 MIC PCM1 混淆。
 
 播放任务的完成信息包含本地 generation；它只防止设备内部的旧任务结果覆盖新状态，不是服务端的 turn_id。具体参数与推流约束见 [通信协议](../docs/PROTOCOL.md)。
 
@@ -82,13 +83,13 @@ MIC 使用 256 槽（约 5.12 秒、168KB）的 PSRAM SPSC ring，MQTT 控制作
 
 默认服务器唤醒模式中，WSS 建连后 streaming 为真。服务器命中唤醒词后发送带 `interaction_id` 的 `wake_detected`；设备提交 S3/S5/S6→S4 并回 `state_ready`，随后唤醒回应的 `SPKS` 临时启用闭眼底图上的独立嘴层，播完闭嘴并仍停留 S4。实际有效话语以 `MIC_START` 标记开始、`MIC_STOP` 进入 S2.2“想”，正常回答 `SPKS` 进入 S2.3“说”，实际播完回 S1。MQTT `goodnight`／`dismiss` 不播语音，分别直接进入 S6／S5。细节与时序见 [通信协议](../docs/PROTOCOL.md)。
 
-FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发起交互、S5 静默、S6 睡眠、S7 故障、S8 OTA。只有 S2 有 S2.1“听”、S2.2“想”、S2.3“说”三个子状态。当前默认值为：S1 连续空闲 10 分钟进入 S3，S3 连续驻留 5 分钟或命中 23:00～07:00 夜间条件进入 S6；这些时间均由 `CONFIG_JULIA_*` 配置项控制。
+FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发起交互、S5 静默、S6 睡眠、S7 故障、S8 OTA。只有 S2 有 S2.1“听”、S2.2“想”、S2.3“说”三个子状态。启动完成后 S0 直接进入等待唤醒词的 S3；对话结束才进入 S1 免唤醒陪伴期。当前默认值为：S1 连续空闲 10 分钟进入 S3，S3 连续驻留 5 分钟或命中 23:00～07:00 夜间条件进入 S6；这些时间均由 `CONFIG_JULIA_*` 配置项控制。
 
 当前背光策略为：常驻 S1 固定 50%，S3 在 5%–30% 间呼吸，S5 固定 50%，S6 熄灭；交互状态和非常驻的 S0/S7/S8 保持 100%。
 
 | 当前来源 | 生效状态 | 目标状态 |
 | --- | --- | --- |
-| 关键初始化成功 | S0 | S1 |
+| 关键初始化成功 | S0 | S3 |
 | `EVT_USER_CALL` | S1 | S2.1 |
 | `EVT_START_DIALOG` | S2.1 或 S4 | S2.2 |
 | `EVT_MULTI_TURN_DETECTED` | S2.2 | S2.3 |
@@ -96,18 +97,19 @@ FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发�
 | `EVT_SILENCE_TIMEOUT` | S2.3 | S1 |
 | `EVT_USER_LEAVE` | S1 | S3 |
 | Wi-Fi 断联 `EVT_WIFI_DISCONNECTED` | S1／S2 任一阶段／S4 | S3 |
+| WSS 会话结束 `EVT_WSS_DISCONNECTED` | S1／S2 任一阶段／S4 | S3 |
 | 唤醒词 `EVT_WAKEUP` | S3／S5／S6 | S4 |
 | `EVT_NIGHT_TIME`／`EVT_STANDBY_TIMEOUT` | S3 | S6 |
 | MQTT `intent_result=goodnight` | S4／S2 任一阶段 | S6 |
 | MQTT `intent_result=dismiss` | S4／S2 任一阶段 | S5（Companion 底图，默认 50% 亮度） |
 | `EVT_SILENT_TIMEOUT`（默认 30 分钟） | S5 | S3 |
-| OTA 引擎接受升级 | S0／S1 | S8 |
-| OTA 任务失败（非链路、非严重故障） | S8 | S1 |
+| OTA 引擎接受升级 | S0／S1／S3 | S8 |
+| OTA 任务失败（非链路、非严重故障） | S8 | S3 |
 | OTA 提交成功、即将复位 | S8 | S0 |
 | 严重故障消息 | S0～S6／S8 | S7 |
 | 自动复位 | S7 | S0 |
 
-`intent_result=normal` 只表示没有特殊语义，不改变状态。OTA 任务、NVS 检查点、目标分区、启动分区设置或普通镜像校验失败都不会触发 S7，因为活动固件尚未被替换；这类失败由 S8 回到 S1。Wi-Fi、TLS、HTTP 等临时链路失败保持 S8 和下载断点，等待现有恢复流程。只有已经无法回滚到可用固件时才从 S8 进入 S7。
+`intent_result=normal` 只表示没有特殊语义，不改变状态。OTA 任务、NVS 检查点、目标分区、启动分区设置或普通镜像校验失败都不会触发 S7，因为活动固件尚未被替换；这类失败由 S8 回到 S3 等待唤醒。Wi-Fi、TLS、HTTP 等临时链路失败保持 S8 和下载断点，等待现有恢复流程。只有已经无法回滚到可用固件时才从 S8 进入 S7。
 
 S7 只接收关键初始化、FSM 内部损坏和 OTA 无法安全恢复等严重故障。进入 S7 时使用 `julia_fault` NVS namespace 保存快照；默认显示 3 秒后复位，同类快速故障连续超过三次后保持 S7，具体由 `CONFIG_JULIA_FAULT_*` 配置。当前调试 UI 与 Companion 共用底图，依靠左上 `S7 FAULT` 状态码区分；正式故障素材后续再接入。普通网络断线、单轮会话失败和普通 OTA 包拒绝不进入 S7。
 

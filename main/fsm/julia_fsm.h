@@ -16,9 +16,9 @@
 
 typedef enum {
     JULIA_MAIN_STATE_S0_BOOT = 0,       /**< 开机初始化。 */
-    JULIA_MAIN_STATE_S1_COMPANION,     /**< 陪伴。 */
+    JULIA_MAIN_STATE_S1_COMPANION,     /**< 对话结束后的免唤醒陪伴。 */
     JULIA_MAIN_STATE_S2_DIALOG,        /**< 对话；具体阶段由 S2 子状态表示。 */
-    JULIA_MAIN_STATE_S3_STANDBY,       /**< 待机。 */
+    JULIA_MAIN_STATE_S3_STANDBY,       /**< 默认待机，等待唤醒词。 */
     JULIA_MAIN_STATE_S4_INTERACTION,   /**< 发起交互。 */
     JULIA_MAIN_STATE_S5_SILENT,        /**< 静默。 */
     JULIA_MAIN_STATE_S6_SLEEP,         /**< 睡眠。 */
@@ -53,9 +53,10 @@ typedef enum {
     EVT_INTENT_GOODNIGHT,         /**< MQTT：晚安意图，S4/S2 进入 S6。 */
     EVT_INTENT_DISMISS,           /**< MQTT：结束沟通意图，S4/S2 进入 S5。 */
     EVT_WIFI_DISCONNECTED,        /**< Wi-Fi 断联，S1/S2/S4 进入 S3。 */
+    EVT_WSS_DISCONNECTED,         /**< WSS transport 结束，S1/S2/S4 进入 S3。 */
     EVT_OTA_AVAILABLE,            /**< OTA 引擎已接受升级任务。 */
     EVT_OTA_SUCCEEDED,            /**< OTA 镜像已提交，即将复位。 */
-    EVT_OTA_TASK_FAILED,          /**< OTA 任务失败，放弃本次升级并恢复业务。 */
+    EVT_OTA_TASK_FAILED,          /**< OTA 任务失败，放弃本次升级并回到 S3。 */
     EVT_COUNT,
 } fsm_event_t;
 

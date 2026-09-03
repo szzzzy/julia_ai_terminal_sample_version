@@ -362,8 +362,8 @@ esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready)
     s_committed_s2_sub_state = s_fsm.s2_sub_state;
     portEXIT_CRITICAL(&s_state_lock);
     if (boot_dependencies_ready) {
-        /* 直接复用现有初始化结果，不创建仅供状态机使用的开机完成事件。 */
-        if (!julia_fsm_transition_to(&s_fsm, JULIA_MAIN_STATE_S1_COMPANION,
+        /* 初始化完成后进入待唤醒的 S3；S1 只保留会话后的免唤醒陪伴语义。 */
+        if (!julia_fsm_transition_to(&s_fsm, JULIA_MAIN_STATE_S3_STANDBY,
                                      JULIA_S2_SUB_STATE_NONE, EVT_NONE)) {
             vQueueDelete(s_event_queue);
             s_event_queue = NULL;

@@ -1,6 +1,6 @@
 /**
  * @file    julia_idle_display.c
- * @brief   待机显示策略实现：陪伴常驻，十分钟无交互后进入 S3 待机。
+ * @brief   待机显示策略实现：默认跟随 S3，交互后陪伴十分钟再回到 S3。
  *
  * 职责边界：
  *   - 依据“距最近交互的时长 + busy 标志”判断 S1 是否应进入 S3，并投递
@@ -31,7 +31,7 @@
 #define DISPLAY_THEME_TASK_STACK_SIZE 3072
 #define DISPLAY_THEME_TASK_PRIORITY   3
 
-/* 闲置策略两档：活跃陪伴，以及已经投递 S3 的待机档。 */
+/* 闲置策略两档：交互后的活跃陪伴，以及默认 S3 待机档。 */
 typedef enum {
     DISPLAY_ACTIVITY_ACTIVE = 0,   ///< 活跃：立绘睁眼、背光 100%。
     DISPLAY_ACTIVITY_STANDBY,      ///< 已达到 S3 待机阈值，等待新活动。
@@ -42,7 +42,7 @@ static TaskHandle_t s_task;                             /* 后台轮询任务句
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED; /* 保护下面前四个共享字段的临界区锁。 */
 static int64_t s_last_activity_us;                      /* 最近一次用户/语音交互时刻（us）。 */
 static bool s_busy;                                     /* 当前是否处于听-想-说的"占屏"期。 */
-static display_activity_state_t s_state = DISPLAY_ACTIVITY_ACTIVE; /* 当前显示档位。 */
+static display_activity_state_t s_state = DISPLAY_ACTIVITY_STANDBY; /* 当前显示档位。 */
 static uint32_t s_generation;                            /* 档位代次：每次状态变化自增，用于并发赶超校验。 */
 
 static void post_fsm_event(fsm_event_t event)
@@ -152,10 +152,10 @@ static void display_theme_task(void *argument)
 /*
  * @brief 初始化待机显示策略并启动后台轮询任务。
  * @return ESP_OK（含已初始化过的幂等情形）；ESP_ERR_NO_MEM（任务创建失败）。
- * @side  将初始状态置为 ACTIVE、代次=1，并恢复一次显示（背光满、睁眼、停呼吸）。
+ * @side  将初始状态置为 STANDBY、代次=1；具体 S3 呈现随后由 FSM 运行时应用。
  *
  * 幂等：若 s_task 已非空直接返回 ESP_OK，避免重复启动任务（重复 init 安全）。
- * 初值把 s_last_activity_us 设为当前时刻，避免"上电即闭眼/睡眠"。
+ * 初值不投递 EVT_USER_LEAVE，避免默认 S3 在超时后收到重复事件。
  */
 esp_err_t julia_idle_display_init(void)
 {
@@ -165,17 +165,16 @@ esp_err_t julia_idle_display_init(void)
     portENTER_CRITICAL(&s_lock);
     s_last_activity_us = esp_timer_get_time();
     s_busy = false;
-    s_state = DISPLAY_ACTIVITY_ACTIVE;
+    s_state = DISPLAY_ACTIVITY_STANDBY;
     s_generation = 1;
     portEXIT_CRITICAL(&s_lock);
 
-    display_restore();
     if (xTaskCreate(display_theme_task, "display_idle", DISPLAY_THEME_TASK_STACK_SIZE,
                     NULL, DISPLAY_THEME_TASK_PRIORITY, &s_task) != pdPASS) {
         s_task = NULL;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "ready companion->far-standby=%ds poll=%dms",
+    ESP_LOGI(TAG, "ready default=standby companion-window=%ds poll=%dms",
              CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS,
              CONFIG_JULIA_DISPLAY_ACTIVITY_POLL_MS);
     return ESP_OK;

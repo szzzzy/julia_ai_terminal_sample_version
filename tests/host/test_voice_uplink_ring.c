@@ -170,6 +170,24 @@ static void test_sequence_wrap_preserves_fifo(void)
     assert(voice_uplink_ring_count(&fixture.ring) == 0);
 }
 
+static void test_close_preserves_data_until_owner_stop(void)
+{
+    fixture_t fixture;
+    init_fixture(&fixture);
+    const uint8_t frame[] = {0x55};
+    assert(voice_uplink_ring_start_generation(&fixture.ring, 40));
+    assert(voice_uplink_ring_push(&fixture.ring, frame, sizeof(frame)) ==
+           VOICE_UPLINK_PUSH_OK);
+    voice_uplink_ring_close_generation(&fixture.ring);
+    assert(!voice_uplink_ring_is_accepting(&fixture.ring));
+    assert(voice_uplink_ring_count(&fixture.ring) == 1);
+    expect_front(&fixture, 40, frame, sizeof(frame));
+    assert(voice_uplink_ring_push(&fixture.ring, frame, sizeof(frame)) ==
+           VOICE_UPLINK_PUSH_INACTIVE);
+    voice_uplink_ring_stop_generation(&fixture.ring);
+    assert(voice_uplink_ring_count(&fixture.ring) == 0);
+}
+
 int main(void)
 {
     test_inactive_and_validation();
@@ -178,6 +196,7 @@ int main(void)
     test_session_boundary_discards_old_audio();
     test_late_old_generation_slot_is_never_replayed();
     test_sequence_wrap_preserves_fifo();
+    test_close_preserves_data_until_owner_stop();
     puts("PASS: uplink ring preserves frames and rejects old connection generations");
     return 0;
 }
