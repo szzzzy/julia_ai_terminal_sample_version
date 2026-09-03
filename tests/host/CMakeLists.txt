@@ -51,3 +51,9 @@ add_executable(test_voice_session_recovery test_voice_session_recovery.c
 target_include_directories(test_voice_session_recovery PRIVATE ../../main/voice)
 set_property(TARGET test_voice_session_recovery PROPERTY C_STANDARD 99)
 add_test(NAME voice_session_recovery COMMAND test_voice_session_recovery)
+
+add_executable(test_display_ownership test_display_ownership.c)
+target_compile_definitions(test_display_ownership PRIVATE
+    REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../..")
+set_property(TARGET test_display_ownership PROPERTY C_STANDARD 99)
+add_test(NAME display_ownership COMMAND test_display_ownership)

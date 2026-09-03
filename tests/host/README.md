@@ -15,10 +15,11 @@ tests/host/
 ├─ test_voice_uplink_ring.c PSRAM上行ring顺序、回绕、容量与连接代次
 ├─ test_voice_uplink_pump.c 正常发送、积压追赶、时间预算与失败保留
 ├─ test_voice_session_recovery.c overflow请求、owner清理与新连接隔离
+├─ test_display_ownership.c S6显示硬件所有权与旁路点亮回归检查
 └─ stubs/                 仅供测试的 ESP 错误码、时间、内存与 RTOS 接口
 ```
 
-八个测试程序分别注册为独立 CTest 目标。stub 不实现真实 FreeRTOS 调度、PSRAM硬件和 I2S DMA，禁止加入固件的全局头文件搜索路径。
+九个测试程序分别注册为独立 CTest 目标。stub 不实现真实 FreeRTOS 调度、PSRAM硬件和 I2S DMA，禁止加入固件的全局头文件搜索路径。
 
 ## 执行方法
 
@@ -49,5 +50,6 @@ ctest --test-dir build-host --output-on-failure
   generation 数据不得进入新连接。
 - 上行pump的正常／追赶批次、8ms运行预算、恢复统计和发送失败不提前消费。
 - ring overflow 后 producer 只关闭入口，owner 才能清理；新连接只发送新代次PCM。
+- S6 面板／背光只由 FSM 呈现控制；idle、motion、night 和 WSS 断链不能旁路点亮。
 
 模拟写入不是物理扬声器输出；测试不能证明 DMA 排空时间、音质、多核最坏调度延迟或开机速度。这些项目仍按 [设备验收](../../docs/VALIDATION.md) 上板执行。

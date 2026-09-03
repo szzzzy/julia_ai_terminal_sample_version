@@ -1,6 +1,6 @@
 /**
  * @file julia_motion.h
- * @brief IMU motion wake source for far-standby and sleep states.
+ * @brief S6 motion diagnostics; display wake remains owned by the FSM.
  */
 #pragma once
 

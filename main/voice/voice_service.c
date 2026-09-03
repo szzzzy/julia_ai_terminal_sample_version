@@ -985,7 +985,7 @@ static void voice_service_on_session_end(wss_transport_end_reason_t reason)
              s_uplink_generation, wss_transport_end_reason_name(reason),
              (unsigned)discarded_frames);
     post_fsm_event(EVT_WSS_DISCONNECTED);
-    julia_idle_display_note_activity();
+    /* transport 结束不是用户活动；只解除 busy，不能旁路点亮 S6。 */
     julia_idle_display_set_busy(false);
 }
 

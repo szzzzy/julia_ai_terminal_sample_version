@@ -15,7 +15,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "julia_fsm_runtime.h"
-#include "julia_idle_display.h"
 #include "julia_time.h"
 #include "sdkconfig.h"
 
@@ -102,10 +101,7 @@ static void night_schedule_task(void *argument)
                                         1000000LL;
             }
         } else if (schedule_owns_sleep) {
-            if (state == JULIA_MAIN_STATE_S6_SLEEP) {
-                julia_idle_display_note_activity();
-                /* 07:00 只恢复显示；S6 仍等待唤醒词后才进入 S4。 */
-            }
+            /* 夜间窗口结束不旁路覆盖 S6 呈现；仍由唤醒词驱动 S6 -> S4。 */
             schedule_owns_sleep = false;
             sleep_deadline_us = 0;
         } else if (bedtime) {

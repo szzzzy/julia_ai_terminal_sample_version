@@ -1,9 +1,9 @@
 /**
  * @file julia_motion.c
- * @brief QMI8658 短时运动检测与显示唤醒。
+ * @brief QMI8658 在 S6 中的短时运动检测。
  *
  * 本模块比较相邻加速度样本与陀螺仪幅值，不执行姿态解算，也不依赖 SD。
- * 连续命中门限后只恢复显示；S3/S5/S6 进入 S4 仍必须由唤醒词触发。
+ * 连续命中门限后只记录诊断；S6 的显示与状态仍等待唤醒词事件统一恢复。
  */
 #include "julia_motion.h"
 
@@ -15,7 +15,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "julia_fsm_runtime.h"
-#include "julia_idle_display.h"
 #include "qmi8658_shared.h"
 #include "sdkconfig.h"
 
@@ -27,7 +26,7 @@
 static const char *TAG = "JULIA_MOTION";
 static TaskHandle_t s_task;
 
-static bool motion_wake_state(julia_main_state_t state)
+static bool motion_monitor_state(julia_main_state_t state)
 {
     return state == JULIA_MAIN_STATE_S6_SLEEP;
 }
@@ -43,7 +42,7 @@ static void motion_task(void *argument)
     for (;;) {
         julia_main_state_t state = julia_fsm_runtime_get_state();
         TickType_t now = xTaskGetTickCount();
-        if (!motion_wake_state(state)) {
+        if (!motion_monitor_state(state)) {
             baseline_valid = false;
             consecutive = 0;
             vTaskDelay(pdMS_TO_TICKS(500));
@@ -58,7 +57,7 @@ static void motion_task(void *argument)
         }
 
         vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_IMU_MOTION_SAMPLE_MS));
-        if (!motion_wake_state(julia_fsm_runtime_get_state())) {
+        if (!motion_monitor_state(julia_fsm_runtime_get_state())) {
             baseline_valid = false;
             consecutive = 0;
             continue;
@@ -90,9 +89,9 @@ static void motion_task(void *argument)
         consecutive = detected ? consecutive + 1U : 0U;
         if (consecutive < CONFIG_JULIA_IMU_MOTION_CONFIRM_FRAMES) continue;
 
-        ESP_LOGI(TAG, "motion display wake state=%s accel_delta=%.3fg gyro=%.1fdps",
+        ESP_LOGI(TAG, "motion observed state=%s accel_delta=%.3fg gyro=%.1fdps; "
+                      "S6 presentation retained",
                  julia_fsm_main_state_name(state), (double)delta, (double)gyro);
-        julia_idle_display_note_activity();
         consecutive = 0;
         baseline_valid = false;
         now = xTaskGetTickCount();

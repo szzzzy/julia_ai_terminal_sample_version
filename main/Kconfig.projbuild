@@ -668,7 +668,7 @@ menu "Example Configuration"
             help
                 Enter S6 during the configured local-time window after the idle
                 grace. Active dialogue is never interrupted; the end of the
-                window restores the display but S6 still waits for a wake word.
+                window leaves S6 dark until a wake word changes the FSM state.
 
         config JULIA_NIGHT_SLEEP_START_HOUR
             int "Night sleep start hour (local time)"
@@ -698,12 +698,12 @@ menu "Example Configuration"
             depends on JULIA_NIGHT_SLEEP_ENABLE
 
         config JULIA_IMU_MOTION_ENABLE
-            bool "Enable QMI8658 motion wake"
+            bool "Enable QMI8658 motion diagnostics in S6"
             default y
             help
-                Use adjacent-sample acceleration and gyro magnitude detection.
-                The configured number of consecutive samples restores the
-                display only while in S6; it does not change the FSM state.
+                Use adjacent-sample acceleration and gyro magnitude detection
+                while in S6. Confirmed motion is logged but cannot override the
+                S6 presentation or change the FSM state.
 
         config JULIA_IMU_MOTION_SAMPLE_MS
             int "IMU motion sample period (ms)"
@@ -718,7 +718,7 @@ menu "Example Configuration"
             depends on JULIA_IMU_MOTION_ENABLE
 
         config JULIA_IMU_MOTION_COOLDOWN_MS
-            int "IMU display-wake cooldown (ms)"
+            int "IMU motion log cooldown (ms)"
             range 0 600000
             default 10000
             depends on JULIA_IMU_MOTION_ENABLE

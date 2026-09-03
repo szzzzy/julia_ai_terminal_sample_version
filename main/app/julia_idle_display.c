@@ -5,16 +5,16 @@
  * 职责边界：
  *   - 依据“距最近交互的时长 + busy 标志”判断 S1 是否应进入 S3，并投递
  *     EVT_USER_LEAVE；调试阶段不在这里切换立绘，具体状态呈现统一由 FSM 运行时负责。
- *   - note_activity()/set_busy() 仍记录活动并可恢复被 S6 等状态覆盖的显示，但不会
- *     冒充唤醒词改变行为状态。
+ *   - note_activity()/set_busy() 只维护空闲计时，不直接操作面板、背光或立绘；
+ *     所有状态呈现由 FSM 运行时独占，避免 S6 已提交后被旁路重新点亮。
  *
  * 并发模型：
  *   - 有一个后台任务（display_theme_task）轮询推进状态；用户/语音侧通过
  *     note_activity()/set_busy() 更新共享状态。所有共享状态（s_last_activity_us、
  *     s_busy、s_state、s_generation）都在 s_lock（portMUX）临界区内读写。
  *   - 用 generation 计数器做"关卡约定"：任务在推进到某档前先记账，执行时再校验
- *     自己仍然是最新的一档（transition_is_current），避免与并发唤醒竞争——
- *     若唤醒抢先加了 generation 并改了 state，旧推进就会检测到不匹配而回滚 restore。
+ *     自己仍然是最新的一档（transition_is_current）；若活动抢先更新 generation，
+ *     旧的空闲推进会被放弃。
  */
 #include "julia_idle_display.h"
 
@@ -22,10 +22,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "julia_backlight.h"
-#include "julia_avatar.h"
 #include "julia_fsm_runtime.h"
-#include "lvgl_port.h"
 #include "sdkconfig.h"
 
 #define DISPLAY_THEME_TASK_STACK_SIZE 3072
@@ -67,21 +64,6 @@ static bool transition_is_current(display_activity_state_t state, uint32_t gener
     current = s_state == state && s_generation == generation;
     portEXIT_CRITICAL(&s_lock);
     return current;
-}
-
-/*
- * 恢复到"完全活跃"的视觉：停止背光呼吸、背光拉满、立绘睁眼。
- * 作为所有"被唤醒/回滚"时的统一还原动作。
- */
-static void display_restore(void)
-{
-    esp_err_t err = lvgl_port_set_display_off(false);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "panel wake failed: %s", esp_err_to_name(err));
-    }
-    julia_backlight_breathe_stop();
-    julia_backlight_set(100);
-    julia_avatar_set_dozing(false);
 }
 
 /*
@@ -181,50 +163,34 @@ esp_err_t julia_idle_display_init(void)
 }
 
 /*
- * @brief 记录一次有效交互，并把显示唤醒回 ACTIVE。
+ * @brief 记录一次有效交互并把空闲计时档位置回 ACTIVE。
  * 调用上下文：任何用户/语音交互点（如唤醒词、语音会话、按键）。
- * 副作用：刷新 last_activity、置 ACTIVE、抬 generation；若之前处于 sleep
- *         则调用 display_restore() 恢复睁眼+满背光。
+ * 副作用：刷新 last_activity、置 ACTIVE、抬 generation；不直接改变显示。
  * 并发：在锁内更新共享状态，抬 generation 使可能正在进行的"进入 sleep"推进失效。
  */
 void julia_idle_display_note_activity(void)
 {
-    display_activity_state_t previous;
     portENTER_CRITICAL(&s_lock);
     s_last_activity_us = esp_timer_get_time();
-    previous = s_state;
     s_state = DISPLAY_ACTIVITY_ACTIVE;
     ++s_generation;
     portEXIT_CRITICAL(&s_lock);
-
-    if (previous != DISPLAY_ACTIVITY_ACTIVE) {
-        display_restore();
-        /* 普通显示活动只恢复画面，不冒充唤醒词改变行为状态。 */
-        ESP_LOGI(TAG, "activity restored display; FSM still waits for wake word");
-    }
 }
 
 /*
  * @brief 设置"独占期"标志：听-想-说期间保持屏幕活跃。
  * @param busy true 进入占屏期（不推进降档），false 结束占屏期。
- * 副作用：同 note_activity——刷新 last_activity、置 ACTIVE、抬 generation，
- *         若非 ACTIVE 则恢复显示。用于防止"Julia 正在说话时屏幕却被闲置降档闭眼"。
+ * 副作用：刷新 last_activity 并抬 generation；busy=true 时置 ACTIVE，false 只解除
+ *         占屏而不唤醒显示。FSM 的交互状态负责实际点亮。
  */
 void julia_idle_display_set_busy(bool busy)
 {
-    display_activity_state_t previous;
     portENTER_CRITICAL(&s_lock);
     s_busy = busy;
     s_last_activity_us = esp_timer_get_time();
-    previous = s_state;
-    s_state = DISPLAY_ACTIVITY_ACTIVE;
+    if (busy) s_state = DISPLAY_ACTIVITY_ACTIVE;
     ++s_generation;
     portEXIT_CRITICAL(&s_lock);
-
-    if (previous != DISPLAY_ACTIVITY_ACTIVE) {
-        display_restore();
-        /* busy 只控制显示降档；行为状态仍由语音链路的唤醒词事件推进。 */
-    }
 }
 
 /*
