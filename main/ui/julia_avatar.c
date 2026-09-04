@@ -16,6 +16,7 @@
 #include "julia_avatar.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -30,6 +31,7 @@
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "sdkconfig.h"
 
 #include "avatar_chroma_assets.h"
 #include "avatar_face_base.h"
@@ -55,6 +57,9 @@
 #define STATUS_LABEL_Y              100
 #define STATUS_LABEL_WIDTH          220
 #define OFFLINE_LABEL_Y             120
+#define BATTERY_LABEL_X             135
+#define BATTERY_LABEL_Y              20
+#define BATTERY_LABEL_WIDTH          90
 
 /* 整体移动 360×360 根对象会让每一帧都刷新全屏；当前 QSPI 面板分十条发送且没有
  * 撕裂同步信号，持续全屏更新会出现明显闪烁。因此微动只修改局部眼睛和嘴巴，
@@ -66,6 +71,7 @@ static lv_obj_t *s_motion_root;
 static lv_obj_t *s_base;
 static lv_obj_t *s_status_label;
 static lv_obj_t *s_offline_label;
+static lv_obj_t *s_battery_label;
 static volatile bool s_ready;
 static bool s_talking;
 static uint32_t s_smoothed_rms;
@@ -76,6 +82,9 @@ static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static julia_avatar_dialog_phase_t s_dialog_phase = JULIA_AVATAR_DIALOG_IDLE;
 static bool s_dozing;
 static bool s_offline;
+static bool s_battery_present;
+static uint8_t s_battery_percent;
+static uint16_t s_battery_voltage_mv;
 /* 已应用相位与请求相位分开保存；LVGL 锁超时时保留请求，后续刷新可以安全重试。 */
 static julia_avatar_dialog_phase_t s_applied_dialog_phase =
     (julia_avatar_dialog_phase_t)(JULIA_AVATAR_DIALOG_SPEAKING + 1);
@@ -120,6 +129,34 @@ void julia_avatar_set_offline(bool offline)
     else lv_obj_add_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_offline_label);
     lv_obj_invalidate(s_offline_label);
+    lvgl_port_unlock();
+}
+
+void julia_avatar_set_battery_status(bool present, uint8_t percent,
+                                     uint16_t voltage_mv)
+{
+    if (percent > 100U) percent = 100U;
+    portENTER_CRITICAL(&s_phase_lock);
+    s_battery_present = present;
+    s_battery_percent = percent;
+    s_battery_voltage_mv = voltage_mv;
+    portEXIT_CRITICAL(&s_phase_lock);
+
+    if (s_battery_label == NULL || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
+    if (!present) {
+        lv_obj_add_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        char text[16];
+        snprintf(text, sizeof(text), "BAT %u%%", percent);
+        lv_label_set_text(s_battery_label, text);
+        lv_obj_set_style_text_color(
+            s_battery_label,
+            percent <= 15U ? lv_palette_main(LV_PALETTE_RED) : lv_color_black(),
+            LV_PART_MAIN);
+        lv_obj_clear_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_move_foreground(s_battery_label);
+    lv_obj_invalidate(s_battery_label);
     lvgl_port_unlock();
 }
 
@@ -622,6 +659,36 @@ esp_err_t julia_avatar_init(void)
     lv_obj_clear_flag(s_offline_label, LV_OBJ_FLAG_SCROLLABLE);
     if (!s_offline) lv_obj_add_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_offline_label);
+
+    s_battery_label = lv_label_create(screen);
+    lv_obj_set_pos(s_battery_label, BATTERY_LABEL_X, BATTERY_LABEL_Y);
+    lv_obj_set_width(s_battery_label, BATTERY_LABEL_WIDTH);
+    lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_battery_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_battery_label, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_clear_flag(s_battery_label, LV_OBJ_FLAG_SCROLLABLE);
+    bool battery_present;
+    uint8_t battery_percent;
+    uint16_t battery_voltage_mv;
+    portENTER_CRITICAL(&s_phase_lock);
+    battery_present = s_battery_present;
+    battery_percent = s_battery_percent;
+    battery_voltage_mv = s_battery_voltage_mv;
+    portEXIT_CRITICAL(&s_phase_lock);
+    if (battery_present) {
+        char battery_text[16];
+        snprintf(battery_text, sizeof(battery_text), "BAT %u%%", battery_percent);
+        lv_label_set_text(s_battery_label, battery_text);
+        lv_obj_set_style_text_color(
+            s_battery_label,
+            battery_percent <= 15U ? lv_palette_main(LV_PALETTE_RED) : lv_color_black(),
+            LV_PART_MAIN);
+    } else {
+        lv_label_set_text(s_battery_label, "BAT --");
+        lv_obj_add_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    (void)battery_voltage_mv;
+    lv_obj_move_foreground(s_battery_label);
     ESP_LOGI(TAG, "status label ready x=%d y=%d width=%d text=%s",
              lv_obj_get_x(s_status_label), lv_obj_get_y(s_status_label),
              lv_obj_get_width(s_status_label), status_snapshot);
@@ -681,14 +748,17 @@ esp_err_t julia_avatar_play_boot_sequence(void)
     ESP_RETURN_ON_ERROR(lvgl_port_refr_now_sync(pdMS_TO_TICKS(500)),
                         TAG, "refresh closed boot frame");
 
-    esp_err_t fade_err = julia_backlight_fade_to(100, 300);
+    /* 启动动画只使用受限亮度，避免背光浪涌与后续外设上电叠加。进入正常
+     * FSM 状态后，状态呈现仍按各自的运行期亮度配置接管。 */
+    esp_err_t fade_err = julia_backlight_fade_to(
+        CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT, 600);
     if (fade_err == ESP_OK) {
         fade_err = julia_backlight_wait_fade(500);
     }
     if (fade_err != ESP_OK) {
-        ESP_LOGW(TAG, "Boot backlight fade failed: %s; using full brightness",
-                 esp_err_to_name(fade_err));
-        julia_backlight_set(100);
+        ESP_LOGW(TAG, "Boot backlight fade failed: %s; using %d%% brightness",
+                 esp_err_to_name(fade_err), CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT);
+        julia_backlight_set(CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT);
     }
     esp_err_t sequence_err = ESP_OK;
     for (unsigned i = 0; i < BOOT_BLINK_COUNT; ++i) {

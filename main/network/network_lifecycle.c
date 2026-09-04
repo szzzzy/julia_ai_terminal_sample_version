@@ -33,6 +33,10 @@
 #include "network_lifecycle.h"
 #include "protocol_examples_common.h"
 
+#ifndef CONFIG_NETWORK_WIFI_INITIAL_DIAGNOSTIC_SCAN
+#define CONFIG_NETWORK_WIFI_INITIAL_DIAGNOSTIC_SCAN 0
+#endif
+
 static const char *TAG = "network_lifecycle";
 
 /**
@@ -62,7 +66,9 @@ static bool s_ip_ready;
 static bool s_connect_attempt_pending;
 static uint32_t s_retry_attempt;
 static int64_t s_next_retry_us = INT64_MAX;
+#if CONFIG_NETWORK_WIFI_INITIAL_DIAGNOSTIC_SCAN
 static bool s_initial_scan_logged;
+#endif
 
 /** IP 就绪服务启动回调注册表；注册只发生在 network_lifecycle_start() 之前。 */
 static network_service_slot_t s_slots[NETWORK_MAX_IP_READY_CALLBACKS];
@@ -176,6 +182,7 @@ static uint32_t network_schedule_retry_locked(void)
 }
 
 /** 启动时扫描一次热点，便于区分“找不到热点”和“认证失败”。 */
+#if CONFIG_NETWORK_WIFI_INITIAL_DIAGNOSTIC_SCAN
 static void network_log_initial_scan(void)
 {
     if (s_initial_scan_logged) return;
@@ -218,6 +225,7 @@ static void network_log_initial_scan(void)
              count, returned, target_found ? "found" : "missing");
     free(records);
 }
+#endif
 
 /**
  * @brief 把全部服务槽位重置为"待启动"状态。
@@ -464,7 +472,9 @@ static void network_lifecycle_task(void *parameter)
                 (void)esp_wifi_disconnect();
                 continue;
             }
+#if CONFIG_NETWORK_WIFI_INITIAL_DIAGNOSTIC_SCAN
             network_log_initial_scan();
+#endif
             esp_err_t err = esp_wifi_connect();
             if (err == ESP_OK) {
                 /* 正常结果仍由 GOT_IP/STA_DISCONNECTED 收口；看门狗防止驱动事件
@@ -604,8 +614,14 @@ esp_err_t network_lifecycle_start(void)
         goto failed;
     }
     s_wifi_driver_started = true;
-    ESP_LOGI(TAG, "Wi-Fi lifecycle started target=\"%s\" scan=all auth_filter=open; local application continues while offline",
-             CONFIG_EXAMPLE_WIFI_SSID);
+    esp_err_t tx_power_err = esp_wifi_set_max_tx_power(
+        (int8_t)(CONFIG_NETWORK_WIFI_MAX_TX_POWER_DBM * 4));
+    if (tx_power_err != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi TX power limit failed: %s", esp_err_to_name(tx_power_err));
+    }
+    ESP_LOGI(TAG, "Wi-Fi lifecycle started target=\"%s\" tx_limit=%ddBm extra_scan=%u; local application continues while offline",
+             CONFIG_EXAMPLE_WIFI_SSID, CONFIG_NETWORK_WIFI_MAX_TX_POWER_DBM,
+             (unsigned)CONFIG_NETWORK_WIFI_INITIAL_DIAGNOSTIC_SCAN);
     return ESP_OK;
 
 failed:

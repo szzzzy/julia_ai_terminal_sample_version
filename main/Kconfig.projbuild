@@ -2,6 +2,103 @@ menu "Example Configuration"
 
     orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
 
+    config JULIA_BAT_CONTROL_GPIO
+        int "Battery power-hold GPIO"
+        range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+        default 7
+        help
+            GPIO driven high immediately in app_main to keep battery power enabled.
+            The currently tested board uses GPIO7. Some Waveshare schematic revisions
+            label GPIO8 as BAT_Control, so select the pin verified on the actual board.
+
+    choice JULIA_BOOT_CPU_MAX_FREQ
+        prompt "CPU ceiling while hardware starts"
+        default JULIA_BOOT_CPU_MAX_FREQ_80
+        help
+            Keep CPU demand below the normal runtime ceiling while display, audio and
+            Wi-Fi power domains are started. This reduces coincident battery current
+            peaks; it does not change the bootloader clock before app_main.
+
+        config JULIA_BOOT_CPU_MAX_FREQ_80
+            bool "80 MHz"
+
+        config JULIA_BOOT_CPU_MAX_FREQ_160
+            bool "160 MHz"
+    endchoice
+
+    config JULIA_BOOT_CPU_MAX_FREQ_MHZ
+        int
+        default 80 if JULIA_BOOT_CPU_MAX_FREQ_80
+        default 160 if JULIA_BOOT_CPU_MAX_FREQ_160
+
+    choice JULIA_RUNTIME_CPU_MAX_FREQ
+        prompt "CPU ceiling after staged startup"
+        default JULIA_RUNTIME_CPU_MAX_FREQ_160
+
+        config JULIA_RUNTIME_CPU_MAX_FREQ_160
+            bool "160 MHz"
+
+        config JULIA_RUNTIME_CPU_MAX_FREQ_240
+            bool "240 MHz"
+    endchoice
+
+    config JULIA_RUNTIME_CPU_MAX_FREQ_MHZ
+        int
+        default 160 if JULIA_RUNTIME_CPU_MAX_FREQ_160
+        default 240 if JULIA_RUNTIME_CPU_MAX_FREQ_240
+
+    config JULIA_BOOT_STAGE_DELAY_MS
+        int "Delay between high-current startup stages (ms)"
+        range 0 2000
+        default 250
+        help
+            Separates display, audio and Wi-Fi startup transients. Zero restores the
+            shortest sequential startup without an intentional settling interval.
+
+    config JULIA_BOOT_SETTLE_DELAY_MS
+        int "Delay before restoring the runtime CPU ceiling (ms)"
+        range 0 10000
+        default 1500
+        help
+            Leaves the boot CPU ceiling active briefly after Wi-Fi starts. The network
+            lifecycle continues in its background task during this interval.
+
+    config JULIA_BOOT_BRIGHTNESS_PERCENT
+        int "Maximum backlight brightness during boot animation (percent)"
+        range 0 100
+        default 25
+
+    config JULIA_BATTERY_DIAGNOSTICS
+        bool "Log battery voltage at startup checkpoints"
+        default y
+        help
+            Read the onboard GPIO9 BAT_ADC divider. Measurements are diagnostic voltage
+            snapshots only and cannot directly report battery current or charge state.
+
+    config JULIA_BATTERY_SAMPLE_COUNT
+        int "Samples per battery diagnostic checkpoint"
+        depends on JULIA_BATTERY_DIAGNOSTICS
+        range 4 128
+        default 32
+
+    config JULIA_BATTERY_MONITOR_INTERVAL_SECONDS
+        int "Battery monitor interval (seconds)"
+        depends on JULIA_BATTERY_DIAGNOSTICS
+        range 5 3600
+        default 30
+
+    config JULIA_BATTERY_PRESENT_MIN_MV
+        int "Minimum plausible connected-battery voltage (mV)"
+        depends on JULIA_BATTERY_DIAGNOSTICS
+        range 1000 3500
+        default 2500
+
+    config JULIA_BATTERY_PRESENT_MAX_MV
+        int "Maximum plausible connected-battery voltage (mV)"
+        depends on JULIA_BATTERY_DIAGNOSTICS
+        range 4000 5000
+        default 4350
+
     config OTA_PRODUCT_ID
         string "OTA product identifier"
         default "native-ota-device"
@@ -203,6 +300,22 @@ menu "Example Configuration"
             Maximum time to wait after esp_wifi_connect() succeeds for either
             GOT_IP or STA_DISCONNECTED. Expiry cancels the stale attempt and
             returns it to the normal bounded retry schedule.
+
+    config NETWORK_WIFI_MAX_TX_POWER_DBM
+        int "Maximum Wi-Fi transmit power (dBm)"
+        range 8 20
+        default 14
+        help
+            Limit RF transmit current during battery diagnosis. Lower values reduce
+            range; raise this toward 20 dBm if the access point is not nearby.
+
+    config NETWORK_WIFI_INITIAL_DIAGNOSTIC_SCAN
+        bool "Run an additional blocking AP scan before first connect"
+        default n
+        help
+            The Wi-Fi driver already scans as part of connection. Enable this only when
+            the extra AP listing is needed for diagnostics; it lengthens the high-current
+            startup interval.
 
     config OTA_PROGRESS_STEP_PERCENT
         int "Minimum OTA progress step (percent)"

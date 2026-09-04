@@ -43,6 +43,7 @@ set(srcs
     # 存储与板级硬件。
     "storage/sd_card.c"
     "hardware/tca9554.c"
+    "hardware/julia_battery.c"
     "hardware/julia_power.c"
     "hardware/breathing_led.c"
     "hardware/julia_led.c"
@@ -115,6 +116,7 @@ set(priv_requires
     esp_driver_i2c
     esp_driver_spi
     esp_driver_i2s
+    esp_adc
     esp_lcd
     esp_mm
     lvgl__lvgl

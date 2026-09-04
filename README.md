@@ -8,11 +8,12 @@ Julia Fused-Base 是面向 ESP32-S3 陪伴终端的设备固件，提供麦克�
 
 | 能力 | 当前实现 |
 | --- | --- |
-| 开机编排 | 显示基础设施就绪后，动画任务与音频、RTC、SD、Wi-Fi 初始化并行；汇合后放行交互 |
+| 开机编排 | 80MHz、25% 背光下依次启动显示、音频与存储，最后启动限功率 Wi-Fi；各阶段记录电池电压 |
 | 语音采集与上传 | 单声道 PCM16、16kHz，常规帧为 20ms；通过 WSS 发送 PCM1 消息 |
 | 语音唤醒 | 默认由服务器检测，WSS 会话建立后持续上传；本地 WakeNet 是另一种编译配置 |
 | 播放与打断 | WSS 向 64KiB PSRAM 缓冲投递 PCM；独立播放任务驱动 I2S，正常结束排空尾音，`MIC_START` 取消待播数据 |
 | 显示 | 360×360 ST77916 QSPI 屏、LVGL、静态立绘、眨眼、PCM 能量驱动嘴型、背光呼吸 |
+| 电量监测 | GPIO9/ADC1_CH8 读取板载3:1分压，滤波后估算单节锂电池百分比并在屏幕显示 |
 | 行为与情境 | S0～S8 九个主状态，S2 含听／想／说三个子状态；RTC／SNTP 校时、夜间策略、S6 IMU 运动诊断 |
 | 固件 OTA | 请求关联、清单和镜像校验、双应用分区、启动确认／回滚、状态持久化与上报 |
 | SD 文件外发 | SDMMC 1-bit 挂载 `/sdcard`，通过 `FILE_SEND` 外发 WAV 文件 |
@@ -29,11 +30,12 @@ Julia Fused-Base 是面向 ESP32-S3 陪伴终端的设备固件，提供麦克�
 | --- | --- |
 | 芯片／目标 | ESP32-S3，`esp32s3` |
 | 板级布局 | Waveshare ESP32-S3-LCD-1.85 的屏幕、音频、RTC、IMU 与 SD 接线 |
+| 电池采样 | `BAT_ADC=GPIO9/ADC1_CH8`，板载200K/100K分压；仅估算电压与百分比，不检测真实充电电流 |
 | SDK | ESP-IDF 5.5.4 |
 | 显示库 | 仓库内 LVGL 8.3.11 |
 | Flash | 16MiB，两个 7MiB OTA 应用分区 |
 | PSRAM | 板级配置为 8MiB Octal／OPI，80MHz；实机容量以启动日志确认 |
-| CPU | 峰值 240MHz，空闲时动态降至 80MHz，不启用自动 Light-sleep |
+| CPU | 启动阶段最高80MHz，错峰完成后最高160MHz，不启用自动 Light-sleep |
 | 应用镜像名 | `julia_fused_base` |
 | OTA 产品／硬件标识 | `julia-ai-device`／`1.0` |
 
@@ -44,7 +46,7 @@ Julia Fused-Base 是面向 ESP32-S3 陪伴终端的设备固件，提供麦克�
 ```text
 julia-fused-base/
 ├─ main/                        应用源码，按功能域组织
-│  ├─ app/                      应用入口、并行开机、闲置显示策略
+│  ├─ app/                      应用入口、错峰开机、闲置显示策略
 │  ├─ voice/                    WSS 语音业务、播放任务、PCM 缓冲、唤醒
 │  ├─ network/                  Wi-Fi 生命周期、MQTT、HTTP 下载
 │  ├─ ota/                      固件清单、下载、校验、启动确认与上报
