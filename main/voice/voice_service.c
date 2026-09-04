@@ -942,7 +942,8 @@ static void voice_service_on_session_start(void)
 }
 
 /**
- * @brief 语音连接结束后停止本轮上传、播放和文件发送，并清除旧连接数据。
+ * 一条 WSS generation 同时拥有 MIC ring、播放角色和文件区间。结束通知必须先清空
+ * 这些会话资源再投递 FSM 事件；否则重连可能把旧话语或旧完成结果带入新会话。
  */
 static void voice_service_on_session_end(wss_transport_end_reason_t reason)
 {

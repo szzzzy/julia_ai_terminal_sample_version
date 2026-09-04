@@ -378,7 +378,7 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
     } else if (fsm->main_state == JULIA_MAIN_STATE_S7_FAULT &&
                fsm->s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED &&
                event == EVT_DISCONNECT_NOTICE_TIMEOUT) {
-        /* 提示结束后回到记录的稳定落点；offline 标签继续存在，直到连接恢复。 */
+        /* 服务可用性由运行时正交维护；结束提示不等于连接已经恢复。 */
         target_main_state = fsm->s7_return_state;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION &&

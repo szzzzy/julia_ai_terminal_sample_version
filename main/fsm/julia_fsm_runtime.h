@@ -1,6 +1,6 @@
 /**
  * @file julia_fsm_runtime.h
- * @brief 保存设备当前行为，并按事件到达顺序逐个完成状态变化。
+ * @brief 提供行为 FSM 与正交云端可用性的串行运行时。
  */
 #pragma once
 
@@ -18,25 +18,28 @@ typedef void (*julia_fsm_state_observer_t)(julia_main_state_t main_state,
                                             fsm_event_t event,
                                             void *ctx);
 
-/** 与行为状态机正交的云端业务可用性；离线标签由它统一控制。 */
+/** 与行为状态机正交的云端业务可用性；离线标签只由该状态控制。 */
 typedef enum {
-    JULIA_SERVICE_CONNECTING = 0,
-    JULIA_SERVICE_ONLINE,
-    JULIA_SERVICE_OFFLINE,
+    JULIA_SERVICE_CONNECTING = 0, /**< 尚未完成初始 MQTT/WSS 汇合，不提前报故障。 */
+    JULIA_SERVICE_ONLINE,         /**< MQTT 关键订阅和 WSS 认证会话均已就绪。 */
+    JULIA_SERVICE_OFFLINE,        /**< 已确认不可用；全部链路恢复前保持锁存。 */
 } julia_service_state_t;
 
 /**
  * 初始化设备行为管理。显示、声音和语音服务都可用时，开机完成后直接进入
  * 等待唤醒状态；关键能力不可用时仍保持开机状态，由应用报告严重故障。
  *
- * 同时创建事件队列、状态任务，以及待机、静默和三秒断联提示计时器。重复调用
- * 不会创建第二套运行实例。
+ * 同时创建事件队列、状态任务和各状态计时器。云端从 CONNECTING 开始，超过配置
+ * 期限仍未完成 MQTT/WSS 汇合时才进入一次 S7.1。重复调用不会创建第二套实例。
  */
 esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready);
 /** 注册一个状态变化通知接收方；可在设备行为管理启动前调用。 */
 void julia_fsm_runtime_set_state_observer(julia_fsm_state_observer_t observer,
                                           void *ctx);
-/** 提交一个普通业务事件并立即返回；暂时无法接收时返回错误。 */
+/**
+ * 从普通 Task/回调非阻塞投递事件；队列满时返回 ESP_ERR_NO_MEM。不得从 ISR 调用，
+ * 连接状态即使丢失一次事件也会由运行时快照核对收敛。
+ */
 esp_err_t julia_fsm_runtime_post(fsm_event_t event);
 /**
  * 优先报告严重故障。设备会保存故障记录、显示故障状态并按配置尝试复位；
@@ -49,7 +52,7 @@ julia_main_state_t julia_fsm_runtime_get_state(void);
 julia_s2_sub_state_t julia_fsm_runtime_get_s2_sub_state(void);
 /** 返回当前 S7 阶段；不在 S7 时返回 NONE。 */
 julia_s7_sub_state_t julia_fsm_runtime_get_s7_sub_state(void);
-/** 返回由 MQTT/WSS 断开和恢复事件维护的业务连接状态。 */
+/** 线程安全地读取聚合业务状态快照，不等待网络或 LVGL。 */
 julia_service_state_t julia_fsm_runtime_get_service_state(void);
 
 #ifdef __cplusplus

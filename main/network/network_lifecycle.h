@@ -60,7 +60,10 @@ esp_err_t network_lifecycle_register_ip_ready(network_ip_ready_cb_t callback, vo
  */
 esp_err_t network_lifecycle_start(void);
 
-/** 本地依赖刚刚就绪时，立即重试尚未成功启动的联网服务。 */
+/**
+ * 清除未成功服务的独立退避并唤醒 network_lifecycle Task。已成功槽位保持不变；
+ * 该接口不直接调用服务、不重连 Wi-Fi，也不得从 ISR 调用。
+ */
 void network_lifecycle_retry_services(void);
 
 #ifdef __cplusplus

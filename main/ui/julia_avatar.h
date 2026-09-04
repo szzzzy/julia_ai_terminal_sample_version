@@ -30,11 +30,17 @@ esp_err_t julia_avatar_init(void);
  */
 esp_err_t julia_avatar_play_boot_sequence(void);
 
-/** 标记回答声音开始或结束，使嘴型只在设备实际说话时活动。 */
+/**
+ * 打开/关闭嘴型会话门控；断联本地提示和云端回答共用它。停止后迟到 PCM 不得
+ * 重新张嘴。可从普通 Task 调用，内部负责状态锁和必要的 LVGL 串行访问。
+ */
 void julia_avatar_talking_start(void);
 void julia_avatar_talking_stop(void);
 
-/** 提供已经送往扬声器的单声道声音，用实际音量选择嘴巴张开程度。 */
+/**
+ * 提供已经写入扬声器的 mono PCM16；只同步计算能量，不保存输入指针。
+ * 应从播放 owner 调用，网络收包阶段不得提前驱动嘴型。
+ */
 void julia_avatar_feed_pcm(const int16_t *samples, size_t sample_count);
 
 /**
@@ -50,7 +56,11 @@ julia_avatar_dialog_phase_t julia_avatar_get_dialog_phase(void);
 
 /** 设置固定在屏幕左上侧的黑色小号状态叠字；UI 未初始化时先缓存。 */
 void julia_avatar_set_status_text(const char *text);
-/** 设置独立的离线标签；状态切换不会清除它，服务恢复时才隐藏。 */
+/**
+ * 设置与主状态正交的离线叠加层。UI 尚未初始化时缓存请求；函数内部串行 LVGL
+ * 访问，调用方不得直接操作标签对象。主状态切换不会隐式清除该标志。
+ */
 void julia_avatar_set_offline(bool offline);
 
+/** 返回对象树与刷新 Task 均已创建的瞬时快照；不作为跨任务内存同步屏障。 */
 bool julia_avatar_is_ready(void);

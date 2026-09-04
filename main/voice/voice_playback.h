@@ -11,14 +11,24 @@
  * 被用户打断时都产生明确结果。旧播放的完成通知不会影响新一轮回答。
  */
 
-/** 准备播放任务，并登记每个已播放声音块的通知函数。 */
+/**
+ * 创建唯一播放 Task 和 64 KiB PSRAM 缓冲。pcm_sink 在播放 Task 中同步调用，收到
+ * 的 PCM 只在回调期间有效；回调不得阻塞或反向调用播放控制接口。
+ */
 esp_err_t voice_playback_init(audio_pcm_sink_t pcm_sink, void *ctx);
-/** 开始一轮回答或扬声器自检，返回本轮编号用于拒绝迟到的旧结果。 */
+/** 开始网络回答或异步自检；新代次会取消旧播放，generation 用于隔离迟到结果。 */
 esp_err_t voice_playback_start(uint32_t rate, bool self_test, uint32_t *generation);
-/** 直接播放生命周期覆盖整个应用的本地 PCM16 资源，不占用网络抖动缓冲。 */
+/**
+ * 播放只读的本地 PCM16，并使当前网络播放代次失效。数据不复制到 64 KiB 网络
+ * 缓冲，因此 pcm 必须保持有效直至完成或取消；仅适合固件内嵌等静态资源。
+ * bytes 必须为非零偶数，rate 只接受 16/24 kHz。
+ */
 esp_err_t voice_playback_start_local(uint32_t rate, const uint8_t *pcm, size_t bytes,
                                      uint32_t *generation);
-/** 追加一块服务器回答声音；缓冲区已满时明确返回错误。 */
+/**
+ * 非阻塞复制一块 PCM 到网络缓冲；单块不超过 1200 B。缓冲满会终止整轮播放并
+ * 返回 ESP_ERR_NO_MEM，不能在错误后继续追加残缺语音。
+ */
 esp_err_t voice_playback_write(const uint8_t *pcm, size_t bytes);
 /** 声明服务器已经发完；设备仍会播完已接收声音和扬声器尾音后才报告完成。 */
 void voice_playback_finish(void);
@@ -26,5 +36,8 @@ void voice_playback_finish(void);
 void voice_playback_stop(void);
 /** 查询是否仍有一轮回答正在准备或播放。 */
 bool voice_playback_is_active(void);
-/** 取得一次尚未处理的播放结果；返回 false 表示没有新的完成或失败。 */
+/**
+ * 取走一个完成结果；结果只有一个消费槽，调用成功后即清除。上层必须以 generation
+ * 拒绝旧代次，且只能指定一个结果消费者。
+ */
 bool voice_playback_take_completion(uint32_t *generation, esp_err_t *result);

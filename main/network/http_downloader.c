@@ -2,7 +2,7 @@
  * @file    http_downloader.c
  * @brief   公共 HTTPS 数据面下载器实现。
  *
- * 本文件从 ota_engine.c 的下载循环中抽取，固件 OTA 与音频素材下载共用：
+ * 固件 OTA 与音频素材通过本模块共用以下传输约束：
  * - 连接建立与 TLS 失败分类；
  * - Range 断点续传与 200/416 回退、ETag 一致性校验；
  * - HTTP 状态码、Content-Length、Content-Range 校验；

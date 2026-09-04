@@ -7,7 +7,9 @@
  * 2. 获得 IPv4 地址后，按顺序启动 MQTT、语音连接和时间同步等服务；
  * 3. 某项服务启动失败时单独重试，不让它阻塞其它联网服务。
  *
- * 本模块不知道各服务的业务内容，只关心“现在是否有网络”和“服务是否启动成功”。
+ * Wi-Fi driver 事件只更新受锁保护的事实并唤醒 network_lifecycle Task；该 Task 是
+ * esp_wifi_connect/disconnect 和服务启动回调的唯一执行者。单次连接看门狗防止
+ * GOT_IP/STA_DISCONNECTED 丢失后永久停止重试。
  */
 
 #include <stdbool.h>
@@ -55,6 +57,7 @@ static esp_event_handler_instance_t s_got_ip_handler;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_started;
 static bool s_wifi_driver_started;
+/* 下列连接进度只在持有 s_state_lock 时修改；截止时间使用 esp_timer 单调微秒。 */
 static bool s_ip_ready;
 static bool s_connect_attempt_pending;
 static uint32_t s_retry_attempt;
@@ -121,10 +124,9 @@ static void network_lifecycle_cleanup(void)
 }
 
 /**
- * Computes a bounded exponential delay with negative-only jitter.  Keeping the
- * jitter below the cap means CONFIG_NETWORK_WIFI_RETRY_MAX_MS is a real upper
- * bound even at the final retry level.  The attempt counter belongs to the
- * caller so Wi-Fi and every service callback never steal each other's backoff.
+ * 负向抖动保证实际等待永不超过配置上限；attempt 由调用方分别持有，使 Wi-Fi 和
+ * 各服务槽位的失败次数互不影响。达到上限后的计算保持 O(1)，长期离线不会让一次
+ * 退避计算随历史失败次数增长。
  */
 static uint32_t network_backoff_delay_ms(uint32_t *attempt)
 {
@@ -164,8 +166,8 @@ static uint32_t network_next_retry_delay_ms(void)
     return network_backoff_delay_ms(&s_retry_attempt);
 }
 
-/* 计算多久后再次连接 Wi-Fi，并记录唤醒时间。调用方必须先取得状态保护锁，
- * 防止断线通知和后台任务同时安排两次连接。本函数只安排时间，不立即连接。 */
+/* 所有 Wi-Fi 退避都经此入口更新计数和单调时钟截止点；调用方必须持 s_state_lock，
+ * 防止事件回调与生命周期 Task 为同一次失败安排两个不同截止时间。 */
 static uint32_t network_schedule_retry_locked(void)
 {
     uint32_t delay_ms = network_next_retry_delay_ms();
@@ -420,8 +422,8 @@ static int64_t network_service_retry_deadline(bool ip_ready)
  * @brief 后台网络生命周期任务：推进 Wi-Fi 重连与服务启动的单一循环。
  *
  * 每轮先确认设备是否已经获得网络地址：有地址时启动到期的联网服务；没有地址且
- * 已到重试时间时连接热点；其它时间休眠到最近一次 Wi-Fi 或服务重试。新的断线、
- * 地址获取等系统通知会提前唤醒任务。
+ * 已到重试时间时连接热点。esp_wifi_connect() 返回 ESP_OK 只表示请求已受理，仍须
+ * 等待 GOT_IP；看门狗到期会结束没有结果的尝试，再回到同一退避序列。
  *
  * 这个单循环把 Wi-Fi 重连与服务启动的两份计时合并成一次阻塞等待，避免两个任务
  * 竞争调度；服务回调在该任务中执行，因此不会中断任何事件循环。
@@ -458,7 +460,7 @@ static void network_lifecycle_task(void *parameter)
                 s_connect_attempt_pending = false;
                 (void)network_schedule_retry_locked();
                 portEXIT_CRITICAL(&s_state_lock);
-                /* 即使驱动没有补发断开事件，上面安排的重试也会继续推进。 */
+                /* 先安排重试再请求断开；即使驱动不补发事件，Task 也不会失去截止时间。 */
                 (void)esp_wifi_disconnect();
                 continue;
             }
@@ -564,8 +566,8 @@ esp_err_t network_lifecycle_start(void)
             .scan_method = EXAMPLE_WIFI_SCAN_METHOD,
             .sort_method = EXAMPLE_WIFI_CONNECT_AP_SORT_METHOD,
             .threshold.rssi = CONFIG_EXAMPLE_WIFI_SCAN_RSSI_THRESHOLD,
-            /* Do not hide Windows transition-mode hotspots at scan time. The
-             * non-empty password and AP RSN IE still negotiate encrypted WPA. */
+            /* Windows 移动热点可能广播 WPA2/WPA3 过渡模式；扫描阶段允许发现 OPEN
+             * 阈值以上的 AP，实际加密方式仍由非空密码和 AP 的 RSN IE 协商。 */
             .threshold.authmode = WIFI_AUTH_OPEN,
             /* Windows Mobile Hotspot advertises WPA2/WPA3 transition mode.
              * Zero-initializing these fields leaves SAE in hunt-and-peck-only

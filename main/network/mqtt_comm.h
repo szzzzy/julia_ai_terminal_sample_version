@@ -11,8 +11,8 @@
  * 普通状态上报只保证交给 MQTT 客户端，不等待服务器确认；升级成功、失败等关键
  * 事件则由升级报告模块先保存，收到 Broker 确认后才删除，以便断线后补发。
  *
- * MQTT 只承载语音控制消息，麦克风和回答声音走 WSS。控制连接断开时，正在进行的
- * 对话会返回待机，避免设备停在一个无法继续接收语义结果的状态。
+ * MQTT 只承载语音控制消息，麦克风和回答声音走 WSS。连接变化只通知行为运行时；
+ * 本模块不直接选择 S7.1 的返回状态，也不操作 offline 标签。
  *
  * @note 所有 topic 必须在 mqtt_comm_start() 生效前注册（app_main 装配阶段）；
  *       启动后注册的新 topic 不会随已建立的会话订阅。
@@ -103,7 +103,10 @@ esp_err_t mqtt_comm_start(void);
  * @return mqtt_comm_start() 的返回值。
  */
 esp_err_t mqtt_comm_ip_ready(void *arg);
-/** 当前 MQTT 会话及全部关键订阅是否已经可用于业务。 */
+/**
+ * 线程安全地读取就绪快照。true 不仅要求 TCP/MQTT 已连接，还要求全部 critical
+ * topic 收到 SUBACK；调用不阻塞，可供状态巡检 Task 使用。
+ */
 bool mqtt_comm_is_ready(void);
 
 #ifdef __cplusplus

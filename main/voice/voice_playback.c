@@ -5,7 +5,8 @@
  * 收到开始命令后先等待约 80 ms 声音，避免刚开播就因网络小间隔产生断续；
  * 输入短暂停顿时重新积累，连续 15 秒没有可播放数据才判定超时。服务器声明结束后，
  * 设备会播放所有已接受声音并补足扬声器硬件尾音，再报告“实际播放完成”。
- * 用户插话或新一轮播放会使旧编号失效，旧任务不能覆盖新一轮状态。
+ * 用户插话或新一轮播放会使旧编号失效，旧任务不能覆盖新一轮状态。固件内嵌
+ * PCM 由同一 Task 直接分块读取，避免固定提示被网络缓冲容量限制。
  */
 #include "voice_playback.h"
 
@@ -36,6 +37,7 @@ static uint32_t s_generation;
 static uint32_t s_rate;
 static bool s_active;
 static bool s_test;
+/* 本地源不复制，三个字段均受 s_lock 保护；调用方必须保证源覆盖播放生命周期。 */
 static const uint8_t *s_local_pcm;
 static size_t s_local_bytes;
 static size_t s_local_offset;
@@ -112,8 +114,8 @@ static void playback_task(void *arg)
 
         int64_t now = esp_timer_get_time();
         if (test && !ended) {
-            /* Three 256ms tones with short silence gaps; cancellation is checked
-             * every 160 samples, unlike the blocking board self-test API. */
+            /* 三段 256 ms 音调之间留短静音；每 160 sample 检查一次取消，避免采用
+             * 板级阻塞自检时无法及时响应新播放代次。 */
             const size_t tone_samples = 6144;
             const size_t period = tone_samples + 512;
             if (test_sample < period * 3) {
@@ -130,6 +132,7 @@ static void playback_task(void *arg)
                 ended = true;
             }
         } else if (local && !ended) {
+            /* 静态资源无需网络预缓冲；锁内只复制当前块，I2S 写入仍在锁外完成。 */
             lock();
             if (s_active && generation == s_generation && s_local_pcm != NULL) {
                 size_t remaining = s_local_bytes - s_local_offset;
@@ -187,8 +190,8 @@ static void playback_task(void *arg)
             complete(generation, err);
             continue;
         }
-        /* UI receives played chunks, never network arrival bursts. Cancellation
-         * may race this callback by one chunk; it cannot restore talking state. */
+        /* UI 只接收已经写入 I2S 的块，不接收网络突发。取消最多与一个块并发，
+         * talking 门控会拒绝该迟到块重新驱动嘴型。 */
         lock();
         current = s_active && s_generation == generation;
         unlock();
@@ -282,7 +285,7 @@ esp_err_t voice_playback_write(const uint8_t *pcm, size_t bytes)
     if (!s_active || s_test || s_local_pcm != NULL || s_buffer.ended) {
         result = ESP_ERR_INVALID_STATE;
     } else if (!pcm_buffer_write(&s_buffer, pcm, bytes)) {
-        /* Abort the whole turn explicitly; never silently truncate speech. */
+        /* 中间丢一块会破坏整句连续性，因此显式终止本轮，不能静默截断后继续。 */
         ++s_overflows;
         s_completion_generation = s_generation;
         s_completion_result = ESP_ERR_NO_MEM;

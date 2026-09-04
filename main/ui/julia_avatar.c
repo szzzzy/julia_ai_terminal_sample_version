@@ -7,7 +7,8 @@
  * 完整闭眼画面。背光和是否进入待机由其它模块统一决定。
  *
  * 独立任务每 40 ms 更新一次嘴型和微动。语音任务只写入“当前阶段”和声音强度，
- * 不直接操作界面对象；所有 LVGL 修改在内部串行完成。
+ * 不直接操作界面对象；所有 LVGL 修改在内部串行完成。offline 是独立叠加层，
+ * 对话相位和主状态换图都不得隐式清除它。
  *
  * 内嵌相位画面解压到外部内存并校验完整性后才显示。嘴型将短时间声音能量分成四档，
  * 没有新声音或设备不在说话时自动闭嘴。
@@ -75,8 +76,7 @@ static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static julia_avatar_dialog_phase_t s_dialog_phase = JULIA_AVATAR_DIALOG_IDLE;
 static bool s_dozing;
 static bool s_offline;
-/* Last phase successfully assigned to the LVGL base image.  It is separate
- * from the requested state so a lock timeout can be retried safely. */
+/* 已应用相位与请求相位分开保存；LVGL 锁超时时保留请求，后续刷新可以安全重试。 */
 static julia_avatar_dialog_phase_t s_applied_dialog_phase =
     (julia_avatar_dialog_phase_t)(JULIA_AVATAR_DIALOG_SPEAKING + 1);
 static portMUX_TYPE s_phase_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -275,8 +275,7 @@ static bool avatar_apply_dialog_phase(julia_avatar_dialog_phase_t phase)
     portEXIT_CRITICAL(&s_phase_lock);
     if (dozing) return false;
     const lv_img_dsc_t *source = avatar_source_for_phase(phase);
-    /* Decoding can take long enough for a later transport command to supersede
-     * this request. Never let a stale request overwrite the latest phase. */
+    /* 解码期间可能到达更新相位；应用前再次核对，避免旧请求覆盖最新状态。 */
     if (!s_base || !dialog_phase_is_current(phase)) return false;
     if (!lvgl_port_lock(pdMS_TO_TICKS(250))) {
         ESP_LOGW(TAG, "LVGL lock timeout applying %s phase", dialog_phase_name(phase));
@@ -376,8 +375,8 @@ static uint8_t mouth_level_for_frame(const int16_t *samples, size_t count)
     }
     uint32_t rms = count ? integer_sqrt_u64(energy / count) : 0;
 
-    /* Same asymmetric thresholds as the fused lipsync module: fast attack,
-     * slower release, and one-level steps avoid chatter around a boundary. */
+    /* 与独立 lipsync 模块保持同一组非对称门限：快速张嘴、慢速回落，并限制每帧
+     * 只变化一档，避免临界音量附近来回抖动。 */
     s_smoothed_rms = (s_smoothed_rms * 5U + rms * 3U) / 8U;
     static const uint16_t rise[] = {300, 950, 2300};
     static const uint16_t fall[] = {180, 650, 1650};
@@ -391,8 +390,8 @@ static uint8_t mouth_level_for_frame(const int16_t *samples, size_t count)
     return level;
 }
 
-/* 喂入一帧下行扬声器 PCM：计算嘴型档位并记录"最近一次音频时刻"。由 voice_service
- * 的 WSS 任务调用。只做整字段更新（锁内），不在音频回调里碰 LVGL。 */
+/* 只有 voice_playback 已成功写入扬声器的 PCM 才能到达这里；网络收包和本地资源
+ * 读取均不能提前驱动嘴型。回调只更新受锁保护的能量状态，不访问 LVGL。 */
 void julia_avatar_feed_pcm(const int16_t *samples, size_t sample_count)
 {
     if (samples == NULL || sample_count == 0U) {
@@ -400,8 +399,7 @@ void julia_avatar_feed_pcm(const int16_t *samples, size_t sample_count)
     }
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
     portENTER_CRITICAL(&s_state_lock);
-    /* Playback now feeds from another task; serialize the RMS smoother with
-     * talking_start/stop and never let a cancelled chunk reopen the mouth. */
+    /* RMS 平滑器与 talking 门控使用同一把锁，已取消代次的迟到块不能重新张嘴。 */
     if (!s_talking) {
         portEXIT_CRITICAL(&s_state_lock);
         return;
@@ -412,8 +410,8 @@ void julia_avatar_feed_pcm(const int16_t *samples, size_t sample_count)
     portEXIT_CRITICAL(&s_state_lock);
 }
 
-/* 语音下行开始：置位 talking，清平滑器与目标档位。安全：可在 UI 初始化前调用
- * （此时只更新静态字段，不触碰 LVGL）。 */
+/* 每轮实际播放都从闭嘴重新开始，避免沿用上一代次的 RMS；UI 尚未初始化时只缓存
+ * 门控状态，初始化后由正常相位应用接管。 */
 void julia_avatar_talking_start(void)
 {
     portENTER_CRITICAL(&s_state_lock);
@@ -436,8 +434,7 @@ void julia_avatar_talking_stop(void)
     s_mouth_level = 0;
     s_target_mouth_level = 0;
     portEXIT_CRITICAL(&s_state_lock);
-    /* Close immediately on SPKE/session teardown rather than waiting for the
-     * next 40 ms lip-sync tick. */
+    /* 播放结束或会话 teardown 必须立即闭嘴，不能再等待下一个 40 ms 刷新节拍。 */
     if (s_ready) {
         avatar_mouth_set_shape(AVATAR_MOUTH_IDLE, 0);
         portENTER_CRITICAL(&s_phase_lock);
@@ -448,8 +445,8 @@ void julia_avatar_talking_stop(void)
     }
 }
 
-/* 设置对话框相位。may be called from WSS/command tasks；相位未变或已应用则忽略
- * 重复请求（needs_apply 判断），避免重复把同一张底图 set 一遍。 */
+/* 请求相位与已应用相位分别记录：相位相同但上次因锁超时未应用时仍需重试；已经
+ * 成功应用的重复请求不刷新底图，避免无意义的全屏传输。 */
 void julia_avatar_set_dialog_phase(julia_avatar_dialog_phase_t phase)
 {
     if (phase < JULIA_AVATAR_DIALOG_IDLE || phase > JULIA_AVATAR_DIALOG_SPEAKING) {
@@ -489,7 +486,7 @@ static void update_micro_motion(uint32_t now_ms)
         return;
     }
 
-    /* A tiny zoom pulse reads as breathing without exposing the screen edge. */
+    /* 缩放幅度只取约 1/256，既可感知呼吸又不暴露画面边缘。 */
     uint32_t breath_phase = now_ms % AVATAR_BREATH_PERIOD_MS;
     uint32_t half = AVATAR_BREATH_PERIOD_MS / 2U;
     uint32_t triangle = breath_phase <= half ? breath_phase : AVATAR_BREATH_PERIOD_MS - breath_phase;

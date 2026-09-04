@@ -1,9 +1,10 @@
 /**
  * @file julia_fsm_runtime.c
- * @brief 按顺序处理设备行为事件，并把每个状态转换成对应的屏幕和背光表现。
+ * @brief 串行提交行为状态、云端可用性和对应的用户呈现。
  *
- * 设备在开始交流、等待回答和播放回答时使用不同画面。唤醒后的准备阶段虽然
- * 与听音画面相同，但业务上仍表示“已经被唤醒、尚未确认用户开始说话”。
+ * FSM Task 是行为状态和聚合服务状态的唯一写入者；MQTT/WSS 与 esp_timer 回调
+ * 只能投递事件。服务状态与 S0～S8 正交，主状态切换不得清除 offline 标签。
+ * 连接事件可能因队列拥塞丢失，因此 Task 空闲时还会核对 transport 就绪快照。
  */
 #include "julia_fsm_runtime.h"
 
@@ -29,7 +30,7 @@
 #define SERVICE_LINK_MQTT     (1U << 0)
 #define SERVICE_LINK_WSS      (1U << 1)
 #define SERVICE_LINK_ALL      (SERVICE_LINK_MQTT | SERVICE_LINK_WSS)
-/* 断联提示只解释本轮交流中止原因，不应像严重故障一样等待复位或人工处理。 */
+/* 内嵌提示约 2.16 s；3 s 窗口为尾音排空留出余量。它不是网络恢复期限。 */
 #define DISCONNECT_NOTICE_US  3000000ULL
 
 typedef enum {
@@ -60,6 +61,7 @@ static const char *TAG = "JULIA_FSM_RT";
 static QueueHandle_t s_event_queue;
 static TaskHandle_t s_task;
 static julia_fsm_t s_fsm;
+/* s_fsm 仅由 FSM Task 修改；下列快照与链路位图供其它任务无阻塞查询。 */
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static julia_main_state_t s_committed_main_state = JULIA_MAIN_STATE_S0_BOOT;
 static julia_s2_sub_state_t s_committed_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
@@ -73,6 +75,7 @@ static esp_timer_handle_t s_service_init_timer;
 static julia_fsm_state_observer_t s_state_observer;
 static void *s_state_observer_ctx;
 
+/* EMBED_FILES 生成的符号覆盖整个应用生命周期，满足本地播放“不复制源 PCM”的契约。 */
 extern const uint8_t network_disconnected_wav_start[]
     asm("_binary_network_disconnected_16k_mono_16bit_wav_start");
 extern const uint8_t network_disconnected_wav_end[]
@@ -89,7 +92,11 @@ static uint16_t read_le16(const uint8_t *p)
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
-static void play_disconnect_prompt(void)
+/**
+ * 该资源由构建系统控制，只接受固定 44-byte PCM WAV 头；这里不是通用 WAV 解析器。
+ * 拒绝格式不符的镜像比按错误采样格式驱动扬声器更安全。
+ */
+static bool play_disconnect_prompt(void)
 {
     const uint8_t *wav = network_disconnected_wav_start;
     size_t wav_bytes = (size_t)(network_disconnected_wav_end - wav);
@@ -98,14 +105,14 @@ static void play_disconnect_prompt(void)
         read_le16(wav + 20) != 1 || read_le16(wav + 22) != 1 ||
         read_le32(wav + 24) != 16000 || read_le16(wav + 34) != 16) {
         ESP_LOGW(TAG, "local disconnect prompt has an invalid WAV header");
-        return;
+        return false;
     }
     size_t pcm_bytes = read_le32(wav + 40);
     if (pcm_bytes > wav_bytes - 44) pcm_bytes = wav_bytes - 44;
     pcm_bytes &= ~(size_t)1U;
     if (pcm_bytes == 0) {
         ESP_LOGW(TAG, "local disconnect prompt has no PCM payload");
-        return;
+        return false;
     }
     uint32_t generation = 0;
     esp_err_t err = voice_playback_start_local(16000, wav + 44, pcm_bytes,
@@ -113,10 +120,12 @@ static void play_disconnect_prompt(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "local disconnect prompt start failed: %s",
                  esp_err_to_name(err));
+        return false;
     } else {
         ESP_LOGI(TAG, "local disconnect prompt generation=%lu bytes=%u",
                  (unsigned long)generation, (unsigned)pcm_bytes);
     }
+    return true;
 }
 
 static void standby_timer_callback(void *argument)
@@ -155,6 +164,10 @@ static void service_init_timer_callback(void *argument)
     }
 }
 
+/**
+ * 只由 FSM Task 调用。ONLINE 要求 MQTT 关键订阅与 WSS 认证会话同时就绪；
+ * OFFLINE 在两路全部恢复前保持锁存，避免连接抖动反复触发 S7.1 和本地语音。
+ */
 static bool service_state_apply_event(fsm_event_t event)
 {
     uint8_t bit = 0;
@@ -205,6 +218,10 @@ static bool service_state_apply_event(fsm_event_t event)
     return true;
 }
 
+/**
+ * 连接回调是快速、非阻塞的事件生产者，队列满时允许投递失败。周期快照保证一次
+ * 丢失的恢复事件不会让 offline 永久残留，也保证丢失的断开事件最终能够补发。
+ */
 static void service_state_reconcile(void)
 {
     portENTER_CRITICAL(&s_state_lock);
@@ -235,7 +252,7 @@ static fsm_presentation_t presentation_for(julia_main_state_t main_state,
 {
     if (main_state == JULIA_MAIN_STATE_S7_FAULT &&
         s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED) {
-        /* S7.1 使用独立立绘和字幕，不能落入 S7.2 的严重故障呈现。 */
+        /* 可恢复断联与需要复位的 S7.2 必须保持不同的用户呈现。 */
         return FSM_PRESENT_S7_1_DISCONNECTED;
     }
     if (main_state == JULIA_MAIN_STATE_S2_DIALOG) {
@@ -445,7 +462,9 @@ static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
     }
     if (main_state == JULIA_MAIN_STATE_S7_FAULT &&
         fsm->s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED) {
-        play_disconnect_prompt();
+        /* talking 必须先于首块 PCM 生效，嘴型才表示实际播放而非网络收包。 */
+        julia_avatar_talking_start();
+        if (!play_disconnect_prompt()) julia_avatar_talking_stop();
         /* 计时器失败时立即执行返回策略，不能让提示态永久占用行为状态机。 */
         esp_err_t err = s_disconnect_timer != NULL
                             ? esp_timer_start_once(s_disconnect_timer,
@@ -472,9 +491,9 @@ static void runtime_on_exit(julia_fsm_t *fsm, julia_main_state_t main_state,
         (void)esp_timer_stop(s_silent_timer);
     }
     if (main_state == JULIA_MAIN_STATE_S7_FAULT &&
-        fsm->s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED &&
-        s_disconnect_timer != NULL) {
-        (void)esp_timer_stop(s_disconnect_timer);
+        fsm->s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED) {
+        if (s_disconnect_timer != NULL) (void)esp_timer_stop(s_disconnect_timer);
+        julia_avatar_talking_stop();
     }
 }
 
@@ -483,6 +502,7 @@ static void fsm_task(void *argument)
     (void)argument;
     fsm_runtime_message_t message;
     for (;;) {
+        /* 有界等待兼作连接状态巡检周期，不能改回 portMAX_DELAY。 */
         if (xQueueReceive(s_event_queue, &message, pdMS_TO_TICKS(1000)) != pdTRUE) {
             service_state_reconcile();
             continue;
@@ -526,7 +546,7 @@ static void fsm_task(void *argument)
                 julia_fsm_runtime_get_service_state();
             if (current_service_state != JULIA_SERVICE_OFFLINE ||
                 previous_service_state == JULIA_SERVICE_OFFLINE) {
-                /* 恢复事件只维护标签；同一离线周期内的后续断联也不重复进入 S7.1。 */
+                /* 连接事件只维护正交服务状态；同一离线周期不重复进入 S7.1。 */
                 continue;
             }
         }

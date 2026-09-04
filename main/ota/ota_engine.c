@@ -50,7 +50,6 @@
 /** 兼容官方主流程中的镜像头缓冲区名称，具体定义由稳定性模块提供。 */
 #define OTA_IMAGE_HEADER_SIZE OTA_STABILITY_IMAGE_HEADER_SIZE
 
-/** 本文件统一使用的日志标签。 */
 static const char *TAG = "ota_engine";
 
 /** 连续空读的上限；每次空读间隔 10 ms，达到后视为网络无响应。 */
@@ -834,8 +833,7 @@ static void ota_engine_task(void *pvParameter)
         }
     }
 
-    /* 续传时目标分区头已在 Flash 中校验过；全量下载必须先跨 read 收齐完整镜像头。 */
-    /* 续传前缀已从目标分区校验；全量模式必须跨多个 read 收齐镜像头后才能写 Flash。 */
+    /* 续传前缀已从 Flash 重新校验；全量模式必须跨 read 收齐完整镜像头后才能写入。 */
     bool image_header_checked = resume;
     size_t header_bytes = resume ? OTA_IMAGE_HEADER_SIZE : 0;
     uint8_t image_header[OTA_IMAGE_HEADER_SIZE];

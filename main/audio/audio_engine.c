@@ -40,7 +40,6 @@
 
 static const char *TAG = "audio_engine";
 
-/** 本组宏共同约束"掉电安全 + NVS 寿命"，改动任一都需重新评估： */
 /** 音频断点记录布局版本；改变布局时必须递增，否则旧记录判为过期从零下载。 */
 #define AUDIO_ENGINE_STORE_SCHEMA_VERSION 1U
 
@@ -69,9 +68,7 @@ static const char *TAG = "audio_engine";
  * - 注意：锁不是队列/信号量，不提供"等待下载完成"能力；调用方如需等待应轮询
  *   audio_engine_is_running() 或依赖后续 audio_status 事件。
  */
-/** 是否已有音频任务运行。 */
 static bool s_audio_in_progress;
-/** 保护 s_audio_in_progress 的短临界区自旋锁。 */
 static portMUX_TYPE s_audio_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
 /**

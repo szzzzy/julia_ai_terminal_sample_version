@@ -37,7 +37,6 @@ extern "C" {
  *
  * @note 处理期间会暂停继续接收；返回后消息内存失效，因此需要长期保存时必须复制。
  */
-/** 服务端文本消息回调。 */
 typedef void (*wss_transport_text_cb_t)(const uint8_t *data, size_t len);
 
 /**
@@ -142,7 +141,10 @@ void wss_transport_fail_session(void);
  * 负责收发的任务会在当前完整写入结束后统一清理。主要用于麦克风缓冲已满。
  */
 esp_err_t wss_transport_request_session_end(wss_transport_end_reason_t reason);
-/** 返回当前 WSS 是否已完成握手认证并可收发业务消息。 */
+/**
+ * 线程安全地读取会话就绪快照。true 表示 TLS、WebSocket 握手和认证均完成；
+ * 调用不接触 TLS 句柄、不阻塞，可供连接状态巡检 Task 使用。
+ */
 bool wss_transport_is_ready(void);
 const char *wss_transport_end_reason_name(wss_transport_end_reason_t reason);
 

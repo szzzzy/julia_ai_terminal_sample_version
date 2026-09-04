@@ -4,8 +4,9 @@
  *
  * 状态机回答“设备现在应当做什么”：开机、陪伴、对话、待机、静默、睡眠、
  * 故障或升级。采集声音、播放回答、绘制表情和维持网络连接由对应模块执行。
- * 对话状态进一步区分正在听用户说话、等待服务器回答和正在播放回答；S7.1
- * 表示业务连接刚刚断开，设备短暂提示后返回待机。
+ * 对话状态进一步区分正在听用户说话、等待服务器回答和正在播放回答。S7.1
+ * 只承担一次断联提示：稳定状态提示后恢复原状态，S2/S4 放弃旧会话后落到 S3；
+ * 持续离线由正交服务状态表达，不复制成每个主状态的子状态。
  *
  * 事件入口只消费当前工程已经实际投递的事件，不为尚未实现的业务预造事件。
  */
@@ -39,7 +40,7 @@ typedef enum {
 /** S7 的两个明确阶段：可恢复断联提示，以及需要记录并复位的严重故障。 */
 typedef enum {
     JULIA_S7_SUB_STATE_NONE = 0,
-    JULIA_S7_SUB_STATE_S7_1_DISCONNECTED, /**< WSS 或 MQTT 断开，显示 3 秒后进入 S3。 */
+    JULIA_S7_SUB_STATE_S7_1_DISCONNECTED, /**< 可恢复断联提示；结束后按 s7_return_state 返回。 */
     JULIA_S7_SUB_STATE_S7_2_FAULT,        /**< 核心能力不可用，保存故障记录并受控复位。 */
     JULIA_S7_SUB_STATE_COUNT,
 } julia_s7_sub_state_t;
@@ -73,6 +74,7 @@ typedef enum {
 } fsm_event_t;
 
 typedef struct julia_fsm julia_fsm_t;
+/** enter/exit 在迁移调用栈内同步执行，不得阻塞或递归修改同一 FSM。 */
 typedef void (*julia_fsm_state_cb_t)(julia_fsm_t *fsm,
                                      julia_main_state_t main_state,
                                      julia_s2_sub_state_t s2_sub_state,
@@ -91,7 +93,10 @@ struct julia_fsm {
 
 /** 将状态初始化为“正在开机”，不启动任何后台工作。 */
 void julia_fsm_init(julia_fsm_t *fsm);
-/** 按当前设备状态处理一个业务事件；状态确实改变时返回 true。 */
+/**
+ * 同步处理一个事件；只有完成合法迁移才返回 true。对象本身不加锁，调用方必须
+ * 串行化访问；运行固件由 julia_fsm_runtime 的唯一 Task 保证该约束。
+ */
 bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data);
 /** 检查设备状态与对话阶段是否互相匹配。 */
 bool julia_fsm_state_is_valid(julia_main_state_t main_state,
@@ -118,12 +123,17 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
                                    julia_main_state_t to_main_state,
                                    julia_s2_sub_state_t to_s2_sub_state,
                                    julia_s7_sub_state_t to_s7_sub_state);
-/** 执行一次符合产品流程的状态变化；无效或重复变化返回 false。 */
+/**
+ * 同步执行普通迁移并调用 exit/enter；无效、重复或 S7.1 历史落点不符时返回 false。
+ */
 bool julia_fsm_transition_to(julia_fsm_t *fsm,
                              julia_main_state_t to_main_state,
                              julia_s2_sub_state_t to_s2_sub_state,
                              fsm_event_t reason);
-/** 执行包含 S7.1 的状态变化；供事件处理和运行时故障升级使用。 */
+/**
+ * 同步执行含 S7 子状态的迁移。进入 S7.1 时会记录稳定返回点，调用方不得绕过该
+ * 入口直接改写状态字段，否则提示结束后的恢复目标不再可信。
+ */
 bool julia_fsm_transition_to_full(julia_fsm_t *fsm,
                                   julia_main_state_t to_main_state,
                                   julia_s2_sub_state_t to_s2_sub_state,
