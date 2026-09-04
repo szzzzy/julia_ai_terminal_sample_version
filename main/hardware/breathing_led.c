@@ -1,23 +1,10 @@
 /**
  * @file    breathing_led.c
- * @brief   LED 状态机：把“当前 LED 状态”映射到亮度/颜色轮廓，并做状态间平滑过渡。
+ * @brief   将 LED 状态映射为轮廓，并由外部 tick owner 推进状态间插值。
  *
- * 职责边界（与 julia_led.c 的分工）：
- * - 本模块是“上层状态机/策略层”：定义了一组按 LED 状态（led_state_t）索引的
- *   led_profile_t 轮廓（off/柔焦暖光/提示/情感色/冷光渐隐等），并在状态切换时
- *   在 从→到 两个轮廓之间做时间插值，最终调用 julia_led_set_* 输出。
- * - julia_led.c 是“原语层”：只负责把最终亮度/颜色点亮到 WS2812，不关心状态语义。
- *
- * 数据流：UI 状态机（julia_ui.c 的 led_transition_to / led_set_state）
- *   → 本模块设置 s_from/s_target/s_started_ms 并进入过渡
- *   → 外部定时循环调用 breathing_led_update(now) 
- *   → 按缓动曲线插值出当前帧 → apply_profile() → julia_led_set_* → WS2812。
- * 因此本模块依赖一个“节拍器”：外层需要周期（如每帧 80ms 左右）调用
- * breathing_led_update()。目前工程内未见该调用点，若未连接节拍器则只会在
- * 第一次 apply_profile 时静止输出一个轮廓。
- *
- * 与显示的关系：breathing_led_set_display_sleep(bool, bool) 用于“屏幕睡眠时压暗灯”、
- * “深度睡眠时切到固定冷色”，由 julia_display_theme.c 在 UI 状态变化时调用。
+ * 本模块拥有业务轮廓和过渡元组，底层 julia_led 拥有 RMT。transition_to() 只登记
+ * 目标；没有持续调用 update() 就不会推进动画。当前实际构建没有 tick 调用点，
+ * 相关旧 UI 源码也未参与构建，因此这些接口只能视为待接入策略。
  */
 
 #include "breathing_led.h"
@@ -30,12 +17,12 @@
 /**
  * @brief 单个 LED 轮廓：一组决定“灯该是什么样”参数的打包。
  *
- *   solid == true  → 用 julia_led_set_solid(hi, color)；否则用 julia_led_set_breathing(lo, hi, period, color)。
+ * solid 决定输出原语；period_ms=0 只用于 OFF/SOLID 轮廓，不能传给呼吸模式。
  */
 typedef struct {
     uint8_t lo;          /* 呼吸亮度下限（0~100）。 */
     uint8_t hi;          /* 呼吸亮度上限 / 常亮亮度（0~100）。 */
-    uint16_t period_ms;  /* 呼吸周期（ms）；0 表示非常亮。 */
+    uint16_t period_ms;  /* 呼吸周期（ms）；0 仅用于非呼吸轮廓。 */
     uint32_t color;      /* 颜色 0xRRGGBB。 */
     bool solid;          /* true：常亮（不呼吸）；false：呼吸。 */
 } led_profile_t;
@@ -50,16 +37,16 @@ static const led_profile_t s_profiles[LED_STATE_COUNT] = {
     [LED_S5_FADE_COLD] = {5, 10, 6000, 0x69849E, false},
 };
 
-/* 当前/过渡源/目标轮廓，以及过渡计时。均受 s_lock 保护。 */
-static led_profile_t s_current;       /* 当前生效的轮廓（过渡起始帧）。 */
-static led_profile_t s_from;          /* 过渡起点轮廓。 */
-static led_profile_t s_target;        /* 过渡终点轮廓。 */
-static uint32_t s_started_ms;         /* 过渡开始时刻（esp_timer 毫秒）。 */
-static uint16_t s_duration_ms;        /* 过渡时长（ms，至少 1）。 */
-static uint32_t s_emotion_color = 0xFFF1D6; /* S4 情感态覆盖色（默认暖白）。 */
-static bool s_transitioning;          /* 是否正处在过渡中。 */
-static bool s_display_sleep;          /* 屏幕是否处于“睡眠压暗”模式。 */
-static bool s_deep_sleep;             /* 是否深度睡眠（睡眠模式下用固定冷色）。 */
+/* 过渡元组在 s_lock 下整体快照；输出必须在锁外执行，避免持有 spinlock 时阻塞。 */
+static led_profile_t s_current;
+static led_profile_t s_from;
+static led_profile_t s_target;
+static uint32_t s_started_ms;
+static uint16_t s_duration_ms;
+static uint32_t s_emotion_color = 0xFFF1D6;
+static bool s_transitioning;
+static bool s_display_sleep;
+static bool s_deep_sleep;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static const char *TAG = "STATE_LED";
 
@@ -122,7 +109,8 @@ static void apply_profile(const led_profile_t *profile)
  *  - 用 lerp 得到当前帧的 lo/hi/color（solid 恒为 true，过渡期间按常亮处理），
  *    调用 apply_profile()。
  *  - 过渡结束时应用一次精确的 target 轮廓，并更新 s_current、清除 s_transitioning。
- * 函数可重入且可从任意任务上下文调用（内部用 spinlock 快照，外部再插值）。
+ * apply_profile() 会进入底层 mutex/RMT 路径，因此本函数不可从 ISR 调用，也不应由
+ * 多个任务并发推进；s_lock 只保证快照一致，不保证多 owner 输出顺序。
  */
 void breathing_led_update(uint32_t now)
 {
@@ -200,13 +188,13 @@ void led_transition_to(led_state_t target, uint16_t duration_ms)
              target, duration_ms, profile.hi, (unsigned long)profile.color);
 }
 
-/** 设置情感态颜色（仅影响 LED_S4_EMOTION 状态的颜色）。取 RGB 低 24 位。 */
+/** 只更新未来的 LED_S4_EMOTION 轮廓；当前输出不会立即刷新。 */
 void led_set_emotion_color(uint32_t rgb)
 {
     s_emotion_color = rgb & 0xffffffU;
 }
 
-/** 查询是否正处于过渡中（供 UI 判断是否已经稳定）。 */
+/** 无锁快照，仅适合同一控制上下文观察。 */
 bool breathing_led_transition_active(void) { return s_transitioning; }
 
 /**

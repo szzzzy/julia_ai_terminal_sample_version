@@ -1,20 +1,11 @@
 /**
  * @file    julia_sd.c
- * @brief   SD 卡文件辅助：挂载 FAT + 加锁 + 顺序读带宽基准测试。
+ * @brief   未接入当前构建的 SD 挂载与破坏性带宽基准参考实现。
  *
- * 本模块供 UI（julia_ui.c 的 doze 帧、julia_display_theme.c 的 SD 主题）使用，
- * 挂载点固定 /sdcard，路径访问经 julia_sd_lock()/unlock() 串行化。
- * 注意：本文件走 SDMMC 1-bit（CLK=14/CMD=17/D0=16，40MHz，内部上拉，width=1），
- * 与 main/storage/sd_card.c（用 CONFIG_SD_CARD_PIN_* 且经 TCA9554 控制 CS）是两套并存
- * 挂载实现，且都使用 /sdcard 挂载点。
- *
- * NOTE（需结合调用方确认）：
- * - julia_sd_init() 在本工程未见直接调用点；而 julia_sd_is_mounted() 只由 julia_sd_init()
- *   置位，因此 UI 侧 julia_sd_is_mounted() 目前恒为 false，doze 帧/主题会退回内置回退，
- *   不会读 SD。若要让 UI 读 SD，需在某处调用 julia_sd_init()（或把挂载状态与
- *   sd_card.c 接上）。
- * - 本文件挂载前没有把 TCA9554 的 SD_CS(P2) 拉高，也未调用 tca9554_init()；若与
- *   sd_card.c 并存，其 CS 管理依赖 sd_card.c 已先初始化并保持 CS 为高。
+ * main/CMakeLists.txt 不包含本文件；当前应用使用 sd_card.c。两者使用同一 /sdcard
+ * 挂载点但没有共享状态或锁，本模块也不负责经 TCA9554 保持 SD mode，因此不得与
+ * 现用挂载器同时初始化。format_if_mount_failed=true 可能格式化用户卡；benchmark
+ * 还会覆盖并删除固定路径文件，只能在专用测试卡上使用。
  */
 
 #include "julia_sd.h"
@@ -33,22 +24,22 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
-/* SDMMC 1-bit 引脚（硬编码，与 sd_card.c 的 CONFIG_SD_CARD_PIN_* 不同源）。 */
+/* 这是未验证的参考引脚副本；现用引脚以 Kconfig + sd_card.c 为准。 */
 #define SD_CLK_GPIO 14
 #define SD_CMD_GPIO 17
 #define SD_D0_GPIO  16
 
 static const char *TAG = "JULIA_SD";
-static sdmmc_card_t *s_card;       /* 挂载成功后的卡信息（用于打印容量等）。 */
-static bool s_mounted;             /* 是否已成功挂载（仅由 julia_sd_init 置位）。 */
-static SemaphoreHandle_t s_sd_mutex; /* 串行化 SD 文件访问的互斥锁。 */
+/* 这些状态只属于本参考模块，不反映 sd_card.c 是否已经挂载同一路径。 */
+static sdmmc_card_t *s_card;
+static bool s_mounted;
+static SemaphoreHandle_t s_sd_mutex;
 
 /**
  * @brief 挂载 SD（FAT 到 /sdcard），可重复调用（已挂载则直接返回 ESP_OK）。
  *
- * @param[in] format_if_mount_failed true 表示挂载失败时尝试格式化（本模块语义，
- *                                   与 sd_card.c 的“绝不格式化”不同，由调用方决定）。
- * 流程：确保互斥锁存在 → SDMMC 1-bit（40MHz + 内部上拉）挂载 FAT → 置 s_mounted 并打印容量。
+ * @param[in] format_if_mount_failed true 会授权 FAT 层在挂载失败时格式化介质，可能永久
+ *                                   删除卡上数据；生产路径必须传 false。
  * @return ESP_OK 已挂载；其他 esp_err_t 挂载/内存失败。
  * 调用上下文：任务上下文（使用阻塞式版本），不应在中断调用。
  */
@@ -88,7 +79,6 @@ esp_err_t julia_sd_init(bool format_if_mount_failed)
     return ESP_OK;
 }
 
-/** 是否已成功挂载（由 julia_sd_init 置位；见文件头 NOTE，实际可能恒为 false）。 */
 bool julia_sd_is_mounted(void) { return s_mounted; }
 
 /**
@@ -103,7 +93,7 @@ bool julia_sd_lock(TickType_t timeout)
     return s_sd_mutex && xSemaphoreTake(s_sd_mutex, timeout) == pdTRUE;
 }
 
-/** 释放 SD 文件访问互斥锁（无锁时安全地什么都不做）。 */
+/** 只能由成功取得锁的同一任务配对调用；该锁不保护绕过本模块的 SD 访问。 */
 void julia_sd_unlock(void)
 {
     if (s_sd_mutex) xSemaphoreGive(s_sd_mutex);
@@ -116,8 +106,8 @@ void julia_sd_unlock(void)
  * @param[out] minimum_mbps 三次中的最小带宽（可选，可传 NULL）。
  * @return ESP_OK 测量成功；ESP_ERR_INVALID_STATE 未挂载；ESP_ERR_NO_MEM 缓冲分配失败；
  *                其他 ESP_FAIL 写/读/重开失败。
- * 注意：会创建并最终删除 /sdcard/julia/bench.bin；缓冲区在外部/内部 RAM 都尝试，
- * 首选 PSRAM（需要 CONFIG_SPIRAM）。写入耗时不计入带宽（只测顺序读）。
+ * 会覆盖并最终删除 /sdcard/julia/bench.bin；若该路径已有文件，原内容不可恢复。
+ * 写入耗时不计入结果，因此数值只能表示本次顺序读取，不能当作完整存储性能。
  */
 esp_err_t julia_sd_benchmark_read(float *average_mbps, float *minimum_mbps)
 {

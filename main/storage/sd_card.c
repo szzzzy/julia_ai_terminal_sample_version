@@ -1,22 +1,11 @@
 /**
  * @file    sd_card.c
- * @brief   SD 卡（FAT）挂载：SDMMC 1-bit + TCA9554 控制 CS。
+ * @brief   以 SDMMC 1-bit 挂载 FAT，并通过共享 TCA9554 保证卡处于 SD mode。
  *
- * 接法与 VOICE DATA BENCHMARK/components/board_hal/sd_card.c 一致（该参考
- * 工程已在目标板成功写入 SD）：
- * - SDMMC 1-bit：CLK=GPIO14、CMD=GPIO17、D0=GPIO16，20 MHz；
- * - SD 卡 D3/CS 经 TCA9554 P2（Extend_IO3）路由，挂载前先把 CS 拉高，
- *   确保卡不误入 SPI 模式；
- * - 挂载点 /sdcard，format_if_mount_failed=false（绝不格式化用户的卡）；
- * - 缺卡不阻断应用：返回错误，voice_service 推送会以 ERROR file_open_failed
- *   呈现，不会影响 OTA/MQTT/WSS 会话。
- *
- * 当前限制：
- * - 开机时只尝试挂载一次；失败后不会自动重试，也不检测运行中拔卡。
- * - 当前文件发送使用的共享访问保护仍是默认空实现，不能据此保证多个功能同时访问
- *   SD 卡时完全互斥。
- * - 另一套旧存储模块也能挂载 /sdcard，但当前应用没有启动它；以后接入时必须保留
- *   唯一挂载入口，避免同一张卡被重复挂载。
+ * 只允许启动 owner 调用一次；没有 unmount、热插拔或失败重试。挂载失败不格式化
+ * 介质，也不阻断其它业务。s_mounted 只是启动期结果快照，拔卡后不会自动清除。
+ * SD 数据引脚和频率来自 Kconfig；共享 I2C 引脚由 tca9554.c 固定，当前
+ * CONFIG_SD_CARD_I2C_SCL/SDA 不参与实际配置。
  */
 
 #include <stdio.h>
@@ -30,22 +19,21 @@
 #include "sd_card.h"
 #include "tca9554.h"
 
-/** 挂载点：与 voice_uri.c 的 "SD:/x" -> "/sdcard/x" 映射一致。 */
+/* 该字符串同时属于 FILE_SEND URI 契约，修改时必须同步更新 voice_uri。 */
 #define SD_CARD_MOUNT_POINT "/sdcard"
 /** 同时打开的最大文件数（voice_service 单文件推送 + 预留）。 */
 #define SD_CARD_MAX_FILES 4
 
 static const char *TAG = "sd_card";
 
-/** 保护挂载状态标志的自旋锁；挂载本身在 app_main 启动路径中串行执行。 */
+/* 只保护状态快照；不串行化文件 IO，也不能检测运行中拔卡。 */
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_mounted;
 
 esp_err_t sd_card_start(void)
 {
 #if CONFIG_SD_CARD_ENABLE
-    /* SD 卡 D3/CS 经 TCA9554 P2 (Extend_IO3) 路由：先初始化扩展器并把 CS 拉高，
-     * 再触碰卡片，确保卡始终处于 SDMMC(SD) 模式。 */
+    /* 首次 SD clock 前必须先拉高 D3/CS，否则卡可能锁入 SPI mode。 */
     esp_err_t err = tca9554_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "tca9554 init failed: %s", esp_err_to_name(err));
@@ -82,7 +70,7 @@ esp_err_t sd_card_start(void)
     sdmmc_card_t *card = NULL;
     err = esp_vfs_fat_sdmmc_mount(SD_CARD_MOUNT_POINT, &host, &slot, &mcfg, &card);
     if (err != ESP_OK) {
-        /* 缺卡/接触不良：不阻断应用，推送会以 ERROR file_open_failed 呈现。 */
+        /* 挂载失败不改变其它启动结果；后续 FILE_SEND 通过未挂载状态失败。 */
         ESP_LOGW(TAG, "SD mount failed (%s); voice FILE_SEND will report file_open_failed",
                  esp_err_to_name(err));
         return err;

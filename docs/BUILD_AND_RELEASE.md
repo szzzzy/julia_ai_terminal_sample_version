@@ -52,7 +52,7 @@ idf.py -B build build
 | `CONFIG_JULIA_COMPANION_BRIGHTNESS_PERCENT`／`CONFIG_JULIA_SILENT_BRIGHTNESS_PERCENT` | S1、S5 固定背光，默认均为 50% |
 | `CONFIG_JULIA_DISPLAY_BREATHE_*` | S3 背光呼吸范围与周期，默认 5%–30%、4000ms；S6 背光熄灭 |
 | `CONFIG_JULIA_NIGHT_SLEEP_*` | 夜间开始／结束小时、入睡宽限和轮询周期 |
-| `CONFIG_JULIA_FAULT_*` | S7 复位等待、快速故障窗口和自动复位次数上限 |
+| `CONFIG_JULIA_FAULT_*` | S7.2 复位等待、快速故障窗口和自动复位次数上限 |
 | `CONFIG_JULIA_IMU_*` | IMU 采样、连续帧、冷却、加速度和陀螺仪阈值 |
 | `CONFIG_WSS_CLOSE_WAIT_MS` | Close 回包后等待对端关闭的上限，默认 500ms |
 

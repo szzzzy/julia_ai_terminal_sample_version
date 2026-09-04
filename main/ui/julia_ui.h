@@ -1,14 +1,13 @@
 /**
  * @file    julia_ui.h
- * @brief   julia_ui.c 的公共接口声明（L0/L1 立绘 UI 总控）。
+ * @brief   未参与当前构建且依赖不完整的旧立绘 UI 参考接口。
  *
  * 供调用方（julia_voice / julia_lipsync / julia_display_theme）使用的"状态->表情/画面"
  * 入口。多数函数要求 LVGL 已初始化（julia_ui_init）并且调用前无需自己加锁，
  * 函数内部会通过 lvgl_port_lock() 串行化。若模块未初始化或锁超时，函数返回/否则弃
  * （为 no-op），因此调用方不应依赖其返回的视觉结果。相关约定与线程模型详见 julia_ui.c。
  *
- * NOTE：需结合调用方确认——当前 main.c 的 L1 运行时链路走 julia_avatar（不进 julia_ui）；
- * 本头文件/实现是否仍被实际引用，决定其是保留还是裁剪。
+ * 当前运行时使用 julia_avatar；不得从声明存在推断这些 UI 行为已经接通。
  */
 #pragma once
 

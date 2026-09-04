@@ -1,3 +1,10 @@
+/**
+ * @file julia_power.c
+ * @brief 建立板级电源保持，并配置当前固件采用的 CPU 频率范围。
+ *
+ * BAT_Control 必须在其它外设初始化前保持高电平；短暂低脉冲可能切断电池供电。
+ * 本模块只配置运行期电源策略，不负责关机时序、电量检测或外设级休眠。
+ */
 #include "julia_power.h"
 
 #include "driver/gpio.h"
@@ -34,6 +41,8 @@ esp_err_t julia_power_hold_enable(void)
 
 esp_err_t julia_power_management_init(void)
 {
+    /* 240 MHz 来自工程构建基线；80 MHz 是当前运行策略的下限。自动 Light-sleep
+     * 尚未与显示、音频和网络 owner 协调，因此保持关闭，不能把 DFS 等同于整机休眠。 */
     const esp_pm_config_t config = {
         .max_freq_mhz = 240,
         .min_freq_mhz = 80,

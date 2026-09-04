@@ -22,7 +22,8 @@ typedef void (*julia_fsm_state_observer_t)(julia_main_state_t main_state,
  * 初始化设备行为管理。显示、声音和语音服务都可用时，开机完成后直接进入
  * 等待唤醒状态；关键能力不可用时仍保持开机状态，由应用报告严重故障。
  *
- * 同时创建 16 槽消息队列、FSM 任务和 S3 驻留计时器。重复调用幂等。
+ * 同时创建事件队列、状态任务，以及待机、静默和三秒断联提示计时器。重复调用
+ * 不会创建第二套运行实例。
  */
 esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready);
 /** 注册一个状态变化通知接收方；可在设备行为管理启动前调用。 */
@@ -39,6 +40,8 @@ esp_err_t julia_fsm_runtime_raise_fault(julia_fault_reason_t reason, esp_err_t e
 julia_main_state_t julia_fsm_runtime_get_state(void);
 /** 返回当前对话阶段；不在对话中时返回“无对话阶段”。 */
 julia_s2_sub_state_t julia_fsm_runtime_get_s2_sub_state(void);
+/** 返回当前 S7 阶段；不在 S7 时返回 NONE。 */
+julia_s7_sub_state_t julia_fsm_runtime_get_s7_sub_state(void);
 
 #ifdef __cplusplus
 }

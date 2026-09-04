@@ -10,6 +10,9 @@ static void set_state(julia_fsm_t *fsm, julia_main_state_t main_state,
     assert(julia_fsm_state_is_valid(main_state, sub_state));
     fsm->main_state = main_state;
     fsm->s2_sub_state = sub_state;
+    fsm->s7_sub_state = main_state == JULIA_MAIN_STATE_S7_FAULT
+                            ? JULIA_S7_SUB_STATE_S7_2_FAULT
+                            : JULIA_S7_SUB_STATE_NONE;
 }
 
 static void verify_disconnect_event(fsm_event_t event)
@@ -23,8 +26,11 @@ static void verify_disconnect_event(fsm_event_t event)
         julia_fsm_t fsm;
         set_state(&fsm, JULIA_MAIN_STATE_S2_DIALOG, s2_states[i]);
         assert(julia_fsm_handle_event(&fsm, event, NULL));
-        assert(fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
+        assert(fsm.main_state == JULIA_MAIN_STATE_S7_FAULT);
         assert(fsm.s2_sub_state == JULIA_S2_SUB_STATE_NONE);
+        assert(fsm.s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED);
+        assert(julia_fsm_handle_event(&fsm, EVT_DISCONNECT_NOTICE_TIMEOUT, NULL));
+        assert(fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
     }
 
     const julia_main_state_t active_states[] = {
@@ -35,6 +41,13 @@ static void verify_disconnect_event(fsm_event_t event)
         julia_fsm_t fsm;
         set_state(&fsm, active_states[i], JULIA_S2_SUB_STATE_NONE);
         assert(julia_fsm_handle_event(&fsm, event, NULL));
+        assert(fsm.main_state == JULIA_MAIN_STATE_S7_FAULT);
+        assert(fsm.s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED);
+        assert(!julia_fsm_handle_event(
+            &fsm, event == EVT_WSS_DISCONNECTED ? EVT_MQTT_DISCONNECTED
+                                                : EVT_WSS_DISCONNECTED,
+            NULL));
+        assert(julia_fsm_handle_event(&fsm, EVT_DISCONNECT_NOTICE_TIMEOUT, NULL));
         assert(fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
     }
 
@@ -62,6 +75,12 @@ int main(void)
                   "EVT_MQTT_DISCONNECTED") == 0);
     assert(strcmp(julia_fsm_event_name(EVT_WSS_DISCONNECTED),
                   "EVT_WSS_DISCONNECTED") == 0);
+    assert(strcmp(julia_fsm_s7_sub_state_name(
+                      JULIA_S7_SUB_STATE_S7_1_DISCONNECTED),
+                  "S7.1_DISCONNECTED") == 0);
+    assert(strcmp(julia_fsm_s7_sub_state_name(
+                      JULIA_S7_SUB_STATE_S7_2_FAULT),
+                  "S7.2_FAULT") == 0);
 
     verify_disconnect_event(EVT_MQTT_DISCONNECTED);
     verify_disconnect_event(EVT_WSS_DISCONNECTED);

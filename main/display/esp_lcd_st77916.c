@@ -8,26 +8,12 @@
  * @file    esp_lcd_st77916.c
  * @brief   ST77916 TFT LCD 面板驱动的 ESP-IDF 实现（esp_lcd_panel_t 接口）。
  *
- * @section drv_bounds 模块边界
- *         本文件是"通用面板驱动"层：只关心如何把一帧像素交给 ST77916 并在其上做
- *         命令/参数往返，以及基础的复位/开窗/几何变换/开关显示。它不持有任何板级
- *         引脚或背光信息（RST 引脚号与活动电平由 panel_dev_config 传入），也不依赖
- *         LVGL。板级引脚、SPI 总线、I2C 复位、背光由 julia_display.c / lvgl_port.c 提供。
+ * 驱动只拥有 panel 实例及其缓存寄存器状态；SPI bus、panel IO、板级复位、背光和
+ * LVGL 均由调用方拥有。QSPI 模式的每条命令必须经 tx_param()/tx_color() 封装 32-bit
+ * opcode，绕过封装会把普通 SPI 命令误发到错误协议阶段。
  *
- * @section drv_iface 与 ESP-IDF 的契约
- *         driver 通过 `esp_lcd_panel_io_*`（esp_lcd_panel_io_spi）与面板通信，实现
- *         `esp_lcd_panel_t` 接口回调：reset/init/draw_bitmap/invert_color/mirror/
- *         swap_xy/set_gap/disp_on_off/del。这些回调的调用顺序由上层遵循
- *         panel → reset → init → disp_on →（此后可 draw_bitmap）的确立流程约束。
- *
- * @section drv_qspi QSPI 特性
- *         QSPI（use_qspi_interface=1）下，命令字被扩展成 32-bit，把协议 opcode
- *         放入高字节、LCD 命令放入 bits[15:8]，从而让 esp_lcd_panel_io_spi 在
- *         无 DC 引脚的情况下正确路由"写命令/读命令/写颜色"事务（见 tx_param/tx_color）。
- *
- * @note   初始化序列与寄存器含义是面板厂商相关的；驱动不假设寄存器语义，只按
- *         （可覆盖的）命令表逐条下发。延时与个别寄存器含义无法在本层确认，见
- *         vendor_specific_init_default 附近说明。
+ * 厂商初始化表只按顺序透传。没有供应商依据的寄存器值保持不透明，不能根据点亮
+ * 结果编造位语义；替换表时必须保证数据生命周期持续到 panel init 完成。
  *
  * @see    esp_lcd_st77916.h
  * @see    main/display/julia_display.c
@@ -81,8 +67,9 @@ typedef struct {
     int x_gap;
     int y_gap;
     uint8_t fb_bits_per_pixel;
-    uint8_t madctl_val; // save current value of LCD_CMD_MADCTL register
-    uint8_t colmod_val; // save surrent value of LCD_CMD_COLMOD register
+    /* 几何变换必须以最后一次成功配置为基线，不能从默认值重新计算。 */
+    uint8_t madctl_val;
+    uint8_t colmod_val;
     const st77916_lcd_init_cmd_t *init_cmds;
     uint16_t init_cmds_size;
     struct {
@@ -991,8 +978,6 @@ static esp_err_t panel_st77916_init(esp_lcd_panel_t *panel)
         st77916->colmod_val,
     }, 1), TAG, "send command failed");
 
-    // vendor specific initialization, it can be different between manufacturers
-    // should consult the LCD supplier for initialization sequence code
     if (st77916->init_cmds) {
         init_cmds = st77916->init_cmds;
         init_cmds_size = st77916->init_cmds_size;
@@ -1002,7 +987,6 @@ static esp_err_t panel_st77916_init(esp_lcd_panel_t *panel)
     }
 
     for (int i = 0; i < init_cmds_size; i++) {
-        // Check if the command has been used or conflicts with the internal
         if (is_user_set && (init_cmds[i].data_bytes > 0)) {
             switch (init_cmds[i].cmd) {
             case LCD_CMD_MADCTL:
@@ -1024,11 +1008,9 @@ static esp_err_t panel_st77916_init(esp_lcd_panel_t *panel)
             }
         }
 
-        // Send command
         ESP_RETURN_ON_ERROR(tx_param(st77916, io, init_cmds[i].cmd, init_cmds[i].data, init_cmds[i].data_bytes), TAG, "send command failed");
         vTaskDelay(pdMS_TO_TICKS(init_cmds[i].delay_ms));
 
-        // Check if the current cmd is the "command set" cmd
         if ((init_cmds[i].cmd == ST77916_CMD_SET)) {
             is_user_set = ((uint8_t *)init_cmds[i].data)[0] == ST77916_PARAM_SET ? true : false;
         }
@@ -1062,7 +1044,6 @@ static esp_err_t panel_st77916_draw_bitmap(esp_lcd_panel_t *panel, int x_start, 
     y_start += st77916->y_gap;
     y_end += st77916->y_gap;
 
-    // define an area of frame memory where MCU can access
     ESP_RETURN_ON_ERROR(tx_param(st77916, io, LCD_CMD_CASET, (uint8_t[]) {
         (x_start >> 8) & 0xFF,
         x_start & 0xFF,
@@ -1075,14 +1056,12 @@ static esp_err_t panel_st77916_draw_bitmap(esp_lcd_panel_t *panel, int x_start, 
         ((y_end - 1) >> 8) & 0xFF,
         (y_end - 1) & 0xFF,
     }, 4), TAG, "send command failed");
-    // transfer frame buffer
     size_t len = (x_end - x_start) * (y_end - y_start) * st77916->fb_bits_per_pixel / 8;
-    /* Propagate queue/DMA errors to the caller.  Ignoring this result made an
-     * oversized transfer look successful while only part of the LCD changed. */
+    /* 队列/DMA 失败意味着窗口可能只更新了一部分，必须原样返回给 flush owner。 */
     return tx_color(st77916, io, LCD_CMD_RAMWR, color_data, len);
 }
 
-/** @brief 反显开关：发送 INVON(0x21)/INVOFF(0x20)。只改面板内部反显位，不动显存。 */
+/** 反显只改变面板解释方式，不重写 GRAM。 */
 static esp_err_t panel_st77916_invert_color(esp_lcd_panel_t *panel, bool invert_color_data)
 {
     st77916_panel_t *st77916 = __containerof(panel, st77916_panel_t, base);
@@ -1098,9 +1077,7 @@ static esp_err_t panel_st77916_invert_color(esp_lcd_panel_t *panel, bool invert_
 }
 
 /**
- * @brief 镜像开关：修改 MADCTL 寄存器的 BIT(6)(水平)/BIT(7)(垂直) 并立即回写。
- * @note  这是驱动层的"几何变换"，不重排显存；只改变面板扫描方向。
- *        会在本地缓存 madctl_val（struct 字段）以保证后续其他变换基于最新值。
+ * 镜像只改变扫描方向，不重排 GRAM；madctl_val 必须保留其它位和先前变换。
  */
 static esp_err_t panel_st77916_mirror(esp_lcd_panel_t *panel, bool mirror_x, bool mirror_y)
 {
@@ -1124,7 +1101,8 @@ static esp_err_t panel_st77916_mirror(esp_lcd_panel_t *panel, bool mirror_x, boo
     return ret;
 }
 
-/** @brief 交换 X/Y 轴（面板旋转 90°）：切换 MADCTL 的 MV 位并回写。 */
+/* 当前实现绕过 QSPI tx_param() 且忽略 IO 错误；QSPI 调用方不能把 ESP_OK 当作硬件
+ * 已接受 MV 位。在统一命令封装和错误传播前，该接口只保留兼容占位语义。 */
 static esp_err_t panel_st77916_swap_xy(esp_lcd_panel_t *panel, bool swap_axes)
 {
     st77916_panel_t *st77916 = __containerof(panel, st77916_panel_t, base);
@@ -1140,7 +1118,6 @@ static esp_err_t panel_st77916_swap_xy(esp_lcd_panel_t *panel, bool swap_axes)
     return ESP_OK;
 }
 
-/** @brief 设置显示区偏移（gap）：用于把逻辑坐标平移到面板显示区起点。 */
 static esp_err_t panel_st77916_set_gap(esp_lcd_panel_t *panel, int x_gap, int y_gap)
 {
     st77916_panel_t *st77916 = __containerof(panel, st77916_panel_t, base);

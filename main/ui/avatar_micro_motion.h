@@ -1,6 +1,8 @@
 /**
  * @file    avatar_micro_motion.h
- * @brief   L0/L1 立绘“微动引擎”的对外接口：眨眼/呼吸/微动/对话相位微动的状态与驱动函数。
+ * @brief   未参与当前构建的旧分层微动作参考接口。
+ *
+ * 当前立绘由 julia_avatar 驱动，未建立本接口要求的旧 UI 图层绑定与 update 节拍。
  *
  * 职责边界（本模块只负责“何时动、往哪动”，不负责画立绘）：
  *   - 立绘静态底图、眼睛/嘴部资源切换与部件绘制在 avatar_parts/{avatar_face,avatar_eyes,

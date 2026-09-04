@@ -1,6 +1,14 @@
 /**
  * @file qmi8658_shared.c
- * @brief Native ESP-IDF QMI8658 driver sharing the RTC/TCA9554 I2C bus.
+ * @brief 在板载共享 I2C 上提供 QMI8658 运动诊断所需的最小读数接口。
+ *
+ * TCA9554 是 I2C bus owner，本模块只向现有总线添加设备。初始化依次探测两个可能的
+ * SA0 地址，并在 WHO_AM_I 不匹配时移除临时设备句柄，避免留下半初始化对象。
+ *
+ * 配置固定为 30 Hz、加速度 ±4 g、陀螺仪每轴 ±64 dps；它服务于 S6 运动诊断，
+ * 不是通用姿态解算驱动。当前上层 120 dps 门限超过三轴同时满量程时的最大向量模
+ * （约 111 dps），因此陀螺仪分支无法触发；在调整量程或门限并验证前，只能依赖
+ * 加速度变化分支。
  */
 #include "qmi8658_shared.h"
 
@@ -23,7 +31,7 @@
 #define QMI8658_EXPECTED_ID    0x05
 #define QMI8658_I2C_TIMEOUT_MS 100
 
-/* CTRL2/3: scale in bits 4..6, ODR=30 Hz in low nibble (value 8). */
+/* 位值来自 QMI8658 CTRL2/CTRL3 编码：量程在 bits[6:4]，30 Hz ODR 为低四位 8。 */
 #define QMI8658_ACC_4G_30HZ    0x18
 #define QMI8658_GYR_64DPS_30HZ 0x28
 #define QMI8658_ENABLE_ACC_GYR 0x43
@@ -35,6 +43,8 @@
 static const char *TAG = "QMI8658";
 static i2c_master_dev_handle_t s_dev;
 static uint8_t s_address;
+
+/* s_dev 只在运动监测任务初始化后读取；本模块不提供多任务并发保护。 */
 
 static esp_err_t read_regs(uint8_t reg, uint8_t *data, size_t length)
 {

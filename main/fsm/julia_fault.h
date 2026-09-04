@@ -1,9 +1,10 @@
 /**
  * @file julia_fault.h
- * @brief S7 严重故障的原因分类与 NVS 快照接口。
+ * @brief S7.2 严重故障的原因分类与 NVS 快照接口。
  *
  * 本模块只记录已经完成本地恢复、仍无法继续提供核心能力的故障。
- * 网络暂时离线、单轮会话超时和普通 OTA 包校验失败不属于这里。
+ * S7.1 只是业务连接断开的三秒提示，不写故障快照也不触发复位；网络暂时离线、
+ * 单轮会话超时和普通 OTA 包校验失败同样不属于这里。
  */
 #pragma once
 
@@ -35,8 +36,8 @@ typedef struct {
     uint32_t uptime_ms;         /**< 故障发生时本次启动已运行时长。 */
     uint32_t free_heap;         /**< 故障发生时 8-bit 可用堆。 */
     uint32_t reset_reason;      /**< 本次启动的 ESP-IDF 复位原因。 */
-    uint8_t main_state;         /**< 进入 S7 前的主状态。 */
-    uint8_t s2_sub_state;       /**< 进入 S7 前的 S2 子状态。 */
+    uint8_t main_state;         /**< 进入 S7.2 前的主状态。 */
+    uint8_t s2_sub_state;       /**< 进入 S7.2 前的 S2 子状态。 */
     uint8_t reserved[2];        /**< 后续布局扩展保留。 */
     char firmware_version[32];  /**< 当前应用版本。 */
 } julia_fault_record_t;

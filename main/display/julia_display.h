@@ -12,11 +12,11 @@
 
 #include "esp_err.h"
 
-/** 初始化 ST77916 面板及 LVGL 绘图通道。 */
+/** 初始化 panel 与 LVGL port；失败可能留下部分资源，当前不支持反初始化后重试。 */
 esp_err_t julia_display_init(void);
 
-/** 控制面板背光；应用启动时应在第一帧完整后再打开。 */
+/** 当前没有实现体，现用背光接口为 julia_backlight；新代码不得调用该声明。 */
 esp_err_t julia_display_set_backlight(bool enabled);
 
-/** 查询 LCD 和绘图通道是否已经可以接收画面。 */
+/** true 不代表首帧已完成或用户已经看到画面。 */
 bool julia_display_is_ready(void);

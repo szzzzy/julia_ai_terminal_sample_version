@@ -1,6 +1,10 @@
 /**
  * @file    julia_context.c
- * @brief   设备行为中枢的"情境感知"实现：把传感器/时间/记忆变成 FSM 事件。
+ * @brief   未参与当前构建的旧情境聚合参考实现。
+ *
+ * main/CMakeLists.txt 未包含本文件。当前运行时分别使用 julia_time、
+ * julia_night_schedule、julia_motion 和 julia_fsm_runtime；不得再启动本文件的任务，
+ * 否则会重复拥有 RTC/IMU 和 FSM 事件策略。
  *
  * 职责边界：
  *   - 只做"感知到事件、投递给 FSM"这一步，不关心 FSM 如何响应。

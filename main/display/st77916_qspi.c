@@ -1,29 +1,11 @@
 /**
  * @file    st77916_qspi.c
- * @brief   板级 ST77916 QSPI 接线驱动（自足式，从 fused 主工程 main.c 摘取）。
+ * @brief   未接入构建的 ST77916 直接 QSPI 参考实现。
  *
- * @section qspi_bounds 绑定与边界
- *         本文件是一个"自足"的板级 LCD 初始化/驱动：它自己创建 QSPI 总线和 panel IO
- *         句柄、自行下发厂商初始化序列、按 EXIO(TCA9554) 做复位、并提供整屏填充工具。
- *         与 esp_lcd_st77916 组件驱动的区别在于它不过 esp_lcd_panel_t 接口，而是直接
- *         拼装 SPI 事务（见下方 st77916_qspi_new/init/fill_color）。二者共用同一份厂商
- *         初始化序列（0xF0/0xF2/...），文本上可与 julia_display.c 里的
- *         vendor_specific_init_new 对比。
- *
- * @section qspi_build 构建状态
- *         ⚠️ 当前文件未列入 main/CMakeLists.txt 的 SRCS，也未随工程编译；它保留为
- *         板级参考实现（fused 移植文档 §3.1 提及）。此处注释仅用于维护其逻辑。
- *
- * @note   头文件缺失：原文 `#include "st77916_qspi.h"` 指向的
- *         main/display/st77916_qspi.h 并不存在（目录下仅有本 .c），因此本文件单独
- *         无法编译；依赖者（st77916_qspi_config_t / ST77916_QSPI_LCD_WIDTH/HEIGHT）
- *         未在任意头文件中定义。⚠️ 只作参考，不在当前构建链路上。
- *
- * @note   复位走 I2C 与 TCA9554（板载 EXIO），与 julia_display.c 的
- *         reset_panel_via_existing_tca9554 语义相同（另一条复位路径）。
- *
- * @see    main/display/julia_display.c（实际编译的接线与初始化顺序）
- * @see    main/display/esp_lcd_st77916.c
+ * 本文件未列入 main/CMakeLists.txt，且依赖的 st77916_qspi.h 不存在，当前不能独立
+ * 编译。它还会自行安装 SPI/I2C bus driver，与现用 tca9554 + julia_display 的唯一
+ * owner 模型冲突；恢复接口前不得加入当前构建。实际显示路径以 julia_display.c 和
+ * esp_lcd_st77916.c 为准。
  */
 #include "st77916_qspi.h"
 
@@ -56,9 +38,8 @@ typedef struct {
     uint16_t delay_ms;
 } st77916_lcd_init_cmd_t;
 
-/* 厂商特定初始化序列（与 julia_display.c 的 vendor_specific_init_new 同源，均为
- * 已调校的可点亮序列）。寄存器语义由厂商决定，这里只按序透传——初始化失败多半要
- * 回查厂商手册或对比 fused 工程里的参考值，而不是在本层推断。 */
+/* 该序列不是当前构建的面板基线。寄存器语义和适用模组未经本路径验证，恢复本文件
+ * 时必须先与供应商资料及真机结果核对，不能从数值反推用途。 */
 static const st77916_lcd_init_cmd_t st77916_init_cmds[] = {
     {0xF0, {0x28}, 1, 0},
     {0xF2, {0x28}, 1, 0},
@@ -141,8 +122,7 @@ static int st77916_pack_cmd(uint8_t opcode, int lcd_cmd)
     return ((int)opcode << 24) | ((lcd_cmd & 0xFF) << 8);
 }
 
-/* 交换一个 16 位值的字节序：RGB565 像素在外设侧按大端送，CPU 侧为小端，填充前需转。
- * （参考意义：julia_display.c 走 LVGL；LV_COLOR_16_SWAP 配置已解决字节序。） */
+/* 该直接填充路径要求 RGB565 高字节先发；当前 LVGL 路径另由构建配置处理字节序。 */
 static uint16_t st77916_swap16(uint16_t value)
 {
     return (uint16_t)((value << 8) | (value >> 8));
@@ -179,7 +159,6 @@ static esp_err_t st77916_qspi_set_window(esp_lcd_panel_io_handle_t io, int x0, i
     return st77916_tx_param(io, 0x2C, NULL, 0);
 }
 
-/* 画单个像素：把窗口设为单点再写 2 字节颜色数据（供调试/清屏前试用）。 */
 static esp_err_t st77916_qspi_draw_pixel(esp_lcd_panel_io_handle_t io, int x, int y, uint16_t color)
 {
     ESP_RETURN_ON_ERROR(st77916_qspi_set_window(io, x, y, x, y), "st77916", "set pixel window failed");
@@ -231,14 +210,12 @@ esp_err_t st77916_qspi_new(const st77916_qspi_config_t *config, esp_lcd_panel_io
     return esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)config->spi_host, &io_conf, ret_io);
 }
 
-/* 通过 I2C 写一个寄存器到 EXIO（板载 TCA9554 扩展 IO）：payload = [寄存器, 值]。 */
 static esp_err_t st77916_exio_write_reg(i2c_port_t port, uint8_t addr, uint8_t reg, uint8_t value)
 {
     uint8_t payload[2] = {reg, value};
     return i2c_master_write_to_device(port, addr, payload, sizeof(payload), pdMS_TO_TICKS(100));
 }
 
-/* 通过 I2C 读一个 EXIO 寄存器：先写寄存器号再读一个字节（write-then-read）。 */
 static esp_err_t st77916_exio_read_reg(i2c_port_t port, uint8_t addr, uint8_t reg, uint8_t *value)
 {
     return i2c_master_write_read_device(port, addr, &reg, 1, value, 1, pdMS_TO_TICKS(100));
@@ -267,10 +244,9 @@ static void st77916_log_panel_id(esp_lcd_panel_io_handle_t io)
 /**
  * @brief 通过板载 EXIO(TCA9554) 做 LCD 硬件复位（active-low）。
  *
- * @note  时序与电平：复位脚先拉低 >=20ms 再拉高，随后等 120ms 让面板从复位中恢复
- *        （这是面板上电/复位后显示可用的稳定时间，与 esp_lcd_st77916 里的硬件复位
- *        一致，只是这里经由 I2C EXIO 而非 GPIO）。方向寄存器先把 RST 位设为输出，
- *        再改输出锁存，避免使能瞬间电平抖动。
+ * @note  本参考实现会自行安装 I2C driver，并且先切输出方向、后写输出锁存；它不满足
+ *        当前 tca9554 驱动采用的无毛刺顺序。即使补齐头文件，也不能直接替换现用复位
+ *        路径，必须先统一 bus owner 并改为“先锁存、后切方向”。
  *
  * @param[in] config 板级接线配置（含 I2C 端口/引脚、exio 地址、复位位号）。
  * @return ESP_OK 成功；地址扫描失败返回 ESP_ERR_NOT_FOUND；总线/设备错误返回对应 err。

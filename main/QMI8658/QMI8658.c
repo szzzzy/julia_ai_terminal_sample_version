@@ -1,6 +1,9 @@
 /**
  * @file    QMI8658.c
- * @brief   QMI8658 六轴 IMU（加速度+陀螺仪）驱动，经外部 I2C_Driver 组件访问。
+ * @brief   未参与当前构建的 QMI8658 供应商风格参考驱动。
+ *
+ * 当前运行时使用 hardware/qmi8658_shared.c。本文件依赖另一套 I2C_Driver、含全局
+ * 可变状态和无超时忙等，不得与共享驱动同时初始化，也不能作为当前运动诊断契约。
  *
  * 硬件连接/配置：
  * - I2C 从机地址：默认 0x6B（QMI8658_L_SLAVE_ADDRESS，SA0 接地）；0x6A 为 SA0 拉高。

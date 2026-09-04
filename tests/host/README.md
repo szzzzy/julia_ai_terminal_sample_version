@@ -10,7 +10,7 @@ tests/host/
 ├─ test_pcm_buffer.c      FIFO 边界、尾部、重置与数据顺序
 ├─ test_voice_playback.c  实际播放控制代码的确定性场景
 ├─ test_julia_fsm.c       行为状态迁移图与事件映射
-├─ test_transport_disconnect_fsm.c WSS／MQTT断联事件的生效／不生效状态集合
+├─ test_transport_disconnect_fsm.c WSS／MQTT断联进入 S7.1、重复事件忽略及提示结束回 S3
 ├─ test_wss_tx_writer.c   TLS 部分写、暂时错误重试与绝对截止时间
 ├─ test_voice_uplink_ring.c PSRAM上行ring顺序、回绕、容量与连接代次
 ├─ test_voice_uplink_pump.c 正常发送、积压追赶、时间预算与失败保留

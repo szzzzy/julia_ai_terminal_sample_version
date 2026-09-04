@@ -113,7 +113,7 @@ static void __attribute__((noreturn)) ota_enter_safe_mode(
     julia_fault_reason_t fault_reason, esp_err_t error, const char *reason)
 {
     if (s_fault_nvs_ready) {
-        /* OTA 启动验收早于行为 FSM；以 S7 身份落盘后沿用现有安全模式，
+        /* OTA 启动验收早于行为 FSM；以 S7.2 身份落盘后沿用现有安全模式，
          * 不在无可回滚镜像时反复 reset。 */
         (void)julia_fault_record(fault_reason, error,
                                  JULIA_MAIN_STATE_S7_FAULT,

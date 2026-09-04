@@ -32,6 +32,12 @@ static const char *const s_s2_sub_state_names[JULIA_S2_SUB_STATE_COUNT] = {
     [JULIA_S2_SUB_STATE_S2_3_SPEAKING] = "S2.3_SPEAKING",
 };
 
+static const char *const s_s7_sub_state_names[JULIA_S7_SUB_STATE_COUNT] = {
+    [JULIA_S7_SUB_STATE_NONE] = "NONE",
+    [JULIA_S7_SUB_STATE_S7_1_DISCONNECTED] = "S7.1_DISCONNECTED",
+    [JULIA_S7_SUB_STATE_S7_2_FAULT] = "S7.2_FAULT",
+};
+
 static const char *const s_event_names[EVT_COUNT] = {
     [EVT_NONE] = "EVT_NONE",
     [EVT_USER_LEAVE] = "EVT_USER_LEAVE",
@@ -49,6 +55,7 @@ static const char *const s_event_names[EVT_COUNT] = {
     [EVT_INTENT_DISMISS] = "EVT_INTENT_DISMISS",
     [EVT_MQTT_DISCONNECTED] = "EVT_MQTT_DISCONNECTED",
     [EVT_WSS_DISCONNECTED] = "EVT_WSS_DISCONNECTED",
+    [EVT_DISCONNECT_NOTICE_TIMEOUT] = "EVT_DISCONNECT_NOTICE_TIMEOUT",
     [EVT_OTA_AVAILABLE] = "EVT_OTA_AVAILABLE",
     [EVT_OTA_SUCCEEDED] = "EVT_OTA_SUCCEEDED",
     [EVT_OTA_TASK_FAILED] = "EVT_OTA_TASK_FAILED",
@@ -58,8 +65,9 @@ static void default_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
                              julia_s2_sub_state_t s2_sub_state, fsm_event_t event)
 {
     (void)fsm;
-    ESP_LOGI(TAG, "enter %s/%s by %s", julia_fsm_main_state_name(main_state),
+    ESP_LOGI(TAG, "enter %s/%s/%s by %s", julia_fsm_main_state_name(main_state),
              julia_fsm_s2_sub_state_name(s2_sub_state),
+             julia_fsm_s7_sub_state_name(fsm->s7_sub_state),
              julia_fsm_event_name(event));
 }
 
@@ -67,74 +75,130 @@ static void default_on_exit(julia_fsm_t *fsm, julia_main_state_t main_state,
                             julia_s2_sub_state_t s2_sub_state, fsm_event_t event)
 {
     (void)fsm;
-    ESP_LOGI(TAG, "exit %s/%s by %s", julia_fsm_main_state_name(main_state),
+    ESP_LOGI(TAG, "exit %s/%s/%s by %s", julia_fsm_main_state_name(main_state),
              julia_fsm_s2_sub_state_name(s2_sub_state),
+             julia_fsm_s7_sub_state_name(fsm->s7_sub_state),
              julia_fsm_event_name(event));
 }
 
 bool julia_fsm_state_is_valid(julia_main_state_t main_state,
                               julia_s2_sub_state_t s2_sub_state)
 {
+    return julia_fsm_state_is_valid_full(main_state, s2_sub_state,
+        main_state == JULIA_MAIN_STATE_S7_FAULT
+            ? JULIA_S7_SUB_STATE_S7_2_FAULT
+            : JULIA_S7_SUB_STATE_NONE);
+}
+
+bool julia_fsm_state_is_valid_full(julia_main_state_t main_state,
+                                   julia_s2_sub_state_t s2_sub_state,
+                                   julia_s7_sub_state_t s7_sub_state)
+{
     if (main_state >= JULIA_MAIN_STATE_COUNT ||
-        s2_sub_state >= JULIA_S2_SUB_STATE_COUNT) return false;
+        s2_sub_state >= JULIA_S2_SUB_STATE_COUNT ||
+        s7_sub_state >= JULIA_S7_SUB_STATE_COUNT) return false;
     if (main_state == JULIA_MAIN_STATE_S2_DIALOG) {
-        return s2_sub_state != JULIA_S2_SUB_STATE_NONE;
+        return s2_sub_state != JULIA_S2_SUB_STATE_NONE &&
+               s7_sub_state == JULIA_S7_SUB_STATE_NONE;
     }
-    return s2_sub_state == JULIA_S2_SUB_STATE_NONE;
+    if (main_state == JULIA_MAIN_STATE_S7_FAULT) {
+        return s2_sub_state == JULIA_S2_SUB_STATE_NONE &&
+               s7_sub_state != JULIA_S7_SUB_STATE_NONE;
+    }
+    return s2_sub_state == JULIA_S2_SUB_STATE_NONE &&
+           s7_sub_state == JULIA_S7_SUB_STATE_NONE;
 }
 
 static bool target_is(julia_main_state_t to_main_state,
                       julia_s2_sub_state_t to_s2_sub_state,
+                      julia_s7_sub_state_t to_s7_sub_state,
                       julia_main_state_t expected_main_state)
 {
     return to_main_state == expected_main_state &&
-           to_s2_sub_state == JULIA_S2_SUB_STATE_NONE;
+           to_s2_sub_state == JULIA_S2_SUB_STATE_NONE &&
+           to_s7_sub_state == JULIA_S7_SUB_STATE_NONE;
 }
 
-bool julia_fsm_can_transition(julia_main_state_t from_main_state,
-                              julia_s2_sub_state_t from_s2_sub_state,
-                              julia_main_state_t to_main_state,
-                              julia_s2_sub_state_t to_s2_sub_state)
+static bool target_is_disconnected(julia_main_state_t to_main_state,
+                                   julia_s2_sub_state_t to_s2_sub_state,
+                                   julia_s7_sub_state_t to_s7_sub_state)
 {
-    if (!julia_fsm_state_is_valid(from_main_state, from_s2_sub_state) ||
-        !julia_fsm_state_is_valid(to_main_state, to_s2_sub_state) ||
-        (from_main_state == to_main_state &&
-         from_s2_sub_state == to_s2_sub_state)) return false;
+    return to_main_state == JULIA_MAIN_STATE_S7_FAULT &&
+           to_s2_sub_state == JULIA_S2_SUB_STATE_NONE &&
+           to_s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED;
+}
 
-    /* 除 S7 自身外，所有状态都可以进入 S7；S7 唯一允许的出口是 S0。 */
+static bool target_is_fault(julia_main_state_t to_main_state,
+                            julia_s2_sub_state_t to_s2_sub_state,
+                            julia_s7_sub_state_t to_s7_sub_state)
+{
+    return to_main_state == JULIA_MAIN_STATE_S7_FAULT &&
+           to_s2_sub_state == JULIA_S2_SUB_STATE_NONE &&
+           to_s7_sub_state == JULIA_S7_SUB_STATE_S7_2_FAULT;
+}
+
+bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
+                                   julia_s2_sub_state_t from_s2_sub_state,
+                                   julia_s7_sub_state_t from_s7_sub_state,
+                                   julia_main_state_t to_main_state,
+                                   julia_s2_sub_state_t to_s2_sub_state,
+                                   julia_s7_sub_state_t to_s7_sub_state)
+{
+    if (!julia_fsm_state_is_valid_full(from_main_state, from_s2_sub_state,
+                                       from_s7_sub_state) ||
+        !julia_fsm_state_is_valid_full(to_main_state, to_s2_sub_state,
+                                       to_s7_sub_state) ||
+        (from_main_state == to_main_state &&
+         from_s2_sub_state == to_s2_sub_state &&
+         from_s7_sub_state == to_s7_sub_state)) return false;
+
+    /* S7.2 严重故障只能通过复位重新开机；S7.1 是可恢复提示，显示结束后进入待机。
+     * 如果提示期间又发生真正的核心故障，则升级为 S7.2 并走故障记录与复位。 */
     if (from_main_state == JULIA_MAIN_STATE_S7_FAULT) {
-        return target_is(to_main_state, to_s2_sub_state,
+        if (from_s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED) {
+            return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
+                             JULIA_MAIN_STATE_S3_STANDBY) ||
+                   target_is_fault(to_main_state, to_s2_sub_state,
+                                   to_s7_sub_state);
+        }
+        return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S0_BOOT);
     }
-    if (target_is(to_main_state, to_s2_sub_state,
-                  JULIA_MAIN_STATE_S7_FAULT)) return true;
+    if (target_is_fault(to_main_state, to_s2_sub_state, to_s7_sub_state)) return true;
+    if (target_is_disconnected(to_main_state, to_s2_sub_state, to_s7_sub_state)) {
+        /* 只有依赖 WSS/MQTT 才能继续的交流状态需要显示断联提示。已经待机、睡眠、
+         * 静默或升级中的设备不会因重复断线通知而改变用户已经选择的状态。 */
+        return from_main_state == JULIA_MAIN_STATE_S1_COMPANION ||
+               from_main_state == JULIA_MAIN_STATE_S2_DIALOG ||
+               from_main_state == JULIA_MAIN_STATE_S4_INTERACTION;
+    }
 
     switch (from_main_state) {
     case JULIA_MAIN_STATE_S0_BOOT:
-        return target_is(to_main_state, to_s2_sub_state,
+        return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S3_STANDBY) ||
-               target_is(to_main_state, to_s2_sub_state,
+               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S8_OTA);
 
     case JULIA_MAIN_STATE_S1_COMPANION:
         return (to_main_state == JULIA_MAIN_STATE_S2_DIALOG &&
                 to_s2_sub_state == JULIA_S2_SUB_STATE_S2_1_LISTENING) ||
-               target_is(to_main_state, to_s2_sub_state,
+               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S3_STANDBY) ||
-               target_is(to_main_state, to_s2_sub_state,
+               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S8_OTA);
 
     case JULIA_MAIN_STATE_S2_DIALOG:
         if (from_s2_sub_state == JULIA_S2_SUB_STATE_S2_3_SPEAKING &&
-            target_is(to_main_state, to_s2_sub_state,
+            target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                       JULIA_MAIN_STATE_S1_COMPANION)) return true;
         /* 用户的“晚安”或“结束交流”可能在回答音频前后到达，因此听音、等待回答
          * 和播放回答阶段都允许直接结束本轮交流。语音服务会先停止尚未播完的声音。 */
-        if (target_is(to_main_state, to_s2_sub_state,
+        if (target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                       JULIA_MAIN_STATE_S5_SILENT) ||
-            target_is(to_main_state, to_s2_sub_state,
+            target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                       JULIA_MAIN_STATE_S6_SLEEP) ||
-            target_is(to_main_state, to_s2_sub_state,
+            target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                       JULIA_MAIN_STATE_S3_STANDBY)) return true;
         if (to_main_state != JULIA_MAIN_STATE_S2_DIALOG) return false;
         return (from_s2_sub_state == JULIA_S2_SUB_STATE_S2_1_LISTENING &&
@@ -145,37 +209,37 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
                 to_s2_sub_state == JULIA_S2_SUB_STATE_S2_1_LISTENING);
 
     case JULIA_MAIN_STATE_S3_STANDBY:
-        return target_is(to_main_state, to_s2_sub_state,
+        return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S4_INTERACTION) ||
-               target_is(to_main_state, to_s2_sub_state,
+               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S6_SLEEP) ||
-               target_is(to_main_state, to_s2_sub_state,
+               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S8_OTA);
 
     case JULIA_MAIN_STATE_S4_INTERACTION:
-        return target_is(to_main_state, to_s2_sub_state,
+        return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S3_STANDBY) ||
-               target_is(to_main_state, to_s2_sub_state,
+               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S5_SILENT) ||
-               target_is(to_main_state, to_s2_sub_state,
+               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S6_SLEEP) ||
                (to_main_state == JULIA_MAIN_STATE_S2_DIALOG &&
                 to_s2_sub_state == JULIA_S2_SUB_STATE_S2_2_THINKING);
 
     case JULIA_MAIN_STATE_S5_SILENT:
-        return target_is(to_main_state, to_s2_sub_state,
+        return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S4_INTERACTION) ||
-               target_is(to_main_state, to_s2_sub_state,
+               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S3_STANDBY);
 
     case JULIA_MAIN_STATE_S6_SLEEP:
-        return target_is(to_main_state, to_s2_sub_state,
+        return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S4_INTERACTION);
 
     case JULIA_MAIN_STATE_S8_OTA:
-        return target_is(to_main_state, to_s2_sub_state,
+        return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S0_BOOT) ||
-               target_is(to_main_state, to_s2_sub_state,
+               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S3_STANDBY);
     case JULIA_MAIN_STATE_S7_FAULT:
     case JULIA_MAIN_STATE_COUNT:
@@ -184,27 +248,48 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
     }
 }
 
-bool julia_fsm_transition_to(julia_fsm_t *fsm,
-                             julia_main_state_t to_main_state,
-                             julia_s2_sub_state_t to_s2_sub_state,
-                             fsm_event_t reason)
+bool julia_fsm_can_transition(julia_main_state_t from_main_state,
+                              julia_s2_sub_state_t from_s2_sub_state,
+                              julia_main_state_t to_main_state,
+                              julia_s2_sub_state_t to_s2_sub_state)
+{
+    return julia_fsm_can_transition_full(from_main_state, from_s2_sub_state,
+                                         from_main_state == JULIA_MAIN_STATE_S7_FAULT
+                                             ? JULIA_S7_SUB_STATE_S7_2_FAULT
+                                             : JULIA_S7_SUB_STATE_NONE,
+                                         to_main_state, to_s2_sub_state,
+                                         to_main_state == JULIA_MAIN_STATE_S7_FAULT
+                                             ? JULIA_S7_SUB_STATE_S7_2_FAULT
+                                             : JULIA_S7_SUB_STATE_NONE);
+}
+
+bool julia_fsm_transition_to_full(julia_fsm_t *fsm,
+                                  julia_main_state_t to_main_state,
+                                  julia_s2_sub_state_t to_s2_sub_state,
+                                  julia_s7_sub_state_t to_s7_sub_state,
+                                  fsm_event_t reason)
 {
     if (fsm == NULL || reason >= EVT_COUNT ||
-        !julia_fsm_can_transition(fsm->main_state, fsm->s2_sub_state,
-                                  to_main_state, to_s2_sub_state)) return false;
+        !julia_fsm_can_transition_full(fsm->main_state, fsm->s2_sub_state,
+                                       fsm->s7_sub_state, to_main_state,
+                                       to_s2_sub_state, to_s7_sub_state)) return false;
 
     julia_main_state_t from_main_state = fsm->main_state;
     julia_s2_sub_state_t from_s2_sub_state = fsm->s2_sub_state;
+    julia_s7_sub_state_t from_s7_sub_state = fsm->s7_sub_state;
     if (fsm->on_exit != NULL) {
         fsm->on_exit(fsm, from_main_state, from_s2_sub_state, reason);
     }
     fsm->main_state = to_main_state;
     fsm->s2_sub_state = to_s2_sub_state;
-    ESP_LOGI(TAG, "[FSM] %s/%s -> %s/%s (%s)",
+    fsm->s7_sub_state = to_s7_sub_state;
+    ESP_LOGI(TAG, "[FSM] %s/%s/%s -> %s/%s/%s (%s)",
              julia_fsm_main_state_name(from_main_state),
              julia_fsm_s2_sub_state_name(from_s2_sub_state),
+             julia_fsm_s7_sub_state_name(from_s7_sub_state),
              julia_fsm_main_state_name(to_main_state),
              julia_fsm_s2_sub_state_name(to_s2_sub_state),
+             julia_fsm_s7_sub_state_name(to_s7_sub_state),
              julia_fsm_event_name(reason));
     if (fsm->on_enter != NULL) {
         fsm->on_enter(fsm, to_main_state, to_s2_sub_state, reason);
@@ -212,11 +297,24 @@ bool julia_fsm_transition_to(julia_fsm_t *fsm,
     return true;
 }
 
+bool julia_fsm_transition_to(julia_fsm_t *fsm,
+                             julia_main_state_t to_main_state,
+                             julia_s2_sub_state_t to_s2_sub_state,
+                             fsm_event_t reason)
+{
+    return julia_fsm_transition_to_full(fsm, to_main_state, to_s2_sub_state,
+                                        to_main_state == JULIA_MAIN_STATE_S7_FAULT
+                                            ? JULIA_S7_SUB_STATE_S7_2_FAULT
+                                            : JULIA_S7_SUB_STATE_NONE,
+                                        reason);
+}
+
 void julia_fsm_init(julia_fsm_t *fsm)
 {
     if (fsm == NULL) return;
     fsm->main_state = JULIA_MAIN_STATE_S0_BOOT;
     fsm->s2_sub_state = JULIA_S2_SUB_STATE_NONE;
+    fsm->s7_sub_state = JULIA_S7_SUB_STATE_NONE;
     fsm->on_enter = default_on_enter;
     fsm->on_exit = default_on_exit;
     fsm->user_ctx = NULL;
@@ -226,18 +324,29 @@ void julia_fsm_init(julia_fsm_t *fsm)
 bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
 {
     (void)data;
-    if (fsm == NULL || !julia_fsm_state_is_valid(fsm->main_state, fsm->s2_sub_state) ||
+    if (fsm == NULL ||
+        !julia_fsm_state_is_valid_full(fsm->main_state, fsm->s2_sub_state,
+                                       fsm->s7_sub_state) ||
         event <= EVT_NONE || event >= EVT_COUNT) return false;
 
     julia_main_state_t target_main_state = JULIA_MAIN_STATE_COUNT;
     julia_s2_sub_state_t target_s2_sub_state = JULIA_S2_SUB_STATE_COUNT;
+    julia_s7_sub_state_t target_s7_sub_state = JULIA_S7_SUB_STATE_NONE;
 
     if ((fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
          fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG ||
          fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION) &&
         (event == EVT_MQTT_DISCONNECTED || event == EVT_WSS_DISCONNECTED)) {
-        /* 控制消息或语音数据任一连接断开后，本轮交流都不再完整，设备返回待机，
-         * 等连接自动恢复后由下一次唤醒重新开始。 */
+        /* 控制消息或语音数据任一连接断开后，本轮交流都不再完整。设备先显示断联
+         * 提示，再返回待机，等连接自动恢复后由下一次唤醒重新开始。 */
+        target_main_state = JULIA_MAIN_STATE_S7_FAULT;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
+        target_s7_sub_state = JULIA_S7_SUB_STATE_S7_1_DISCONNECTED;
+    } else if (fsm->main_state == JULIA_MAIN_STATE_S7_FAULT &&
+               fsm->s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED &&
+               event == EVT_DISCONNECT_NOTICE_TIMEOUT) {
+        /* 三秒足以让用户看到本轮交流为何结束；随后回到默认待机，避免断联画面
+         * 长期占据屏幕。网络连接由各自后台任务继续恢复。 */
         target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION &&
@@ -323,14 +432,16 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
     }
 
     if (target_main_state < JULIA_MAIN_STATE_COUNT) {
-        return julia_fsm_transition_to(fsm, target_main_state,
-                                       target_s2_sub_state, event);
+        return julia_fsm_transition_to_full(fsm, target_main_state,
+                                            target_s2_sub_state,
+                                            target_s7_sub_state, event);
     }
 
-    ESP_LOGI(TAG, "[FSM] 事件尚未映射：%s，当前状态=%s/%s",
+    ESP_LOGI(TAG, "[FSM] 事件尚未映射：%s，当前状态=%s/%s/%s",
              julia_fsm_event_name(event),
              julia_fsm_main_state_name(fsm->main_state),
-             julia_fsm_s2_sub_state_name(fsm->s2_sub_state));
+             julia_fsm_s2_sub_state_name(fsm->s2_sub_state),
+             julia_fsm_s7_sub_state_name(fsm->s7_sub_state));
     return false;
 }
 
@@ -344,6 +455,12 @@ const char *julia_fsm_s2_sub_state_name(julia_s2_sub_state_t state)
 {
     return state < JULIA_S2_SUB_STATE_COUNT && s_s2_sub_state_names[state] != NULL
                ? s_s2_sub_state_names[state] : "UNKNOWN_S2_SUB";
+}
+
+const char *julia_fsm_s7_sub_state_name(julia_s7_sub_state_t state)
+{
+    return state < JULIA_S7_SUB_STATE_COUNT && s_s7_sub_state_names[state] != NULL
+               ? s_s7_sub_state_names[state] : "UNKNOWN_S7_SUB";
 }
 
 const char *julia_fsm_event_name(fsm_event_t event)

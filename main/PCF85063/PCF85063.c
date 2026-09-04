@@ -10,15 +10,14 @@
 *
 ******************************************************************************/
 /*
- * 补充说明（本工程上下文）：
+ * 当前构建不包含本文件，运行时使用 hardware/pcf85063_shared.c。两套实现操作同一
+ * 0x51 设备且采用不同 bus API，不得同时初始化。以下供应商头注和函数保留作参考，
+ * 不代表当前 RTC 行为。
+ *
+ * 补充说明（参考实现上下文）：
  * - 本文件是 Waveshare 移植的 PCF85063 完整驱动（含闹钟、复位、报警等），
  *   经外部 I2C_Driver 组件（I2C_Write/I2C_Read）访问 RTC，从机地址 0x51。
- * - 上游：main/context/julia_context.c 调用 PCF85063_Init()/Read_Time()/Set_All()，
- *   用于“无 SNTP 也能读到当地时间”与“把 SNTP 校时写回 RTC”。
- * - 与 main/hardware/pcf85063_shared.c 关系：两者操作同一颗 0x51 芯片，但分属
- *   不同总线栈（本文件用外部 I2C_Driver，shared 用 ESP-IDF i2c_master。
- *   NOTE：需结合调用方确认两者是否会同时初始化并写同一 RTC，见 julia_context.c
- *   与 julia_time.c 的初始化次序。
+ * - 旧上游 main/context/julia_context.c 同样未参与当前构建。
  * - 时间字段均为十进制（decToBcd/bcdToDec 已转换），年份为 0~99 存寄存器，真实
  *   年份 = 1970 + 寄存器值（YEAR_OFFSET）。
  */
@@ -250,4 +249,4 @@ void datetime_to_str(char *datetime_str,datetime_t time)
 {
 	sprintf(datetime_str, " %d.%d.%d  %d %d:%d:%d ", time.year, time.month, 
 			time.day, time.dotw, time.hour, time.minute, time.second);
-} 
+}

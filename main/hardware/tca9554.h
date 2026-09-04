@@ -5,7 +5,8 @@
  * SD 卡的模式选择信号不直接连接主芯片。挂载前必须通过扩展器保持高电平，否则
  * SD 卡可能进入 SPI 模式而无法按当前 SDMMC 接线工作。LCD 复位也经过同一扩展器。
  *
- * 来源：VOICE DATA BENCHMARK/components/board_hal/tca9554.c（已在目标板验证）。
+ * 本模块是板载 I2C bus owner；RTC/IMU 只能借用返回的 bus handle，不得删除总线或
+ * 绕过本模块并行安装另一套 I2C driver。
  */
 #pragma once
 
@@ -15,7 +16,7 @@
 #include "driver/i2c_master.h"
 #include "esp_err.h"
 
-/** TCA9554 的 7 位 I2C 从机地址。 */
+/** 7-bit I2C slave address；不要把 R/W 位拼入该值。 */
 #define TCA9554_ADDR 0x20
 
 /** P2 = Extend_IO3：SD 卡 D3/CS。SDMMC(SD) 模式下必须保持为高。 */
@@ -27,7 +28,7 @@
 /**
  * @brief 初始化 I2C 主总线并添加 TCA9554 设备（幂等）。
  *
- * @return ESP_OK 就绪；其他 esp_err_t 总线或设备初始化失败。
+ * @note  创建 bus/device/mutex，只能在任务上下文调用；当前没有反初始化接口。
  */
 esp_err_t tca9554_init(void);
 
@@ -38,7 +39,7 @@ esp_err_t tca9554_init(void);
  *
  * @param[in] pin   引脚号 0～7。
  * @param[in] level true 高电平；false 低电平。
- * @return ESP_OK 成功；ESP_ERR_INVALID_ARG 引脚号非法或设备未初始化。
+ * @note  阻塞并持有模块 mutex；不得从 ISR 调用。
  */
 esp_err_t tca9554_write_pin(uint8_t pin, bool level);
 
@@ -47,9 +48,9 @@ esp_err_t tca9554_write_pin(uint8_t pin, bool level);
  *
  * @param[in]  pin   引脚号 0～7。
  * @param[out] level 输出当前电平。
- * @return ESP_OK 成功；ESP_ERR_INVALID_ARG 参数非法。
+ * @note  只在 I2C 读取成功时写 level；阻塞且不得从 ISR 调用。
  */
 esp_err_t tca9554_read_pin(uint8_t pin, bool *level);
 
-/** 返回板载扩展器、RTC 和运动传感器共同使用的 I2C 总线。 */
+/** 返回借用的共享 bus handle；所有权仍属本模块，调用者不得删除。 */
 i2c_master_bus_handle_t tca9554_i2c_bus(void);

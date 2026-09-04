@@ -1,16 +1,10 @@
-/*
- * board_audio.c - 板级音频组件（来自最小包 mic_test.c 抽取，融合方案 §8）
+/**
+ * @file board_audio.c
+ * @brief 实现板级 I2S 采集、PCM1 fanout 和互斥的 Speaker 输出。
  *
- * 保留（§8.1）：
- *   mic_init / speaker_init / scale_sample / mic_dbfs_x100
- *   mic_task 的 I2S 读取、PCM 转换、休眠/预录
- *   speaker 的 start/volume/data/end 核心
- *   playing 扬声器活动标志、PCM1、SPKS/SPKV/SPKD/SPKE/MICS/MICW 语义
- *
- * 不保留（§8.2）：
- *   app_main、esp_log_level_set("*", ESP_LOG_NONE)、usb_init/usb_write_all/
- *   usb_read_all、USB 命令无限读取循环
- *   （由本组件的 C API 与 WSS 上行/下行层替换）
+ * MIC task 独占 mic_raw、mic_pcm、预录 ring 和 PCM1 组帧缓冲。注册的 sink 在该任务
+ * 上下文同步执行，不能保留传入指针。Speaker channel 只能在 s_spk_lock 下配置、写入
+ * 或销毁；上层播放 owner 仍负责 SPKS/PCM/SPKE 的业务顺序。
  */
 
 #include "board_audio.h"
@@ -62,7 +56,7 @@ static int16_t spk_stereo[MAX_SPK_BYTES];
 static SemaphoreHandle_t s_spk_lock;
 static TaskHandle_t s_mic_task;
 
-/* PCM1 帧缓冲：16 B 头 + MIC_SAMPLES*2 B PCM = 656 B（WSS 单个 binary）。 */
+/* 该缓冲由 MIC task 独占并逐帧复用，sink 必须在 callback 返回前复制。 */
 static uint8_t s_pcm1_frame[16 + MIC_SAMPLES * 2];
 static audio_pcm_sink_t s_afe_sink;
 static void *s_afe_ctx;
@@ -138,7 +132,7 @@ static int16_t mic_dbfs_x100(const int16_t *x, size_t count)
     return (int16_t)lrint(2000 * log10(sqrt(ss / count) + 1e-12));
 }
 
-/* WSS 上行：组 16 B PCM1 头 + PCM，整帧交给 WSS sink（取代原 usb_write_all）。 */
+/* PCM1 头字段和字节序属于设备/服务器协议；修改前必须同步更新 PROTOCOL.md。 */
 static void send_pcm1(uint32_t seq, const int16_t *x, size_t count)
 {
     uint16_t bytes = (uint16_t)(count * 2);
@@ -175,12 +169,11 @@ static void mic_task(void *arg)
             if (v < -32768) v = -32768;
             mic_pcm[i] = (int16_t)v;
         }
-        /* fanout 路径 1：AFE。播放期间也持续送入，允许本地唤醒和云端内容比对
-         * 同时工作；扬声器生命周期仍只由播放任务管理。 */
+        /* AFE 不受 WSS 上传门控；播放期间采样可能包含回声，本层不做消除。 */
         if (s_afe_sink != NULL) {
             s_afe_sink(mic_pcm, count, s_afe_ctx);
         }
-        /* fanout 路径 2：WSS 上行（MIC_START 才启用；MICS/MICW 控制休眠预录）。 */
+        /* WSS 门控由会话/唤醒策略决定；不能把 enabled 等同于 MIC_START。 */
         if (!s_wss_mic_enabled) {
             continue;
         }

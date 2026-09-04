@@ -1,5 +1,13 @@
 #pragma once
 
+/**
+ * @file julia_lipsync.h
+ * @brief 未参与当前构建的旧 PCM 嘴型耦合参考接口。
+ *
+ * 当前嘴型由 voice_playback/julia_avatar 路径驱动；这些模式依赖未接入的 julia_ui
+ * 与 julia_audio，不是现有运行时开关。
+ */
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

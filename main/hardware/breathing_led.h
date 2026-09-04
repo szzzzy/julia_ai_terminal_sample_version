@@ -1,16 +1,10 @@
 /**
  * @file    breathing_led.h
- * @brief   LED 状态机接口：LED 状态 → 亮度/颜色轮廓 + 平滑过渡。
+ * @brief   将 LED 业务状态映射为轮廓，并按外部单调时钟推进过渡。
  *
- * 实现见 breathing_led.c。这是“策略层”，最终调用 julia_led_set_*（“原语层”）
- * 把灯点亮。UI 状态机通过 led_transition_to()/led_set_state() 表达“灯当前该是
- * 什么状态”，本模块负责把它翻译成亮度/颜色，并在状态间做时间插值。
- *
- * 使用约定：
- * - 在 UI 状态变化时调用 led_transition_to()/led_set_state()；
- * - 需要在固定节拍（如每 ~80ms）周期调用 breathing_led_update(now_ms) 推进过渡；
- * - breathing_led_set_display_sleep() 用于屏幕睡眠时压暗/切冷色。
- * 各函数无副作用，仅影响本模块内部状态与最终 LED 输出。
+ * 状态修改与 update 应由同一控制上下文串行调用；update 会进一步调用底层 LED API，
+ * 因而只能在任务上下文运行。当前应用没有提供 update 节拍，也没有初始化底层 LED，
+ * 所以该策略模块尚不是当前用户可见能力。
  */
 #pragma once
 
@@ -28,15 +22,15 @@ typedef enum {
     LED_STATE_COUNT,
 } led_state_t;
 
-/** 立即切换到指定状态（无动画）。 */
+/** 立即应用指定轮廓；越界状态被忽略。 */
 void led_set_state(led_state_t state);
-/** 从当前状态平滑过渡到目标状态，时长 duration_ms。 */
+/** 记录过渡目标；必须继续调用 breathing_led_update() 才会产生后续输出。 */
 void led_transition_to(led_state_t target, uint16_t duration_ms);
-/** 设置情感态颜色（作用于 LED_S4_EMOTION）。 */
+/** 设置以后进入 LED_S4_EMOTION 时使用的颜色，不刷新当前输出。 */
 void led_set_emotion_color(uint32_t rgb);
-/** 过渡节拍器：每个刷新周期调用一次，推进过渡并输出。@param now_ms 当前毫秒。 */
+/** 使用与 esp_timer 相同的单调毫秒基准推进过渡；只允许一个 tick owner 调用。 */
 void breathing_led_update(uint32_t now_ms);
-/** 是否处于过渡中。 */
+/** 返回过渡标志的瞬时快照，不是跨任务同步屏障。 */
 bool breathing_led_transition_active(void);
 /** 设置屏幕睡眠模式（压暗/切冷色），并按新模式重刷 LED。 */
 void breathing_led_set_display_sleep(bool sleeping, bool deep_sleep);

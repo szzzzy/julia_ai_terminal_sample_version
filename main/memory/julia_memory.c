@@ -1,6 +1,9 @@
 /**
  * @file    julia_memory.c
- * @brief   记忆与例行检测模块——事件日志、用户画像、会话摘要与 LLM prompt 组装。
+ * @brief   未参与当前构建的记忆／画像持久化参考实现。
+ *
+ * 本文件不在 main/CMakeLists.txt 中，当前固件不会创建其队列、任务或存储目录。
+ * 下述流程只描述参考代码契约，不能据此声称产品已保存用户记忆。
  *
  * 数据流（输入 → 校验 → 转换 → 存储/状态更新 → 输出）：
  *  - 输入：对话文本（record_turn）、情绪事件文本（append）、遗忘指令、关键词。
@@ -24,9 +27,7 @@
  * 持久化介质：SD 卡 FAT（/sdcard），必须在 julia_memory_init 前完成挂载；
  * 过期策略：会话日志按时间(30 天)和大小(24KB)双限，事件日志为环形覆盖。
  *
- * NOTE：julia_memory_init() 在本工程中暂未见调用点，若未调用则本模块的状态
- *       与后台写入任务不会被启动（append/get_recent 等会因 s_event_queue 为空
- *       而失败），需结合启动流程确认。
+ * 若未来重新接入，必须先统一 SD mount/lock owner，并重新审查文本留存与删除策略。
  */
 
 #include "julia_memory.h"

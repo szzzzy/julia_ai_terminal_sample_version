@@ -2,7 +2,9 @@
 
 /**
  * @file    julia_routine.h
- * @brief   例行检测（routine / baseline）模块——记录活动规律并检测“日常偏差”。
+ * @brief   未参与当前构建的日常活动偏差参考接口。
+ *
+ * 下述窗口和阈值没有进入当前产品运行路径，也没有形成已验收指标。
  *
  * 数据来源：各任务按活动类型上报——语音对话任务（DIALOG）、唤醒词（WAKE）、
  * 按钮/人机交互（BUTTON）、传感器/IMU（SENSOR，由 julia_context 上报）。

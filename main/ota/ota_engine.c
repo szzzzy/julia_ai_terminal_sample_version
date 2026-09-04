@@ -78,7 +78,7 @@ static uint32_t ota_cooldown_seconds(uint32_t cooldown_count)
     return MIN(delay, (uint32_t)CONFIG_OTA_DOWNLOAD_COOLDOWN_MAX_SECONDS);
 }
 
-/** 运行期 OTA 只有无法回滚到可用固件时升级 S7；其余任务失败保留当前固件。 */
+/** 运行期 OTA 只有无法回滚到可用固件时升级 S7.2；其余任务失败保留当前固件。 */
 static bool ota_failure_requires_s7(native_ota_failure_reason_t reason)
 {
     return reason == NATIVE_OTA_FAILURE_ROLLBACK_UNAVAILABLE;

@@ -2,6 +2,8 @@
 
 /*
  * PCF85063 RTC 完整驱动头（Waveshare 移植，见 PCF85063.c）。
+ * 当前构建不使用本接口，而使用 hardware/pcf85063_shared.h；两套 bus driver 不得
+ * 同时操作地址 0x51。
  * 本头依赖外部 I2C_Driver 组件提供 I2C_Write/I2C_Read（阻塞式），从机地址 0x51。
  * 约定：
  * - datetime_t 字段均为十进制（非 BCD）；year 为完整公历年份。

@@ -1,30 +1,13 @@
 /**
  * @file    julia_led.c
- * @brief   WS2812 可寻址 LED 的低层驱动：RMT 发送 + 独立的“呼吸/常亮”刷新任务。
+ * @brief   用 RMT 发送 WS2812 时序，并由唯一刷新任务异步应用亮度配置。
  *
- * 职责边界（与 breathing_led.c 的分工）：
- * - 本模块是“原语”：只负责把一根 WS2812 灯珠按给定的颜色/亮度曲线点亮，
- *   它自己带一个 led_task 周期计算亮度并写入 RMT。它不关心“灯应该表示什么
- *   状态”——只关心“这个瞬间该亮多少、什么颜色”。
- * - breathing_led.c 是“上层状态机”：它根据 UI 状态挑选一个 led_profile_t
- *   （基础/过渡），在状态间做平滑插值，然后调用本模块的 julia_led_set_*
- *   只把最终结果交给本模块输出。因此本模块只被 breathing_led.c 使用。
+ * set_* 调用方只写配置，led_task 是 RMT channel 和发送时序的 owner。单帧发送期间
+ * 持有 ESP_PM_NO_LIGHT_SLEEP lock，防止 Light-sleep 破坏波形；错误后永久停发，避免
+ * 每 80 ms 重复冲击故障外设和日志。
  *
- * 硬件连接：
- * - 单颗 WS2812，数据脚固定在 GPIO21（JULIA_LED_GPIO，见 julia_led.h）。
- * - 用 ESP32-S3 的 RMT 外设发时序（10 MHz 时钟分辨率），不用 PWM。
- * - 灯珠上电即点亮；这里在发送期间持有 ESP_PM_NO_LIGHT_SLEEP 功率锁，
- *   防止进入 Light-sleep 打断 RMT 传送。
- *
- * 上游调用方（仅起示意，见源码中用点）：
- * - julia_led_init()：系统启动时初始化一次（RMT 通道 + 编码器 + 后台任务）。
- * - julia_led_set_breathing()/set_solid()/set_off()：由 breathing_led.c 的
- *   apply_profile() 调用，是唯一对外输出入口。
- * - julia_led_set_emotion()/hsv_to_rgb()：供肤色/表情配色使用。
- *
- * 备注：julia_led_init() 目前在本工程未见其直接调用点（见 julia_led.c
- * 与 breathing_led.cpp/UI 的引用关系），若 RMT 通道未初始化，则 output()
- * 因 s_channel 为空会在首次发送时报错并置 output_failed，之后 LED 静默。
+ * 当前应用没有调用 julia_led_init()，因此本模块虽参与编译仍不是已接通能力。主工程
+ * 把 JULIA_LED_GPIO 覆盖为 GPIO4；若其它 target 落回头文件的 GPIO21，会与 LCD CS 冲突。
  */
 
 #include "julia_led.h"
@@ -43,7 +26,7 @@
 
 /** RMT 时钟源分辨率：10 MHz，即每个 tick = 0.1 us。WS2812 的 bit 占空比都用它换算。 */
 #define RMT_RESOLUTION_HZ 10000000
-/** LED 刷新周期（ms）：任务每 80 ms 采样一次亮度并发送。 */
+/* 80 ms 是当前动画采样周期，不是 WS2812 协议要求或实测最小值。 */
 #define UPDATE_MS 80
 
 /* led_task 使用的三种输出模式。 */
@@ -55,12 +38,12 @@ typedef enum { LED_OFF, LED_SOLID, LED_BREATHING } led_mode_t;
  * 结构上它“组合”两个子编码器，按固定顺序在每一帧里依次触发：
  *   bytes —— rmt_bytes_encoder，负责把 3 字节像素编成高/低电平片段；
  *   copy  —— rmt_copy_encoder，负责把 reset（帧尾低电平）原样地追加在后面。
- * 编码器自身的 state 机保证“每次 restart 只发一个字节序列 + 一个 reset”。
- * 这个组合通过 RMT 的 encoder 链反射机制（先调用 bytes，再调用 copy）拼接输出。
+ * base 必须是首成员，RMT 才能由公共 handle 还原组合对象。state 保证数据未完整编码时
+ * 保留阶段，只有完整 GRB 后才追加 reset，不能在 MEM_FULL 时提前结束帧。
  */
 typedef struct {
     rmt_encoder_t base;        /* RMT 编码器基类（必须放在第一个成员）。 */
-    rmt_encoder_t *bytes;      /* 比特编码器：把 GB 像素数据编成高低位。 */
+    rmt_encoder_t *bytes;      /* 比特编码器：把 GRB 像素数据编成高低位。 */
     rmt_encoder_t *copy;       /* 拷贝编码器：追加帧尾 reset 符号。 */
     rmt_symbol_word_t reset;   /* 帧尾低电平符号（WS2812 复位）。 */
     int state;                 /* 0 = 待发数据；1 = 数据已发、待发 reset。 */
@@ -251,13 +234,14 @@ static void configure(led_mode_t mode, uint8_t lo, uint8_t hi, uint16_t period, 
 { xSemaphoreTake(s_lock, portMAX_DELAY); s_mode=mode; s_min=lo; s_max=hi; s_solid=hi; s_period=period; s_color=color; xSemaphoreGive(s_lock); }
 
 /**
- * @brief 请求“呼吸灯”效果（周期 0 表示立刻按 hi 常亮，见 led_task）。
+ * @brief 请求呼吸灯效果。
  *
  * @param[in] lo     亮度下限 0~100（超界会被钳到 100）。
  * @param[in] hi     亮度上限 0~100。
  * @param[in] ms     呼吸周期（ms）。
  * @param[in] color  颜色 0xRRGGBB。
- * 若 lo>hi 会自动交换，保证曲线区间合法。
+ * 若 lo>hi 会自动交换。period=0 时刷新任务不会进入呼吸分支，输出为 0；调用者需要
+ * 常亮时必须使用 julia_led_set_solid()。
  */
 void julia_led_set_breathing(uint8_t lo, uint8_t hi, uint16_t ms, uint32_t color)
 { if (lo > 100) lo=100; if (hi > 100) hi=100; if (lo > hi) { uint8_t t=lo; lo=hi; hi=t; } configure(LED_BREATHING,lo,hi,ms,color); }

@@ -40,6 +40,7 @@
 #define LCD_DATA2_GPIO            GPIO_NUM_42
 #define LCD_DATA3_GPIO            GPIO_NUM_41
 #define LCD_CS_GPIO               GPIO_NUM_21
+/* 40 MHz 是当前模组集成值，不代表 ST77916 或板级走线的通用上限。 */
 #define LCD_PIXEL_CLOCK_HZ        (40U * 1000U * 1000U)
 #define LCD_WIDTH                 360
 #define LCD_HEIGHT                360
@@ -48,12 +49,8 @@ static const char *TAG = "julia_display";
 static esp_lcd_panel_handle_t s_panel;
 static bool s_ready;
 
-/* 针对本模组调校过的厂商初始化序列（与 esp_lcd_st77916 的默认序列、以及
- * st77916_qspi.c 的序列同源，但部分寄存器（伽马表 0xE0/0xE1、亮度/相位等）取值不同，
- * 以本项目烧录验证为准）。寄存器语义由厂商决定，这里只按序透传。
- *
- * NOTE：需结合模组/供应商确认：个别寄存器位（伽马、电源时序）的精确含义无法在本层
- *       推断，改动请在真机上对比验证后再锁定。 */
+/* 当前模组使用的完整初始化序列。未取得供应商寄存器定义的值保持不透明，不从显示
+ * 结果反推位语义；任何改动都必须保留原表并通过同批次面板真机回归。 */
 static const st77916_lcd_init_cmd_t vendor_specific_init_new[] = {
     {0xF0, (uint8_t[]){0x28}, 1, 0},
     {0xF2, (uint8_t[]){0x28}, 1, 0},
@@ -248,14 +245,11 @@ static const st77916_lcd_init_cmd_t vendor_specific_init_new[] = {
  * @note  为什么走 TCA9554 而不是直接 GPIO：本板把 LCD 复位信号接到板载 EXIO
  *        （原理图标注 EXIO2，TCA9554 引脚从 0 起，因此是 P1），且 TCA9554 已被其他
  *        设备使用（I2C_NUM_0），复用其驱动可避免安装第二个共享冲突的所有者。此函数
- *        与 st77916_qspi_reset 的语义等价（同为 EXIO 复位），是当前实际编译的复位路径。
+ *        当前只允许 tca9554 owner 改写该扩展器，避免第二套 I2C driver 竞争总线。
  * @sideeffect 初始化 TCA9554；RST 拉低 20ms → 拉高 120ms；阻塞约 140ms。
  */
 static esp_err_t reset_panel_via_existing_tca9554(void)
 {
-    /* The board labels this signal EXIO2.  TCA9554 pins are zero-based here,
-     * therefore EXIO2 is P1.  Reusing this driver avoids installing a second
-     * owner for I2C_NUM_0. */
     ESP_RETURN_ON_ERROR(tca9554_init(), TAG, "TCA9554 init failed");
     ESP_RETURN_ON_ERROR(tca9554_write_pin(TCA9554_PIN_LCD_RST, false),
                         TAG, "assert LCD reset failed");
@@ -285,8 +279,8 @@ static esp_err_t reset_panel_via_existing_tca9554(void)
  *           lvgl_port_draw_bitmap_sync 的阻塞式等待一拍完成回调匹配，避免队列过深。
  *         - SPI 总线 `max_trans_sz` 取一行 LVGL 缓冲（BUFFER_PIXELS 像素），同 DMA 块一致。
  *
- * @pre  背光模块、TCA9554 驱动可用（tca9554_init 在函数内调用）。
- * @return ESP_OK 成功；否则某一步的 esp_err_t（部分资源可能已分配，但 s_ready 不变）。
+ * @return ESP_OK 表示 panel 与 LVGL port 都已就绪。失败时 s_ready 保持 false，但 SPI、
+ *         panel IO 或同步对象可能已经分配；当前没有回滚路径，不能假定原地重试安全。
  * @sideeffect 占用 SPI2 主机与相关 GPIO；启动 LVGL 任务与 tick 定时器（最终一步成功时）。
  */
 esp_err_t julia_display_init(void)
@@ -362,7 +356,7 @@ esp_err_t julia_display_init(void)
     return ESP_OK;
 }
 
-/** @brief 查询显示是否已完成初始化（供上层 main.c 决定是否继续接立绘/点亮背光）。 */
+/** true 只表示 panel/LVGL 可接收绘制，不表示首帧完成或背光已点亮。 */
 bool julia_display_is_ready(void)
 {
     return s_ready;

@@ -1,6 +1,9 @@
 /**
  * @file    avatar_face.c
- * @brief   “脸部部件”实现：立绘底图 + 眼睛 + 嘴部的创建与状态切换。
+ * @brief   未参与当前构建的旧脸部组合与演示任务参考实现。
+ *
+ * 当前构建直接使用 avatar_eyes/avatar_mouth 与 julia_avatar，不创建本文件的
+ * simulation_task；以下自动演示行为不属于当前固件。
  *
  * 模块边界：
  *   - 生成的对口资源：底图用 avatar_asset_julia_s1_1_near_standby（待机）/ 

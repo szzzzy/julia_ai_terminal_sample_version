@@ -63,6 +63,7 @@ set(srcs
     "ui/avatar_parts/avatar_mouth.c"
     "ui/generated/avatar_layers/avatar_face_base.c"
     "ui/generated/avatar_layers/avatar_face_doze.c"
+    "ui/generated/avatar_layers/avatar_disconnect.c"
     "ui/generated/avatar_layers/avatar_chroma_assets.c"
     "ui/julia_backlight.c"
     "app/julia_idle_display.c"

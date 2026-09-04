@@ -11,9 +11,8 @@
  *         esp_lcd_panel_draw_bitmap →（DMA/SPI）→ 面板。像素为 RGB565（LV_COLOR_16_SWAP，
  *         见 build 侧），面板侧按大端接收；若缓冲在外部 RAM 会先做 cache 同步。
  *
- * 一把锁保护界面对象，一把锁保证“发送画面”和“开关面板”不会同时发生；硬件完成
- * 通知用于唤醒正在等待的刷新操作。睡眠时停止产生新画面，但保留界面任务，便于
- * 唤醒后继续使用原有对象。
+ * s_lvgl_mutex 保护对象树，s_panel_mutex 串行 panel 命令与像素传输；二者不能互相
+ * 替代。ISR 只发送完成信号。display_off/refresh_paused 只门控刷新，不负责背光。
  *
  * @see    main/display/julia_display.c（panel 的创建与初始化顺序）
  * @see    main/display/esp_lcd_st77916.c（SPI 传输完成回调的触发方）
@@ -163,14 +162,12 @@ esp_err_t lvgl_port_refr_now_sync(TickType_t timeout_ticks)
     if (!lvgl_port_lock(timeout_ticks)) return ESP_ERR_TIMEOUT;
     s_last_flush_was_final = false;
     lv_refr_now(NULL);
-    /* The flush callback uses draw_bitmap_sync, so the last flush has already
-     * completed on the panel when lv_refr_now returns. */
+    /* flush callback 同步等待 DMA，因此 lv_refr_now 返回时最后一块已完成。 */
     bool complete = s_last_flush_was_final;
     lvgl_port_unlock();
     return complete ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
-/** @brief 读出累计刷新统计（次数/总耗时/单次最大耗时），任一指针可为 NULL 表示不关心。 */
 void lvgl_port_get_flush_metrics(uint64_t *count, uint64_t *total_us, uint32_t *max_us)
 {
     if (count) *count = s_flush_count;
@@ -210,16 +207,13 @@ static void lvgl_task(void *arg)
 /**
  * @brief 开关面板显示（息屏/亮屏）。
  *
- * @note  关屏：先置 s_display_off（阻止新 flush），再在 s_panel_mutex 下调用面板的
- *        disp_on_off(false)。不取 LVGL 锁——它有意与 LVGL 调用序列解耦，避免在
- *        LVGL 任务持有锁时死锁。若面板不支持关屏（返回错误），则退化为"仅关背光"
- *        （backlight-only fallback），仍把开关位置起以停 flush。
- * @note  开屏：同样在 s_panel_mutex 下 disp_on_off(true)，随后记录 s_wake_started_us
- *        于首个 flush 汇报唤醒延迟，最后清 s_display_off。
+ * @note  本函数不取得 LVGL mutex，以免与持锁 flush 形成反向锁序；panel mutex 保证
+ *        命令不会插入 DMA 传输。关屏先门控新 flush，再发送 panel 命令；若取 panel
+ *        mutex 超时，门控仍保持关闭，调用方必须根据错误决定是否恢复。
  *
  * @param[in] off true 关屏；false 开屏。
- * @return ESP_OK 完成；ESP_ERR_INVALID_STATE 面板未初始化；ESP_ERR_TIMEOUT 取面板锁超时；
- *         否则为面板 disp_on_off 错误（已作为警告记录）。
+ * @return ESP_OK 只表示本地门控状态已更新。panel 命令失败只记录警告并被吞掉，
+ *         因此调用方仍须独立控制背光；ESP_ERR_TIMEOUT 表示未取得 panel mutex。
  * @note  本函数禁止用于启动同步：它保持 LVGL 任务存活，并非阻塞式等待。
  */
 esp_err_t lvgl_port_set_display_off(bool off)
@@ -227,7 +221,6 @@ esp_err_t lvgl_port_set_display_off(bool off)
     if (!s_panel) return ESP_ERR_INVALID_STATE;
     if (off == s_display_off) return ESP_OK;
     if (off) {
-        /* 先阻止新 flush，再关闭面板；不获取 LVGL mutex。 */
         s_display_off = true;
         if (xSemaphoreTake(s_panel_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return ESP_ERR_TIMEOUT;
         esp_err_t err = esp_lcd_panel_disp_on_off(s_panel, false);
@@ -251,8 +244,7 @@ esp_err_t lvgl_port_set_display_off(bool off)
 
 bool lvgl_port_display_off(void) { return s_display_off; }
 
-/* "刷新暂停"不同于"息屏"：它只停掉 LVGL 的刷新/动画，但保持 LCD 控制器与 GRAM 供电，
- * 用于"临时冻结画面但保持背光"的场景（见 lvgl_port.h）。 */
+/* 暂停不发送 panel power command；背光与 GRAM 状态均由各自 owner 保持。 */
 void lvgl_port_set_refresh_paused(bool paused) { s_refresh_paused = paused; }
 bool lvgl_port_refresh_paused(void) { return s_refresh_paused; }
 
@@ -267,7 +259,6 @@ bool lvgl_port_lock(TickType_t timeout_ticks)
     return xSemaphoreTakeRecursive(s_lvgl_mutex, timeout_ticks) == pdTRUE;
 }
 
-/** @brief 释放 LVGL 递归锁（与 lvgl_port_lock 成对调用）。 */
 void lvgl_port_unlock(void)
 {
     xSemaphoreGiveRecursive(s_lvgl_mutex);
@@ -282,7 +273,8 @@ void lvgl_port_unlock(void)
  *        便于直接被 SPI DMA 读取；缓冲区大小 LVGL_PORT_BUFFER_PIXELS（约为整屏 1/10）。
  *
  * @param[in] panel_handle 已初始化好的面板句柄（也作为驱动 user_data 传给 flush_cb）。
- * @return ESP_OK 成功；参数为空 ESP_ERR_INVALID_ARG；信号量/缓冲/任务/timer 任一失败返回错误。
+ * @return ESP_OK 成功。失败时可能已创建部分 mutex、buffer 或 timer；当前没有统一
+ *         rollback/deinit，调用方不得在同一进程中直接重试或重复初始化。
  * @sideeffect 分配两帧双缓冲；启动 esp_timer tick 与独立 lvgl 任务；注册显示驱动。
  */
 esp_err_t lvgl_port_init(esp_lcd_panel_handle_t panel_handle)

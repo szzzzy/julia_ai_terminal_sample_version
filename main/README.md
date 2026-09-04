@@ -13,7 +13,7 @@
 | `network/` | Wi-Fi 后台生命周期、MQTT 主题路由与 OTA 控制；`http_downloader.c` 提供通用下载器 |
 | `ota/` | OTA 清单校验、下载、持久化、隔离／冷却、启动验收及可靠状态上报 |
 | `audio/` | 音频素材清单和下载引擎；应用只调用初始化占位入口，未接通 MQTT 下载触发 |
-| `fsm/` | `julia_fsm.c` 定义状态图和现有事件映射；`julia_fsm_runtime.c` 串行处理事件、S3 计时和 S7 呈现；`julia_fault.c` 保存严重故障快照 |
+| `fsm/` | `julia_fsm.c` 定义状态图和现有事件映射；`julia_fsm_runtime.c` 串行处理事件、S3/S7.1 计时和异常呈现；`julia_fault.c` 保存 S7.2 严重故障快照 |
 | `context/` | `julia_time.c` 恢复 RTC／执行 SNTP；夜间调度和 IMU 运动检测产生 FSM 事件 |
 | `display/` | `julia_display.c` 配置 QSPI 面板；`esp_lcd_st77916.c` 提供面板驱动 |
 | `lvgl_port/` | 显示缓冲、刷新完成同步、LVGL 任务与互斥接口 |
@@ -48,7 +48,7 @@
 2. 初始化背光、LCD、LVGL、Avatar，交由独立 `boot_animation` 任务执行眨眼序列。
 3. 主任务同时注册语音命令、初始化板级音频与独立播放任务、音频素材服务和 RTC，并挂载 SD。
 4. 注册 IP-ready 回调并启动 Wi-Fi；扫描／连接及可用时的 SNTP 与动画重叠。
-5. 等动画完成后启动闲置显示和 FSM；关键显示、音频或语音依赖失败时进入 S7，否则由 S0 直接进入等待唤醒词的 S3。
+5. 等动画完成后启动闲置显示和 FSM；关键显示、音频或语音依赖失败时进入 S7.2，否则由 S0 直接进入等待唤醒词的 S3。
 6. FSM 就绪后启动夜间、运动及可选本地唤醒输入。
 7. 打开交互启动门槛，唤醒网络服务重试；MQTT／WSS 仅在此前置条件满足后启动，避免抢占开机画面。
 8. 仅在 `CONFIG_VOICE_PUSH_DEMO_ENABLE` 启用时启动文件推送演示。
@@ -101,9 +101,9 @@ MIC 使用 256 槽（约 5.12 秒、168KB）的 PSRAM SPSC ring，MQTT 控制作
 
 默认服务器唤醒模式中，WSS 建连后立即持续上传麦克风声音。服务器命中唤醒词后发送带 `interaction_id` 的 `wake_detected`；设备提交 S3/S5/S6→S4 并回 `state_ready`，随后唤醒回应的 `SPKS` 临时启用闭眼底图上的独立嘴层，播完闭嘴并仍停留 S4。实际有效话语以 `MIC_START` 标记开始、`MIC_STOP` 进入 S2.2“想”，正常回答 `SPKS` 进入 S2.3“说”，实际播完回 S1。MQTT `goodnight`／`dismiss` 不播语音，分别直接进入 S6／S5。细节与时序见 [通信协议](../docs/PROTOCOL.md)。
 
-FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发起交互、S5 静默、S6 睡眠、S7 故障、S8 OTA。只有 S2 有 S2.1“听”、S2.2“想”、S2.3“说”三个子状态。启动完成后 S0 直接进入等待唤醒词的 S3；对话结束才进入 S1 免唤醒陪伴期。当前默认值为：S1 连续空闲 10 分钟进入 S3，S3 连续驻留 5 分钟或命中 23:00～07:00 夜间条件进入 S6；这些时间均由 `CONFIG_JULIA_*` 配置项控制。
+FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发起交互、S5 静默、S6 睡眠、S7 异常、S8 OTA。S2 有 S2.1“听”、S2.2“想”、S2.3“说”三个对话阶段；S7.1 表示 WSS 或 MQTT 刚刚断开，三秒后自动恢复待机；S7.2 表示核心能力不可用，需要保存故障并受控复位。S7 本身不作为可驻留状态。
 
-当前背光策略为：常驻 S1 固定 50%，S3 在 5%–30% 间呼吸，S5 固定 50%，S6 熄灭；交互状态和非常驻的 S0/S7/S8 保持 100%。
+当前背光策略为：S1 固定 50%，S3 在 5%–30% 间呼吸，S5 固定 50%，S6 熄灭；S7.1 使用指定闭眼断联图并固定 50% 亮度，S7.2 严重故障使用现有调试呈现。
 
 | 当前来源 | 生效状态 | 目标状态 |
 | --- | --- | --- |
@@ -114,8 +114,9 @@ FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发�
 | `EVT_INTERRUPT`／`EVT_USER_CALL` | S2.3 | S2.1 |
 | `EVT_SILENCE_TIMEOUT` | S2.3 | S1 |
 | `EVT_USER_LEAVE` | S1 | S3 |
-| MQTT 会话断开 `EVT_MQTT_DISCONNECTED` | S1／S2 任一阶段／S4 | S3 |
-| WSS 会话结束 `EVT_WSS_DISCONNECTED` | S1／S2 任一阶段／S4 | S3 |
+| MQTT 会话断开 `EVT_MQTT_DISCONNECTED` | S1／S2 任一阶段／S4 | S7.1 |
+| WSS 会话结束 `EVT_WSS_DISCONNECTED` | S1／S2 任一阶段／S4 | S7.1 |
+| 断联提示完成 `EVT_DISCONNECT_NOTICE_TIMEOUT` | S7.1 | S3 |
 | 唤醒词 `EVT_WAKEUP` | S3／S5／S6 | S4 |
 | `EVT_NIGHT_TIME`／`EVT_STANDBY_TIMEOUT` | S3 | S6 |
 | MQTT `intent_result=goodnight` | S4／S2 任一阶段 | S6 |
@@ -124,12 +125,12 @@ FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发�
 | OTA 引擎接受升级 | S0／S1／S3 | S8 |
 | OTA 任务失败（非链路、非严重故障） | S8 | S3 |
 | OTA 提交成功、即将复位 | S8 | S0 |
-| 严重故障消息 | S0～S6／S8 | S7 |
-| 自动复位 | S7 | S0 |
+| 严重故障消息 | S0～S6／S7.1／S8 | S7.2 |
+| 自动复位 | S7.2 | S0 |
 
-`intent_result=normal` 只表示没有特殊语义，不改变状态。OTA 任务、NVS 检查点、目标分区、启动分区设置或普通镜像校验失败都不会触发 S7，因为活动固件尚未被替换；这类失败由 S8 回到 S3 等待唤醒。Wi-Fi、TLS、HTTP 等临时链路失败保持 S8 和下载断点，等待现有恢复流程。只有已经无法回滚到可用固件时才从 S8 进入 S7。
+`intent_result=normal` 只表示没有特殊语义，不改变状态。OTA 任务、NVS 检查点、目标分区、启动分区设置或普通镜像校验失败都不会触发 S7.2，因为活动固件尚未被替换；这类失败由 S8 回到 S3 等待唤醒。Wi-Fi、TLS、HTTP 等临时链路失败保持 S8 和下载断点，等待现有恢复流程。只有已经无法回滚到可用固件时才从 S8 进入 S7.2。
 
-S7 只接收关键初始化、FSM 内部损坏和 OTA 无法安全恢复等严重故障。进入 S7 时使用 `julia_fault` NVS namespace 保存快照；默认显示 3 秒后复位，同类快速故障连续超过三次后保持 S7，具体由 `CONFIG_JULIA_FAULT_*` 配置。当前调试 UI 与 Companion 共用底图，依靠左上 `S7 FAULT` 状态码区分；正式故障素材后续再接入。普通网络断线、单轮会话失败和普通 OTA 包拒绝不进入 S7。
+S7.2 只接收关键初始化、FSM 内部损坏和 OTA 无法安全恢复等严重故障，并保存 NVS 快照后按策略复位。S7.1 不写严重故障快照、不触发复位：它使用 `main/ui/generated/doze_frame_preview.png` 转换得到的内嵌立绘和 `S7.1 DISCONNECTED` 字幕提示本轮交流因业务连接中断，三秒后进入 S3；WSS/MQTT 各自继续后台重连。
 
 ## 编译范围与参考源码
 

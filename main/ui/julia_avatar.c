@@ -33,6 +33,7 @@
 #include "avatar_chroma_assets.h"
 #include "avatar_face_base.h"
 #include "avatar_face_doze.h"
+#include "avatar_disconnect.h"
 #include "avatar_eyes.h"
 #include "avatar_mouth.h"
 #include "julia_backlight.h"
@@ -72,6 +73,7 @@ static uint32_t s_last_pcm_ms;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static julia_avatar_dialog_phase_t s_dialog_phase = JULIA_AVATAR_DIALOG_IDLE;
 static bool s_dozing;
+static bool s_disconnected;
 /* Last phase successfully assigned to the LVGL base image.  It is separate
  * from the requested state so a lock timeout can be retried safely. */
 static julia_avatar_dialog_phase_t s_applied_dialog_phase =
@@ -288,8 +290,11 @@ static bool avatar_apply_dialog_phase(julia_avatar_dialog_phase_t phase)
 void julia_avatar_set_dozing(bool active)
 {
     portENTER_CRITICAL(&s_phase_lock);
-    bool changed = s_dozing != active;
+    bool previous_dozing = s_dozing;
+    bool previous_disconnected = s_disconnected;
+    bool changed = previous_dozing != active || previous_disconnected;
     s_dozing = active;
+    s_disconnected = false;
     julia_avatar_dialog_phase_t phase = s_dialog_phase;
     portEXIT_CRITICAL(&s_phase_lock);
     if (!changed || !s_base) return;
@@ -299,7 +304,8 @@ void julia_avatar_set_dozing(bool active)
                                      : avatar_source_for_phase(phase);
     if (!lvgl_port_lock(pdMS_TO_TICKS(250))) {
         portENTER_CRITICAL(&s_phase_lock);
-        s_dozing = !active;
+        s_dozing = previous_dozing;
+        s_disconnected = previous_disconnected;
         portEXIT_CRITICAL(&s_phase_lock);
         ESP_LOGW(TAG, "LVGL lock timeout switching doze=%u", active ? 1U : 0U);
         return;
@@ -323,6 +329,41 @@ void julia_avatar_set_dozing(bool active)
         avatar_apply_phase_eyes(phase);
     }
     ESP_LOGI(TAG, "portrait=%s", active ? "sleep" : dialog_phase_name(phase));
+}
+
+void julia_avatar_show_disconnected(void)
+{
+    /* 断联图本身已经包含闭眼和装饰元素，因此必须隐藏额外眼睛与嘴巴，避免两套
+     * 部件重叠。把它标记为完整覆盖画面，也可阻止迟到的对话相位重新换回旧底图。 */
+    portENTER_CRITICAL(&s_phase_lock);
+    bool changed = !s_dozing || !s_disconnected;
+    bool previous_dozing = s_dozing;
+    bool previous_disconnected = s_disconnected;
+    s_dozing = true;
+    s_disconnected = true;
+    portEXIT_CRITICAL(&s_phase_lock);
+    if (!changed || !s_base) return;
+
+    if (!lvgl_port_lock(pdMS_TO_TICKS(250))) {
+        portENTER_CRITICAL(&s_phase_lock);
+        s_dozing = previous_dozing;
+        s_disconnected = previous_disconnected;
+        portEXIT_CRITICAL(&s_phase_lock);
+        ESP_LOGW(TAG, "LVGL lock timeout showing disconnected portrait");
+        return;
+    }
+    lv_img_set_src(s_base, &avatar_asset_julia_s7_1_disconnected);
+    lv_obj_t *layers[] = {
+        avatar_eyes_left_object(), avatar_eyes_right_object(), avatar_mouth_object(),
+    };
+    for (size_t i = 0; i < sizeof(layers) / sizeof(layers[0]); ++i) {
+        if (layers[i] == NULL) continue;
+        lv_obj_add_flag(layers[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_invalidate(layers[i]);
+    }
+    lv_obj_invalidate(s_base);
+    lvgl_port_unlock();
+    ESP_LOGI(TAG, "portrait=disconnected");
 }
 
 /* 整数平方根（用于求 RMS）：逐位逼近，避免在音频回调里用浮点 sqrt。

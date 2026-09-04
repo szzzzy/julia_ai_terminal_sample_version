@@ -1,6 +1,6 @@
 /**
  * @file    julia_ui.c
- * @brief   Julia 立绘 UI 总控（fused 工程移植而来，L2/L3 尚未裁剪的遗留实现）。
+ * @brief   未参与当前构建且依赖不完整的旧立绘 UI 总控参考实现。
  *
  * 模块职责与边界：
  *   - 本模块是"调度/总控"层：负责 LVGL 资源与立绘的创建（julia_ui_init）、

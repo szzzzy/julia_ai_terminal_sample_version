@@ -1,6 +1,8 @@
 /**
  * @file    avatar_face.h
- * @brief   “脸部部件”总控接口：立绘底图 + 眼睛 + 嘴部的生命周期与状态入口。
+ * @brief   未参与当前构建的旧脸部组合与演示接口。
+ *
+ * 当前构建直接组合 avatar_eyes/avatar_mouth 与 julia_avatar，不创建这里声明的演示任务。
  *
  * 层级：本模块是部件层（avatar_parts）的“面向脸部”聚合面，向上服务于总控 julia_ui.c，
  * 向下组合 avatar_eyes / avatar_mouth / 生成的底图资源（avatar_face_base / avatar_face_doze）。

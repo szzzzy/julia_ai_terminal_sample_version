@@ -1,6 +1,9 @@
 /**
  * @file    julia_lipsync.c
- * @brief   语音输出与嘴型驱动的耦合实现：把 PCM 帧 RMS 换算为口型开合度。
+ * @brief   未参与当前构建的旧 PCM 嘴型耦合参考实现。
+ *
+ * main/CMakeLists.txt 未包含本文件；当前嘴型由 voice_playback/julia_avatar 路径驱动。
+ * 下述 julia_ui 与 julia_audio 契约不适用于现有运行时。
  *
  * 职责：接收任意外部 PCM 帧流，按 40ms 帧切分，计算 RMS -> 分档（0..3）
  *        -> 平滑后的 q8.8 开合度，调用 julia_ui 的 mouth 接口驱动口型；同时按

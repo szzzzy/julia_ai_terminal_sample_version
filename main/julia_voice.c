@@ -1,6 +1,9 @@
 /**
  * @file    julia_voice.c
- * @brief   语音顶层协调器：本地 AFE/WakeNet 唤醒 + 全流程语音会话。
+ * @brief   未参与当前构建的旧本地 ASR/LLM/TTS 语音栈参考实现。
+ *
+ * 当前运行路径是 board_audio + voice_service + wss_transport；main/CMakeLists.txt
+ * 未包含本文件。这里描述的 Qwen、本地会话 FSM 和流式 TTS 不能作为当前能力声明。
  *
  * 一条完整会话的数据流（本模块串起来的"链路"）：
  *

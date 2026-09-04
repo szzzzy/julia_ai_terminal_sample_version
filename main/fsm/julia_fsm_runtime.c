@@ -21,6 +21,8 @@
 #define FSM_EVENT_QUEUE_DEPTH 16
 #define FSM_TASK_STACK_SIZE   4096
 #define FSM_TASK_PRIORITY     4
+/* 断联提示只解释本轮交流中止原因，不应像严重故障一样等待复位或人工处理。 */
+#define DISCONNECT_NOTICE_US  3000000ULL
 
 typedef enum {
     FSM_RUNTIME_MESSAGE_EVENT = 0,
@@ -40,6 +42,7 @@ typedef enum {
     FSM_PRESENT_S3_STANDBY,
     FSM_PRESENT_S5_SILENT,
     FSM_PRESENT_S6_SLEEP,
+    FSM_PRESENT_S7_1_DISCONNECTED,
     FSM_PRESENT_S2_1_LISTENING,
     FSM_PRESENT_S2_2_THINKING,
     FSM_PRESENT_S2_3_SPEAKING,
@@ -52,8 +55,10 @@ static julia_fsm_t s_fsm;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static julia_main_state_t s_committed_main_state = JULIA_MAIN_STATE_S0_BOOT;
 static julia_s2_sub_state_t s_committed_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
+static julia_s7_sub_state_t s_committed_s7_sub_state = JULIA_S7_SUB_STATE_NONE;
 static esp_timer_handle_t s_standby_timer;
 static esp_timer_handle_t s_silent_timer;
+static esp_timer_handle_t s_disconnect_timer;
 static julia_fsm_state_observer_t s_state_observer;
 static void *s_state_observer_ctx;
 
@@ -75,9 +80,24 @@ static void silent_timer_callback(void *argument)
     }
 }
 
-static fsm_presentation_t presentation_for(julia_main_state_t main_state,
-                                           julia_s2_sub_state_t s2_sub_state)
+static void disconnect_timer_callback(void *argument)
 {
+    (void)argument;
+    esp_err_t err = julia_fsm_runtime_post(EVT_DISCONNECT_NOTICE_TIMEOUT);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "断联提示结束事件投递失败：%s", esp_err_to_name(err));
+    }
+}
+
+static fsm_presentation_t presentation_for(julia_main_state_t main_state,
+                                           julia_s2_sub_state_t s2_sub_state,
+                                           julia_s7_sub_state_t s7_sub_state)
+{
+    if (main_state == JULIA_MAIN_STATE_S7_FAULT &&
+        s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED) {
+        /* S7.1 使用独立立绘和字幕，不能落入 S7.2 的严重故障呈现。 */
+        return FSM_PRESENT_S7_1_DISCONNECTED;
+    }
     if (main_state == JULIA_MAIN_STATE_S2_DIALOG) {
         switch (s2_sub_state) {
         case JULIA_S2_SUB_STATE_S2_1_LISTENING: return FSM_PRESENT_S2_1_LISTENING;
@@ -95,7 +115,7 @@ static fsm_presentation_t presentation_for(julia_main_state_t main_state,
     if (main_state == JULIA_MAIN_STATE_S3_STANDBY) return FSM_PRESENT_S3_STANDBY;
     if (main_state == JULIA_MAIN_STATE_S5_SILENT) return FSM_PRESENT_S5_SILENT;
     if (main_state == JULIA_MAIN_STATE_S6_SLEEP) return FSM_PRESENT_S6_SLEEP;
-    /* 调试阶段 S0/S7/S8 共用 Companion 基础 UI，由状态叠字区分。 */
+    /* 调试阶段 S0/S7.2/S8 共用 Companion 基础 UI，由状态叠字区分。 */
     return FSM_PRESENT_DEFAULT;
 }
 
@@ -106,6 +126,7 @@ static const char *presentation_name(fsm_presentation_t presentation)
     case FSM_PRESENT_S3_STANDBY: return "S3_STANDBY";
     case FSM_PRESENT_S5_SILENT: return "S5_SILENT";
     case FSM_PRESENT_S6_SLEEP: return "S6_SLEEP";
+    case FSM_PRESENT_S7_1_DISCONNECTED: return "S7.1_DISCONNECTED";
     case FSM_PRESENT_S2_1_LISTENING: return "S2.1_LISTENING";
     case FSM_PRESENT_S2_2_THINKING: return "S2.2_THINKING";
     case FSM_PRESENT_S2_3_SPEAKING: return "S2.3_SPEAKING";
@@ -115,8 +136,17 @@ static const char *presentation_name(fsm_presentation_t presentation)
 }
 
 static const char *state_status_text(julia_main_state_t main_state,
-                                     julia_s2_sub_state_t s2_sub_state)
+                                     julia_s2_sub_state_t s2_sub_state,
+                                     julia_s7_sub_state_t s7_sub_state)
 {
+    if (main_state == JULIA_MAIN_STATE_S7_FAULT &&
+        s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED) {
+        return "S7.1 DISCONNECTED";
+    }
+    if (main_state == JULIA_MAIN_STATE_S7_FAULT &&
+        s7_sub_state == JULIA_S7_SUB_STATE_S7_2_FAULT) {
+        return "S7.2 FAULT";
+    }
     if (main_state == JULIA_MAIN_STATE_S2_DIALOG) {
         switch (s2_sub_state) {
         case JULIA_S2_SUB_STATE_S2_1_LISTENING: return "S2.1 LISTEN";
@@ -134,7 +164,7 @@ static const char *state_status_text(julia_main_state_t main_state,
     case JULIA_MAIN_STATE_S4_INTERACTION: return "S4 INTERACTION";
     case JULIA_MAIN_STATE_S5_SILENT: return "S5 SILENT";
     case JULIA_MAIN_STATE_S6_SLEEP: return "S6 SLEEP";
-    case JULIA_MAIN_STATE_S7_FAULT: return "S7 FAULT";
+    case JULIA_MAIN_STATE_S7_FAULT: return "S7 UNKNOWN";
     case JULIA_MAIN_STATE_S8_OTA: return "S8 OTA";
     case JULIA_MAIN_STATE_S2_DIALOG: return "S2 DIALOG";
     case JULIA_MAIN_STATE_COUNT:
@@ -143,9 +173,11 @@ static const char *state_status_text(julia_main_state_t main_state,
 }
 
 static void apply_presentation(julia_main_state_t main_state,
-                               julia_s2_sub_state_t s2_sub_state)
+                               julia_s2_sub_state_t s2_sub_state,
+                               julia_s7_sub_state_t s7_sub_state)
 {
-    fsm_presentation_t presentation = presentation_for(main_state, s2_sub_state);
+    fsm_presentation_t presentation = presentation_for(main_state, s2_sub_state,
+                                                        s7_sub_state);
     if (presentation != FSM_PRESENT_S6_SLEEP) {
         esp_err_t display_err = lvgl_port_set_display_off(false);
         if (display_err != ESP_OK) {
@@ -184,6 +216,14 @@ static void apply_presentation(julia_main_state_t main_state,
             }
         }
         break;
+    case FSM_PRESENT_S7_1_DISCONNECTED:
+        /* 保持屏幕可见三秒：显示指定的闭眼断联图和状态字幕，不播放嘴型、不呼吸。
+         * 进入 S3 后再切换为普通待机图并开始背光呼吸。 */
+        julia_backlight_breathe_stop();
+        julia_backlight_set(CONFIG_JULIA_COMPANION_BRIGHTNESS_PERCENT);
+        julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_IDLE);
+        julia_avatar_show_disconnected();
+        break;
     case FSM_PRESENT_S5_SILENT:
         /* S5 继续复用 Companion 基础立绘，但用固定低亮度明确区分静默状态。 */
         julia_backlight_breathe_stop();
@@ -221,9 +261,10 @@ static void apply_presentation(julia_main_state_t main_state,
         break;
     }
 
-    ESP_LOGI(TAG, "state=%s/%s presentation=%s",
+    ESP_LOGI(TAG, "state=%s/%s/%s presentation=%s",
              julia_fsm_main_state_name(main_state),
              julia_fsm_s2_sub_state_name(s2_sub_state),
+             julia_fsm_s7_sub_state_name(s7_sub_state),
              presentation_name(presentation));
 }
 
@@ -234,15 +275,19 @@ static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
     portENTER_CRITICAL(&s_state_lock);
     s_committed_main_state = main_state;
     s_committed_s2_sub_state = s2_sub_state;
+    s_committed_s7_sub_state = fsm->s7_sub_state;
     portEXIT_CRITICAL(&s_state_lock);
     /* 先让新状态正式生效，再通知语音服务回报服务器，避免服务器过早发送回答。 */
     if (s_state_observer != NULL) {
         s_state_observer(main_state, s2_sub_state, event, s_state_observer_ctx);
     }
-    ESP_LOGI(TAG, "enter %s/%s by %s", julia_fsm_main_state_name(main_state),
-             julia_fsm_s2_sub_state_name(s2_sub_state), julia_fsm_event_name(event));
-    julia_avatar_set_status_text(state_status_text(main_state, s2_sub_state));
-    apply_presentation(main_state, s2_sub_state);
+    ESP_LOGI(TAG, "enter %s/%s/%s by %s", julia_fsm_main_state_name(main_state),
+             julia_fsm_s2_sub_state_name(s2_sub_state),
+             julia_fsm_s7_sub_state_name(fsm->s7_sub_state),
+             julia_fsm_event_name(event));
+    julia_avatar_set_status_text(
+        state_status_text(main_state, s2_sub_state, fsm->s7_sub_state));
+    apply_presentation(main_state, s2_sub_state, fsm->s7_sub_state);
     if (main_state == JULIA_MAIN_STATE_S3_STANDBY && s_standby_timer != NULL) {
         esp_err_t err = esp_timer_start_once(
             s_standby_timer,
@@ -259,6 +304,19 @@ static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
             ESP_LOGW(TAG, "S5 驻留计时启动失败：%s", esp_err_to_name(err));
         }
     }
+    if (main_state == JULIA_MAIN_STATE_S7_FAULT &&
+        fsm->s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED) {
+        /* 计时器创建或启动失败时立即回待机，宁可缩短提示，也不能永远卡在 S7.1。 */
+        esp_err_t err = s_disconnect_timer != NULL
+                            ? esp_timer_start_once(s_disconnect_timer,
+                                                   DISCONNECT_NOTICE_US)
+                            : ESP_ERR_INVALID_STATE;
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "断联提示计时启动失败，立即返回待机：%s",
+                     esp_err_to_name(err));
+            (void)julia_fsm_runtime_post(EVT_DISCONNECT_NOTICE_TIMEOUT);
+        }
+    }
 }
 
 static void runtime_on_exit(julia_fsm_t *fsm, julia_main_state_t main_state,
@@ -273,6 +331,11 @@ static void runtime_on_exit(julia_fsm_t *fsm, julia_main_state_t main_state,
     if (main_state == JULIA_MAIN_STATE_S5_SILENT && s_silent_timer != NULL) {
         (void)esp_timer_stop(s_silent_timer);
     }
+    if (main_state == JULIA_MAIN_STATE_S7_FAULT &&
+        fsm->s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED &&
+        s_disconnect_timer != NULL) {
+        (void)esp_timer_stop(s_disconnect_timer);
+    }
 }
 
 static void fsm_task(void *argument)
@@ -285,22 +348,24 @@ static void fsm_task(void *argument)
             julia_s2_sub_state_t previous_sub = s_fsm.s2_sub_state;
             esp_err_t record_err = julia_fault_record(message.fault_reason, message.error,
                                                       previous_main, previous_sub);
-            ESP_LOGE(TAG, "严重故障：reason=%s err=%s，进入 S7",
+            ESP_LOGE(TAG, "严重故障：reason=%s err=%s，进入 S7.2",
                      julia_fault_reason_name(message.fault_reason),
                      esp_err_to_name(message.error));
-            if (s_fsm.main_state != JULIA_MAIN_STATE_S7_FAULT) {
+            if (s_fsm.main_state != JULIA_MAIN_STATE_S7_FAULT ||
+                s_fsm.s7_sub_state != JULIA_S7_SUB_STATE_S7_2_FAULT) {
                 (void)julia_fsm_transition_to(&s_fsm, JULIA_MAIN_STATE_S7_FAULT,
                                               JULIA_S2_SUB_STATE_NONE, EVT_NONE);
             }
             if (record_err == ESP_OK && !julia_fault_reset_allowed()) {
-                ESP_LOGE(TAG, "同类故障连续超过自动复位上限，保持 S7 等待售后处理");
+                ESP_LOGE(TAG, "同类故障连续超过自动复位上限，保持 S7.2 等待售后处理");
                 continue;
             }
             vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_FAULT_RESET_DELAY_MS));
             esp_restart();
             continue;
         }
-        if (!julia_fsm_state_is_valid(s_fsm.main_state, s_fsm.s2_sub_state)) {
+        if (!julia_fsm_state_is_valid_full(s_fsm.main_state, s_fsm.s2_sub_state,
+                                           s_fsm.s7_sub_state)) {
             (void)julia_fault_record(JULIA_FAULT_FSM_STATE_CORRUPT,
                                      ESP_ERR_INVALID_STATE,
                                      s_committed_main_state,
@@ -357,9 +422,20 @@ esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready)
             ESP_LOGW(TAG, "S5 驻留计时器创建失败：%s", esp_err_to_name(timer_err));
         }
     }
+    if (s_disconnect_timer == NULL) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = disconnect_timer_callback,
+            .name = "s7_1_standby",
+        };
+        esp_err_t timer_err = esp_timer_create(&timer_args, &s_disconnect_timer);
+        if (timer_err != ESP_OK) {
+            ESP_LOGW(TAG, "断联提示计时器创建失败：%s", esp_err_to_name(timer_err));
+        }
+    }
     portENTER_CRITICAL(&s_state_lock);
     s_committed_main_state = s_fsm.main_state;
     s_committed_s2_sub_state = s_fsm.s2_sub_state;
+    s_committed_s7_sub_state = s_fsm.s7_sub_state;
     portEXIT_CRITICAL(&s_state_lock);
     if (boot_dependencies_ready) {
         /* 初始化完成后进入待唤醒的 S3；S1 只保留会话后的免唤醒陪伴语义。 */
@@ -370,7 +446,8 @@ esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready)
             return ESP_ERR_INVALID_STATE;
         }
     } else {
-        apply_presentation(s_fsm.main_state, s_fsm.s2_sub_state);
+        apply_presentation(s_fsm.main_state, s_fsm.s2_sub_state,
+                           s_fsm.s7_sub_state);
     }
 
     if (xTaskCreate(fsm_task, "julia_fsm", FSM_TASK_STACK_SIZE, NULL,
@@ -383,15 +460,20 @@ esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready)
             (void)esp_timer_delete(s_silent_timer);
             s_silent_timer = NULL;
         }
+        if (s_disconnect_timer != NULL) {
+            (void)esp_timer_delete(s_disconnect_timer);
+            s_disconnect_timer = NULL;
+        }
         vQueueDelete(s_event_queue);
         s_event_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "ready initial=%s/%s queue=%u s1_bl=%d%% "
+    ESP_LOGI(TAG, "ready initial=%s/%s/%s queue=%u s1_bl=%d%% "
                   "s3_breathe=%d-%d%% s3_sleep=%ds s5_standby=%ds "
                   "s6_bl=0%% fault_reset=%dms quick_fault=%ds/%d",
              julia_fsm_main_state_name(s_fsm.main_state),
              julia_fsm_s2_sub_state_name(s_fsm.s2_sub_state),
+             julia_fsm_s7_sub_state_name(s_fsm.s7_sub_state),
              (unsigned)FSM_EVENT_QUEUE_DEPTH,
              CONFIG_JULIA_COMPANION_BRIGHTNESS_PERCENT,
              CONFIG_JULIA_DISPLAY_BREATHE_MIN_PERCENT,
@@ -452,6 +534,15 @@ julia_s2_sub_state_t julia_fsm_runtime_get_s2_sub_state(void)
     julia_s2_sub_state_t state;
     portENTER_CRITICAL(&s_state_lock);
     state = s_committed_s2_sub_state;
+    portEXIT_CRITICAL(&s_state_lock);
+    return state;
+}
+
+julia_s7_sub_state_t julia_fsm_runtime_get_s7_sub_state(void)
+{
+    julia_s7_sub_state_t state;
+    portENTER_CRITICAL(&s_state_lock);
+    state = s_committed_s7_sub_state;
     portEXIT_CRITICAL(&s_state_lock);
     return state;
 }

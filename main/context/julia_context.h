@@ -1,6 +1,9 @@
 /**
  * @file    julia_context.h
- * @brief   设备行为中枢的"情境感知"服务：启动 500ms 传感器/时间/情境任务。
+ * @brief   未参与当前构建的旧情境聚合接口。
+ *
+ * 当前运行时使用 julia_time/night_schedule/motion + julia_fsm_runtime；调用本接口会
+ * 引入第二套 RTC/IMU 与事件策略，现有应用不得使用。
  *
  * 职责边界：
  *   - 本模块负责把原始传感器（QMI8658 IMU）、时间（RTC + SNTP）、音频活动、

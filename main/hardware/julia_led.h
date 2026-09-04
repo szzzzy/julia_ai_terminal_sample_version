@@ -1,15 +1,10 @@
 /**
  * @file    julia_led.h
- * @brief   WS2812 可寻址 LED 的低层驱动接口（亮度/颜色/呼吸曲线）。
+ * @brief   通过 RMT 驱动单颗 WS2812，并异步应用颜色／亮度请求。
  *
- * 说明：本头是“原语层”接口，实现见 julia_led.c；上层状态机（breathing_led.c）
- * 通过本接口把“某一时刻该亮多少/什么颜色”交给底层点亮。LED 数据脚在 GPIO21
- * （可用 JULIA_LED_GPIO 覆盖），通过 RMT 外设发送时序。
- *
- * 使用约定：
- * - 先调用 julia_led_init() 一次（在工作任务上下文），之后才能调用 set_*。
- * - set_* 只是“请求”配置，真正输出由内部 led_task 按 80ms 周期完成。
- * - julia_led_set_emotion()/hsv_to_rgb() 为配色与情感映射工具，与输出无关。
+ * 所有 set_* 只更新共享配置，唯一 led_task 最迟在下一刷新周期发送。必须先成功调用
+ * julia_led_init()，且不得重复初始化。头文件 fallback GPIO21 与本板 LCD CS 冲突；
+ * 主工程已通过编译定义改为 GPIO4，任何复用该头的其它 target 也必须显式提供已确认引脚。
  */
 #pragma once
 
@@ -20,7 +15,6 @@
 #define JULIA_LED_GPIO 21
 #endif
 
-/** 情感枚举：与 julia_led_set_emotion() 的颜色表一一对应。 */
 typedef enum {
     JULIA_EMOTION_HAPPY = 0,
     JULIA_EMOTION_SAD,
@@ -31,16 +25,16 @@ typedef enum {
 } emotion_t;
 
 /**
- * @brief 初始化 LED（RMT 通道 + 编码器 + 后台刷新任务），只调用一次。
- * @return ESP_OK 成功；其他 esp_err_t 初始化失败。
+ * @brief 创建 RMT channel、编码器、PM lock、mutex 和唯一刷新任务。
+ * @note  非幂等；失败可能已分配部分资源，当前实现没有反初始化接口。
  */
 esp_err_t julia_led_init(void);
 
 /**
- * @brief 请求呼吸灯效果。
+ * @brief 请求呼吸灯效果，亮度范围会钳位并按需交换。
  * @param[in] brightness_min 亮度下限（0~100）。
  * @param[in] brightness_max 亮度上限（0~100）。
- * @param[in] period_ms      呼吸周期（ms）。
+ * @param[in] period_ms      呼吸周期（ms）；0 不会退化为常亮，应改用 set_solid。
  * @param[in] color          颜色 0xRRGGBB。
  */
 void julia_led_set_breathing(uint8_t brightness_min, uint8_t brightness_max,
@@ -51,15 +45,15 @@ void julia_led_set_breathing(uint8_t brightness_min, uint8_t brightness_max,
  * @param[in] color      颜色 0xRRGGBB。
  */
 void julia_led_set_solid(uint8_t brightness, uint32_t color);
-/** 关闭 LED。 */
+/** 请求在下一刷新周期关闭 LED。 */
 void julia_led_set_off(void);
 /**
- * @brief 按情感枚举设置常亮配色。
+ * @brief 按固定颜色表请求 70% 常亮；这会直接替换当前 LED 模式。
  * @param[in] emotion 情感枚举，超界忽略。
  */
 void julia_led_set_emotion(emotion_t emotion);
 /**
- * @brief HSV → RGB。
+ * @brief 纯计算 HSV → RGB，不访问 LED 资源，可在初始化前调用。
  * @param[in] hue        色相 0~360。
  * @param[in] saturation 饱和度 0~100。
  * @param[in] value      明度 0~100。

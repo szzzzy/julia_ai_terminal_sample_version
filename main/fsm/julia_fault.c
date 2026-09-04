@@ -2,7 +2,7 @@
  * @file julia_fault.c
  * @brief 严重故障快照的 NVS 实现。
  *
- * 每次进入 S7 只覆盖写一条定长记录，避免把运行日志持续写入 Flash。
+ * 每次进入 S7.2 只覆盖写一条定长记录，避免把运行日志持续写入 Flash。
  * NVS 本身不可用时函数只返回错误，调用方仍可继续故障呈现和复位。
  */
 #include "julia_fault.h"

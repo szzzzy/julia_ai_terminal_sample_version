@@ -272,10 +272,10 @@ void app_main(void)
         }
         err = julia_fsm_runtime_raise_fault(reason, fault_error);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Cannot enqueue S7 fault: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "Cannot enqueue S7.2 fault: %s", esp_err_to_name(err));
         }
     } else if (!fsm_ready) {
-        /* FSM 无法创建时没有运行队列可进入 S7；仍记录同一格式快照后直接复位。 */
+        /* FSM 无法创建时没有运行队列可进入 S7.2；仍记录同一格式快照后直接复位。 */
         (void)julia_fault_record(JULIA_FAULT_FSM_RUNTIME_INIT, fsm_error,
                                  JULIA_MAIN_STATE_S0_BOOT,
                                  JULIA_S2_SUB_STATE_NONE);
@@ -283,7 +283,7 @@ void app_main(void)
         julia_avatar_set_dozing(true);
         julia_backlight_set(40);
         if (!julia_fault_reset_allowed()) {
-            ESP_LOGE(TAG, "FSM 初始化连续失败，保持 S7 等待售后处理");
+            ESP_LOGE(TAG, "FSM 初始化连续失败，保持 S7.2 等待售后处理");
             while (1) vTaskDelay(pdMS_TO_TICKS(1000));
         }
         vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_FAULT_RESET_DELAY_MS));

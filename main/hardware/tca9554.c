@@ -18,12 +18,11 @@
 
 static const char *TAG = "tca9554";
 
-/* TCA9554 寄存器映射（写地址 0x20 / 读地址 0x21，寄存器本身用寄存器指针表示）。
- * 位定义：每个寄存器 8 位对应 P0..P7。 */
-#define TCA9554_REG_INPUT     0x00 /* 输入端口：读卡引脚电平（0/1 即低/高）。 */
-#define TCA9554_REG_OUTPUT    0x01 /* 输出端口：写输出锁存（默认读回上次写值）。 */
-#define TCA9554_REG_POLARITY  0x02 /* 极性反转：1 翻转对应引脚输入极性（本工程未用，保持默认 0）。 */
-#define TCA9554_REG_CONFIG    0x03 /* 配置：1=输入，0=输出（上电默认全部为输入）。 */
+/* 0x20 是 7-bit slave address，R/W 位由 I2C driver 生成；以下为 datasheet register map。 */
+#define TCA9554_REG_INPUT     0x00
+#define TCA9554_REG_OUTPUT    0x01
+#define TCA9554_REG_POLARITY  0x02
+#define TCA9554_REG_CONFIG    0x03
 
 /* 本板使用的 I2C 主控制器引脚（I2C_NUM_0）。 */
 #define TCA9554_I2C_SCL GPIO_NUM_10
@@ -49,8 +48,8 @@ static esp_err_t write_reg(uint8_t reg, uint8_t val)
 /**
  * @brief 建立板载共享 I2C 并接入扩展器；重复调用直接复用现有连接。
  *
- * RTC 等板载设备随后复用这条总线。初始化失败不会留下“看似可用”的扩展器；
- * 调用方可根据错误决定让显示或存储降级。本函数会创建同步对象，只能在任务中调用。
+ * RTC/IMU 随后借用这条 bus。当前没有反初始化路径；添加 device 失败后 bus handle
+ * 可能已经创建，调用方应把本次启动视为失败，不要并行安装另一套 driver。
  *
  * @return ESP_OK 已就绪；其他 esp_err_t 总线或设备初始化失败。
  */
@@ -77,6 +76,7 @@ esp_err_t tca9554_init(void)
     ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev), TAG,
                         "add device failed");
 
+    /* 当前实现未检查 mutex 分配结果；低内存下成功返回不等于并发保护可用。 */
     s_lock = xSemaphoreCreateMutex();
     ESP_LOGI(TAG, "ready at 0x%02x (scl=%d, sda=%d)", TCA9554_ADDR, TCA9554_I2C_SCL,
              TCA9554_I2C_SDA);

@@ -1,6 +1,6 @@
 # 工程边界与已知限制
 
-文档版本：V1.0。以下结论以当前工作区源代码、构建清单和生效配置为依据。它们描述代码可确认的边界及需要验证的风险，不代表全部问题均已在设备上复现。返回 [项目入口](../README.md)。
+文档版本：V1.1。实现核对日期：2026-09-04。以下结论以当前工作区源代码、构建清单和生效配置为依据。它们描述代码可确认的边界及需要验证的风险，不代表全部问题均已在设备上复现。返回 [项目入口](../README.md)。
 
 ## 1. 运行链路限制
 
@@ -14,8 +14,10 @@
 | VOICE-06 | 命令确认 | MQTT 仅支持 MIC_START、MIC_STOP、FILE_SEND，没有 vstatus 应用回执 | 服务器不能把 PUBACK 当作执行成功；定义实际回执再对接 |
 | FILE-01 | 文件与语音 | 文件按块推进、读取失败关闭会话；语音启动可发 file_cancelled 结束文件区间 | 服务端需处理取消并丢弃部分文件；SD 底层 I/O 时延仍需测试 |
 | FILE-02 | SD 生命周期 | `sd_card_start()` 只尝试挂载，没有后台重试／拔卡检测；文件服务的 SD 锁是弱默认实现 | 验证无卡、失败挂载和读取中断；建立共享访问和卡状态管理 |
+| HW-01 | 共享 I2C／IMU | TCA9554 初始化未检查 mutex 分配；QMI8658 为每轴 ±64dps，而默认 120dps 向量门限高于三轴满量程约 111dps | 补齐低内存失败清理；重新选择陀螺仪量程或门限并上板标定 |
+| DISPLAY-01 | 显示驱动契约 | `julia_display_set_backlight()` 只有声明；ST77916 `swap_xy` 的 QSPI 路径绕过命令封装并忽略错误；panel 关屏错误会被日志化后吞掉 | 新代码使用 `julia_backlight`；修复 QSPI 命令与错误传播后再开放对应 API |
 
-源码定位：[voice_service.c](../main/voice/voice_service.c)、[wss_transport.c](../main/voice/wss_transport.c)、[board_audio.c](../components/julia_board_audio/board_audio.c)、[sd_card.c](../main/storage/sd_card.c)。
+源码定位：[voice_service.c](../main/voice/voice_service.c)、[wss_transport.c](../main/voice/wss_transport.c)、[board_audio.c](../components/julia_board_audio/board_audio.c)、[sd_card.c](../main/storage/sd_card.c)、[tca9554.c](../main/hardware/tca9554.c)、[qmi8658_shared.c](../main/hardware/qmi8658_shared.c)、[esp_lcd_st77916.c](../main/display/esp_lcd_st77916.c)。
 
 ## 2. OTA 与发布
 

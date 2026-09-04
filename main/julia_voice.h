@@ -1,6 +1,9 @@
 /**
  * @file    julia_voice.h
- * @brief   语音顶层协调器（本地 AFE/WakeNet 语音管线）的对 <外> 接口。
+ * @brief   未参与当前构建的旧本地 ASR/LLM/TTS 语音栈接口。
+ *
+ * 当前运行路径是 board_audio + voice_service + wss_transport；这些声明不代表现有
+ * 固件提供 Qwen、本地会话 FSM 或流式 TTS。
  *
  * 职责（本组件负责什么）：
  * - 持有且只持有一个 julia_fsm_t 实例（s_fsm），并把 FSM 的 on_enter 回调

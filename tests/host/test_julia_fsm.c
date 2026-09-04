@@ -28,6 +28,7 @@ int main(void)
     assert(JULIA_MAIN_STATE_COUNT == 9);
     assert(fsm.main_state == JULIA_MAIN_STATE_S0_BOOT);
     assert(fsm.s2_sub_state == JULIA_S2_SUB_STATE_NONE);
+    assert(fsm.s7_sub_state == JULIA_S7_SUB_STATE_NONE);
 
     assert(julia_fsm_state_is_valid(JULIA_MAIN_STATE_S2_DIALOG,
                                     JULIA_S2_SUB_STATE_S2_1_LISTENING));
@@ -39,6 +40,18 @@ int main(void)
                                      JULIA_S2_SUB_STATE_S2_1_LISTENING));
     assert(julia_fsm_state_is_valid(JULIA_MAIN_STATE_S4_INTERACTION,
                                     JULIA_S2_SUB_STATE_NONE));
+    assert(julia_fsm_state_is_valid_full(
+        JULIA_MAIN_STATE_S7_FAULT, JULIA_S2_SUB_STATE_NONE,
+        JULIA_S7_SUB_STATE_S7_1_DISCONNECTED));
+    assert(julia_fsm_state_is_valid_full(
+        JULIA_MAIN_STATE_S7_FAULT, JULIA_S2_SUB_STATE_NONE,
+        JULIA_S7_SUB_STATE_S7_2_FAULT));
+    assert(!julia_fsm_state_is_valid_full(
+        JULIA_MAIN_STATE_S7_FAULT, JULIA_S2_SUB_STATE_NONE,
+        JULIA_S7_SUB_STATE_NONE));
+    assert(!julia_fsm_state_is_valid_full(
+        JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE,
+        JULIA_S7_SUB_STATE_S7_1_DISCONNECTED));
     assert(strcmp(julia_fsm_s2_sub_state_name(JULIA_S2_SUB_STATE_S2_1_LISTENING),
                   "S2.1_LISTENING") == 0);
     assert(strcmp(julia_fsm_event_name(EVT_MQTT_DISCONNECTED),
@@ -99,6 +112,20 @@ int main(void)
                                     JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE));
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S6_SLEEP, JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S4_INTERACTION, JULIA_S2_SUB_STATE_NONE));
+    assert(julia_fsm_can_transition_full(
+        JULIA_MAIN_STATE_S1_COMPANION, JULIA_S2_SUB_STATE_NONE,
+        JULIA_S7_SUB_STATE_NONE, JULIA_MAIN_STATE_S7_FAULT,
+        JULIA_S2_SUB_STATE_NONE, JULIA_S7_SUB_STATE_S7_1_DISCONNECTED));
+    assert(julia_fsm_can_transition_full(
+        JULIA_MAIN_STATE_S7_FAULT, JULIA_S2_SUB_STATE_NONE,
+        JULIA_S7_SUB_STATE_S7_1_DISCONNECTED,
+        JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE,
+        JULIA_S7_SUB_STATE_NONE));
+    assert(julia_fsm_can_transition_full(
+        JULIA_MAIN_STATE_S7_FAULT, JULIA_S2_SUB_STATE_NONE,
+        JULIA_S7_SUB_STATE_S7_1_DISCONNECTED,
+        JULIA_MAIN_STATE_S7_FAULT, JULIA_S2_SUB_STATE_NONE,
+        JULIA_S7_SUB_STATE_S7_2_FAULT));
 
     /* S2 内部唯一允许的循环是 S2.1 -> S2.2 -> S2.3 -> S2.1。 */
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S2_DIALOG,
@@ -138,7 +165,7 @@ int main(void)
                                     JULIA_MAIN_STATE_S6_SLEEP,
                                     JULIA_S2_SUB_STATE_NONE));
 
-    /* 所有其他状态都能进入故障态；S7 只能返回 S0。 */
+    /* 所有其他状态都能进入 S7.2；S7.2 只能通过复位返回 S0。 */
     for (julia_main_state_t state = JULIA_MAIN_STATE_S0_BOOT;
          state < JULIA_MAIN_STATE_COUNT; ++state) {
         if (state == JULIA_MAIN_STATE_S2_DIALOG || state == JULIA_MAIN_STATE_S7_FAULT)
@@ -248,7 +275,7 @@ int main(void)
                                   EVT_INTENT_DISMISS, NULL));
     assert(speaking_dismiss_fsm.main_state == JULIA_MAIN_STATE_S5_SILENT);
 
-    /* MQTT 断联使所有网络交互态统一回到 S3，并清除 S2 子状态。 */
+    /* MQTT 断联先进入 S7.1，提示结束后回到 S3，并清除 S2 子状态。 */
     const julia_s2_sub_state_t disconnected_s2_states[] = {
         JULIA_S2_SUB_STATE_S2_1_LISTENING,
         JULIA_S2_SUB_STATE_S2_2_THINKING,
@@ -270,14 +297,22 @@ int main(void)
         assert(disconnected_fsm.s2_sub_state == disconnected_s2_states[i]);
         assert(julia_fsm_handle_event(&disconnected_fsm,
                                       EVT_MQTT_DISCONNECTED, NULL));
-        assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
+        assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S7_FAULT);
         assert(disconnected_fsm.s2_sub_state == JULIA_S2_SUB_STATE_NONE);
+        assert(disconnected_fsm.s7_sub_state ==
+               JULIA_S7_SUB_STATE_S7_1_DISCONNECTED);
+        assert(julia_fsm_handle_event(&disconnected_fsm,
+                                      EVT_DISCONNECT_NOTICE_TIMEOUT, NULL));
+        assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
     }
 
     julia_fsm_t disconnected_fsm;
     enter_companion(&disconnected_fsm);
     assert(julia_fsm_handle_event(&disconnected_fsm,
                                   EVT_MQTT_DISCONNECTED, NULL));
+    assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S7_FAULT);
+    assert(julia_fsm_handle_event(&disconnected_fsm,
+                                  EVT_DISCONNECT_NOTICE_TIMEOUT, NULL));
     assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
 
     julia_fsm_t disconnected_s4_fsm;
@@ -285,12 +320,16 @@ int main(void)
     assert(julia_fsm_handle_event(&disconnected_s4_fsm, EVT_WAKEUP, NULL));
     assert(julia_fsm_handle_event(&disconnected_s4_fsm,
                                   EVT_MQTT_DISCONNECTED, NULL));
+    assert(disconnected_s4_fsm.main_state == JULIA_MAIN_STATE_S7_FAULT);
+    assert(julia_fsm_handle_event(&disconnected_s4_fsm,
+                                  EVT_DISCONNECT_NOTICE_TIMEOUT, NULL));
     assert(disconnected_s4_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
 
-    /* 纯 FSM 测试只验证 S7 迁移边；记录与复位由运行时故障通道负责。 */
+    /* 纯 FSM 测试只验证 S7.2 迁移边；记录与复位由运行时故障通道负责。 */
     assert(julia_fsm_transition_to(&fsm, JULIA_MAIN_STATE_S7_FAULT,
                                    JULIA_S2_SUB_STATE_NONE, EVT_NONE));
     assert(fsm.main_state == JULIA_MAIN_STATE_S7_FAULT);
+    assert(fsm.s7_sub_state == JULIA_S7_SUB_STATE_S7_2_FAULT);
     assert(julia_fsm_transition_to(&fsm, JULIA_MAIN_STATE_S0_BOOT,
                                    JULIA_S2_SUB_STATE_NONE, EVT_NONE));
 

@@ -2,6 +2,8 @@
 
 /*
  * QMI8658 六轴 IMU 驱动头（实现见 QMI8658.c，经外部 I2C_Driver 组件访问）。
+ * 当前构建不使用本接口，而使用 hardware/qmi8658_shared.h；本头部分声明没有实现，
+ * 不能作为现有驱动契约。
  * 约定：
  * - 地址：默认 0x6B（QMI8658_L_SLAVE_ADDRESS）；0x6A 为 SA0 拉高。
  * - 全局 Accel（单位 g）/Gyro（单位 dps）由 getAccelerometer()/getGyroscope() 写入，

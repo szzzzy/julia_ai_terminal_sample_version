@@ -1,6 +1,8 @@
 /**
  * @file    avatar_micro_action.h
- * @brief   三层微动作系统对“业务代码”暴露的稳定接口（仅两个面向主循环的函数）。
+ * @brief   未参与当前构建的三层微动作参考接口。
+ *
+ * 当前 julia_avatar 路径没有调用这些函数；下述周期与线程模型不适用于现有运行时。
  *
  * 设计意图：业务层只 include 本文件即可驱动微动作，不必关心 avatar_micro_motion 的图层绑定、
  * 状态通知与转场接口。真正的实现与“Layer 1/2/3”分层描述见 avatar_micro_action.c 与

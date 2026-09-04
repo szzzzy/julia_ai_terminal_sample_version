@@ -52,8 +52,9 @@ WSS 使用 `server_certs/ca_cert.pem` 验证证书链；当前传输实现设置
 - `SPKE`：标记音频输入结束，排空已接收的 PCM 和 DMA 尾音后回到待机；默认服务器唤醒模式继续上传。
 - 本地唤醒模式在播放完成后启动陪伴上传计时，达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 600 秒）无后续对话时停止上传。
 - `MIC_STOP`、闭眼表情、夜间状态均不是隐私静音命令。
-- WSS transport 会话结束时关闭上传、停止播放、丢弃旧 generation PCM 并清除监听／忙碌状态；S1/S2/S4 通过 `EVT_WSS_DISCONNECTED` 进入 S3。新连接从空 ring 按所选唤醒模式启动，不恢复旧业务轮次。
-- MQTT 会话断开时，S1/S2/S4 通过 `EVT_MQTT_DISCONNECTED` 进入 S3；Wi-Fi 仅负责承载与重连，不再直接驱动行为状态。
+- WSS transport 会话结束时关闭上传、停止播放、丢弃旧 generation PCM 并清除监听／忙碌状态；S1/S2/S4 通过 `EVT_WSS_DISCONNECTED` 进入 S7.1。新连接从空 ring 按所选唤醒模式启动，不恢复旧业务轮次。
+- MQTT 会话断开时，S1/S2/S4 通过 `EVT_MQTT_DISCONNECTED` 进入 S7.1；Wi-Fi 仅负责承载与重连，不再直接驱动行为状态。
+- S7.1 显示 `S7.1 DISCONNECTED` 字幕和断联立绘三秒，不记录严重故障也不复位；随后由 `EVT_DISCONNECT_NOTICE_TIMEOUT` 进入 S3，业务连接继续各自后台重连。
 
 ### 3.2 PCM1 格式
 
@@ -192,7 +193,7 @@ FILE_SEND SD:/sample.wav
 
 MQTT 连接并收到 critical 主题的 SUBACK 后执行检查；默认周期为 21600 秒，附加 0–1800 秒抖动。默认响应等待 15 秒，后续重试与恢复由配置控制。
 
-行为 FSM 在 OTA 任务被接受时进入 S8。Wi‑Fi、TLS、HTTP 等临时链路失败保留 S8 和断点；镜像处理、NVS 检查点、目标分区、启动分区设置或任务创建失败回到 S3 并继续运行当前固件、等待唤醒；提交成功进入 S0 后由现有流程复位。只有已经无法回滚到可用固件时才进入 S7。启动早期连当前固件、NVS 或 Flash 健康都无法确认的情况仍由 OTA 安全模式记录为 S7。
+行为 FSM 在 OTA 任务被接受时进入 S8。Wi‑Fi、TLS、HTTP 等临时链路失败保留 S8 和断点；镜像处理、NVS 检查点、目标分区、启动分区设置或任务创建失败回到 S3 并继续运行当前固件、等待唤醒；提交成功进入 S0 后由现有流程复位。只有已经无法回滚到可用固件时才进入 S7.2。启动早期连当前固件、NVS 或 Flash 健康都无法确认的情况仍由 OTA 安全模式记录为 S7.2。
 
 ```json
 {
