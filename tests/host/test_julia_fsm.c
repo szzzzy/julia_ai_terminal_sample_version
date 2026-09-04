@@ -281,7 +281,7 @@ int main(void)
                                   EVT_INTENT_DISMISS, NULL));
     assert(speaking_dismiss_fsm.main_state == JULIA_MAIN_STATE_S5_SILENT);
 
-    /* 瞬时的 S2/S4 断联进入 S7.1，提示结束后落到 S3，并清除旧会话。 */
+    /* 会话绑定的 S1/S2/S4 断联进入 S7.1，提示结束后落到 S3。 */
     const julia_s2_sub_state_t disconnected_s2_states[] = {
         JULIA_S2_SUB_STATE_S2_1_LISTENING,
         JULIA_S2_SUB_STATE_S2_2_THINKING,
@@ -319,7 +319,7 @@ int main(void)
     assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S7_FAULT);
     assert(julia_fsm_handle_event(&disconnected_fsm,
                                   EVT_DISCONNECT_NOTICE_TIMEOUT, NULL));
-    assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S1_COMPANION);
+    assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
 
     julia_fsm_t disconnected_s4_fsm;
     enter_standby(&disconnected_s4_fsm);

@@ -118,8 +118,8 @@ FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发�
 | `EVT_USER_LEAVE` | S1 | S3 |
 | MQTT 会话断开 `EVT_MQTT_DISCONNECTED` | S1～S6 | S7.1，并置 `offline` |
 | WSS 会话结束 `EVT_WSS_DISCONNECTED` | S1～S6 | S7.1，并置 `offline` |
-| 断联提示完成 `EVT_DISCONNECT_NOTICE_TIMEOUT` | 来自 S1/S3/S5/S6 的 S7.1 | 返回来源稳定状态 |
-| 断联提示完成 `EVT_DISCONNECT_NOTICE_TIMEOUT` | 来自 S2/S4 的 S7.1 | S3 |
+| 断联提示完成 `EVT_DISCONNECT_NOTICE_TIMEOUT` | 来自 S3/S5/S6 的 S7.1 | 返回来源稳定状态 |
+| 断联提示完成 `EVT_DISCONNECT_NOTICE_TIMEOUT` | 来自 S1/S2/S4 的 S7.1 | S3，不恢复旧会话 |
 | MQTT/WSS 重连 | 任意行为状态 | 清除对应离线原因；全部恢复后删除 `offline` |
 | 初始业务连接超时 `EVT_SERVICE_CONNECT_TIMEOUT` | S1～S6 | S7.1，并置 `offline` |
 | 唤醒词 `EVT_WAKEUP` | S3／S5／S6 | S4 |
@@ -135,7 +135,7 @@ FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发�
 
 `intent_result=normal` 只表示没有特殊语义，不改变状态。OTA 任务、NVS 检查点、目标分区、启动分区设置或普通镜像校验失败都不会触发 S7.2，因为活动固件尚未被替换；这类失败由 S8 回到 S3 等待唤醒。Wi-Fi、TLS、HTTP 等临时链路失败保持 S8 和下载断点，等待现有恢复流程。只有已经无法回滚到可用固件时才从 S8 进入 S7.2。
 
-S7.2 只接收关键初始化、FSM 内部损坏和 OTA 无法安全恢复等严重故障，并保存 NVS 快照后按策略复位。S7.1 不写严重故障快照、不触发复位：每个离线周期只在第一次由 `ONLINE` 变为 `OFFLINE` 时播放固件内嵌的 `network_disconnected_16k_mono_16bit.wav`，嘴型按实际送往扬声器的本地 PCM能量同步，并显示 `S7.1 DISCONNECTED` 与 `offline`；保持离线期间的重复断联不再播报。三秒后，S1/S3/S5/S6 返回原稳定状态，S2/S4 放弃旧会话进入 S3；WSS/MQTT 各自继续后台重连。S8 的临时链路失败仍保持 S8 和下载断点，不套用 S7.1。
+S7.2 只接收关键初始化、FSM 内部损坏和 OTA 无法安全恢复等严重故障，并保存 NVS 快照后按策略复位。S7.1 不写严重故障快照、不触发复位：每个离线周期只在第一次由 `ONLINE` 变为 `OFFLINE` 时播放固件内嵌的 `network_disconnected_16k_mono_16bit.wav`，嘴型按实际送往扬声器的本地 PCM能量同步，并显示 `S7.1 DISCONNECTED` 与 `offline`；保持离线期间的重复断联不再播报。三秒后，S3/S5/S6 返回原稳定状态；S1的免唤醒资格与 S2/S4的交互上下文均绑定旧 WSS generation，断联后统一进入 S3。WSS/MQTT 各自继续后台重连。S8 的临时链路失败仍保持 S8 和下载断点，不套用 S7.1。
 
 ## 编译范围与参考源码
 

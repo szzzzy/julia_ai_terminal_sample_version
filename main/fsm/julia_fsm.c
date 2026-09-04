@@ -160,8 +160,6 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
     if (from_main_state == JULIA_MAIN_STATE_S7_FAULT) {
         if (from_s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED) {
             return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
-                             JULIA_MAIN_STATE_S1_COMPANION) ||
-                   target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                              JULIA_MAIN_STATE_S3_STANDBY) ||
                    target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                              JULIA_MAIN_STATE_S5_SILENT) ||
@@ -175,8 +173,8 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
     }
     if (target_is_fault(to_main_state, to_s2_sub_state, to_s7_sub_state)) return true;
     if (target_is_disconnected(to_main_state, to_s2_sub_state, to_s7_sub_state)) {
-        /* S1/S3/S5/S6 提示后恢复原稳定状态；S2/S4 的旧会话不可续传，落到 S3。
-         * S0/S8 使用各自的启动和 OTA 恢复策略，不进入业务断联提示。 */
+        /* S1/S2/S4 都绑定当前 WSS generation；断联后免唤醒资格和旧会话不可恢复，
+         * 因此落到 S3。S3/S5/S6 不依赖旧会话，可在提示后恢复原状态。 */
         return from_main_state == JULIA_MAIN_STATE_S1_COMPANION ||
                from_main_state == JULIA_MAIN_STATE_S2_DIALOG ||
                from_main_state == JULIA_MAIN_STATE_S3_STANDBY ||
@@ -304,7 +302,6 @@ bool julia_fsm_transition_to_full(julia_fsm_t *fsm,
     if (to_main_state == JULIA_MAIN_STATE_S7_FAULT &&
         to_s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED) {
         fsm->s7_return_state =
-            from_main_state == JULIA_MAIN_STATE_S1_COMPANION ||
             from_main_state == JULIA_MAIN_STATE_S3_STANDBY ||
             from_main_state == JULIA_MAIN_STATE_S5_SILENT ||
             from_main_state == JULIA_MAIN_STATE_S6_SLEEP
@@ -370,8 +367,8 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
          fsm->main_state == JULIA_MAIN_STATE_S6_SLEEP) &&
         (event == EVT_MQTT_DISCONNECTED || event == EVT_WSS_DISCONNECTED ||
          event == EVT_SERVICE_CONNECT_TIMEOUT)) {
-        /* 控制消息或语音数据任一连接断开后先进入 S7.1。本次迁移同时记录稳定
-         * 返回点：S1/S3/S5/S6 返回原状态，S2/S4 放弃旧会话并返回 S3。 */
+        /* 控制消息或语音数据任一连接断开后先进入 S7.1。S3/S5/S6 记录原状态；
+         * S1/S2/S4 的返回点固定为 S3，禁止界面恢复已经失效的会话语义。 */
         target_main_state = JULIA_MAIN_STATE_S7_FAULT;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
         target_s7_sub_state = JULIA_S7_SUB_STATE_S7_1_DISCONNECTED;

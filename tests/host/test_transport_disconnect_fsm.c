@@ -34,7 +34,6 @@ static void verify_disconnect_event(fsm_event_t event)
     }
 
     const julia_main_state_t stable_states[] = {
-        JULIA_MAIN_STATE_S1_COMPANION,
         JULIA_MAIN_STATE_S3_STANDBY,
         JULIA_MAIN_STATE_S5_SILENT,
         JULIA_MAIN_STATE_S6_SLEEP,
@@ -54,14 +53,19 @@ static void verify_disconnect_event(fsm_event_t event)
         assert(fsm.main_state == stable_states[i]);
     }
 
-    julia_fsm_t interaction_fsm;
-    set_state(&interaction_fsm, JULIA_MAIN_STATE_S4_INTERACTION,
-              JULIA_S2_SUB_STATE_NONE);
-    assert(julia_fsm_handle_event(&interaction_fsm, event, NULL));
-    assert(interaction_fsm.s7_return_state == JULIA_MAIN_STATE_S3_STANDBY);
-    assert(julia_fsm_handle_event(&interaction_fsm,
-                                  EVT_DISCONNECT_NOTICE_TIMEOUT, NULL));
-    assert(interaction_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
+    const julia_main_state_t session_bound_states[] = {
+        JULIA_MAIN_STATE_S1_COMPANION,
+        JULIA_MAIN_STATE_S4_INTERACTION,
+    };
+    for (size_t i = 0; i < sizeof(session_bound_states) /
+                            sizeof(session_bound_states[0]); ++i) {
+        julia_fsm_t fsm;
+        set_state(&fsm, session_bound_states[i], JULIA_S2_SUB_STATE_NONE);
+        assert(julia_fsm_handle_event(&fsm, event, NULL));
+        assert(fsm.s7_return_state == JULIA_MAIN_STATE_S3_STANDBY);
+        assert(julia_fsm_handle_event(&fsm, EVT_DISCONNECT_NOTICE_TIMEOUT, NULL));
+        assert(fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
+    }
 
     const julia_main_state_t unaffected_states[] = {
         JULIA_MAIN_STATE_S0_BOOT,

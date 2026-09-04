@@ -5,7 +5,7 @@
  * 状态机回答“设备现在应当做什么”：开机、陪伴、对话、待机、静默、睡眠、
  * 故障或升级。采集声音、播放回答、绘制表情和维持网络连接由对应模块执行。
  * 对话状态进一步区分正在听用户说话、等待服务器回答和正在播放回答。S7.1
- * 只承担一次断联提示：稳定状态提示后恢复原状态，S2/S4 放弃旧会话后落到 S3；
+ * 只承担一次断联提示：S3/S5/S6 提示后恢复原状态，S1/S2/S4 放弃旧会话后落到 S3；
  * 持续离线由正交服务状态表达，不复制成每个主状态的子状态。
  *
  * 事件入口只消费当前工程已经实际投递的事件，不为尚未实现的业务预造事件。
@@ -84,7 +84,7 @@ struct julia_fsm {
     julia_main_state_t main_state;
     julia_s2_sub_state_t s2_sub_state;
     julia_s7_sub_state_t s7_sub_state;
-    /** S7.1 提示结束后的稳定落点；瞬时状态断联时固定为 S3。 */
+    /** S7.1 提示结束后的落点；会话绑定状态断联时固定为 S3。 */
     julia_main_state_t s7_return_state;
     julia_fsm_state_cb_t on_enter;
     julia_fsm_state_cb_t on_exit;
@@ -115,7 +115,7 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
                               julia_s2_sub_state_t to_s2_sub_state);
 /**
  * 判断包含 S7 子状态在内的完整状态变化是否符合产品流程。S7.2 只能复位到 S0，
- * S7.1 提示结束后可回到 S1/S3/S5/S6 中记录的稳定落点，或升级为 S7.2。
+ * S7.1 提示结束后可回到 S3/S5/S6 中记录的稳定落点，或升级为 S7.2。
  */
 bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
                                    julia_s2_sub_state_t from_s2_sub_state,

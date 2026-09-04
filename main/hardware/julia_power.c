@@ -11,7 +11,7 @@
 #include "esp_log.h"
 #include "esp_pm.h"
 
-#define JULIA_BAT_CONTROL_GPIO GPIO_NUM_7
+#define JULIA_BAT_CONTROL_GPIO GPIO_NUM_8
 
 static const char *TAG = "JULIA_POWER";
 
