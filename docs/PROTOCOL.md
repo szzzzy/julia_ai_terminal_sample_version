@@ -52,9 +52,9 @@ WSS 使用 `server_certs/ca_cert.pem` 验证证书链；当前传输实现设置
 - `SPKE`：标记音频输入结束，排空已接收的 PCM 和 DMA 尾音后回到待机；默认服务器唤醒模式继续上传。
 - 本地唤醒模式在播放完成后启动陪伴上传计时，达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 600 秒）无后续对话时停止上传。
 - `MIC_STOP`、闭眼表情、夜间状态均不是隐私静音命令。
-- WSS transport 会话结束时关闭上传、停止播放、丢弃旧 generation PCM 并清除监听／忙碌状态；S1/S2/S4 通过 `EVT_WSS_DISCONNECTED` 进入 S7.1。新连接从空 ring 按所选唤醒模式启动，不恢复旧业务轮次。
-- MQTT 会话断开时，S1/S2/S4 通过 `EVT_MQTT_DISCONNECTED` 进入 S7.1；Wi-Fi 仅负责承载与重连，不再直接驱动行为状态。
-- S7.1 显示 `S7.1 DISCONNECTED` 字幕和断联立绘三秒，不记录严重故障也不复位；随后由 `EVT_DISCONNECT_NOTICE_TIMEOUT` 进入 S3，业务连接继续各自后台重连。
+- WSS transport 会话结束时关闭上传、停止播放、丢弃旧 generation PCM 并清除监听／忙碌状态；S1～S6 通过 `EVT_WSS_DISCONNECTED` 进入 S7.1。新连接从空 ring 按所选唤醒模式启动，不恢复旧业务轮次。
+- MQTT 会话断开时，S1～S6 通过 `EVT_MQTT_DISCONNECTED` 进入 S7.1；Wi-Fi 仅负责承载与重连，不直接驱动行为状态。S8 的 OTA 链路错误继续由 OTA 恢复策略处理。
+- 独立服务状态启动为 `CONNECTING`；默认 30 秒内 MQTT 关键订阅和 WSS 认证会话未全部就绪，则按首次离线进入 S7.1。首次从 `CONNECTING/ONLINE` 变为 `OFFLINE` 时，S7.1 播放固件内嵌的 16kHz 单声道 PCM16 提示语音并显示 `S7.1 DISCONNECTED` 三秒，不记录严重故障也不复位。提示结束后，S1/S3/S5/S6 返回原状态，S2/S4 进入 S3。保持 `OFFLINE` 期间的重复断联或另一链路随后断开只更新原因，不重复播报；MQTT/WSS 全部恢复后隐藏标签并允许下一轮提示。
 
 ### 3.2 PCM1 格式
 

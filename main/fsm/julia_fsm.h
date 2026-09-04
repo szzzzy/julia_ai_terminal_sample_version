@@ -62,7 +62,10 @@ typedef enum {
     EVT_INTENT_DISMISS,           /**< 用户明确结束交流，进入静默状态。 */
     EVT_MQTT_DISCONNECTED,        /**< 控制消息连接断开，当前交流无法完整继续。 */
     EVT_WSS_DISCONNECTED,         /**< 语音数据连接断开，当前交流无法完整继续。 */
-    EVT_DISCONNECT_NOTICE_TIMEOUT, /**< 断联提示已显示 3 秒，返回普通待机。 */
+    EVT_MQTT_CONNECTED,           /**< MQTT 控制连接已经恢复。 */
+    EVT_WSS_CONNECTED,            /**< WSS 语音连接已经恢复。 */
+    EVT_SERVICE_CONNECT_TIMEOUT,  /**< 启动后业务连接未在期限内全部就绪。 */
+    EVT_DISCONNECT_NOTICE_TIMEOUT, /**< 断联提示结束，按来源策略返回稳定状态。 */
     EVT_OTA_AVAILABLE,            /**< 已接受一项可执行的固件升级任务。 */
     EVT_OTA_SUCCEEDED,            /**< 新固件已校验并设为下次启动版本。 */
     EVT_OTA_TASK_FAILED,          /**< 本次升级已放弃，继续运行当前固件并等待唤醒。 */
@@ -79,6 +82,8 @@ struct julia_fsm {
     julia_main_state_t main_state;
     julia_s2_sub_state_t s2_sub_state;
     julia_s7_sub_state_t s7_sub_state;
+    /** S7.1 提示结束后的稳定落点；瞬时状态断联时固定为 S3。 */
+    julia_main_state_t s7_return_state;
     julia_fsm_state_cb_t on_enter;
     julia_fsm_state_cb_t on_exit;
     void *user_ctx;
@@ -105,7 +110,7 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
                               julia_s2_sub_state_t to_s2_sub_state);
 /**
  * 判断包含 S7 子状态在内的完整状态变化是否符合产品流程。S7.2 只能复位到 S0，
- * S7.1 只能在提示结束后进入 S3，或在同时发生严重故障时升级为 S7.2。
+ * S7.1 提示结束后可回到 S1/S3/S5/S6 中记录的稳定落点，或升级为 S7.2。
  */
 bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
                                    julia_s2_sub_state_t from_s2_sub_state,

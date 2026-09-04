@@ -56,6 +56,12 @@ int main(void)
                   "S2.1_LISTENING") == 0);
     assert(strcmp(julia_fsm_event_name(EVT_MQTT_DISCONNECTED),
                   "EVT_MQTT_DISCONNECTED") == 0);
+    assert(strcmp(julia_fsm_event_name(EVT_MQTT_CONNECTED),
+                  "EVT_MQTT_CONNECTED") == 0);
+    assert(strcmp(julia_fsm_event_name(EVT_WSS_CONNECTED),
+                  "EVT_WSS_CONNECTED") == 0);
+    assert(strcmp(julia_fsm_event_name(EVT_SERVICE_CONNECT_TIMEOUT),
+                  "EVT_SERVICE_CONNECT_TIMEOUT") == 0);
 
     /* 主状态之间的允许迁移关系。 */
     assert(!julia_fsm_can_transition(JULIA_MAIN_STATE_S0_BOOT, JULIA_S2_SUB_STATE_NONE,
@@ -275,7 +281,7 @@ int main(void)
                                   EVT_INTENT_DISMISS, NULL));
     assert(speaking_dismiss_fsm.main_state == JULIA_MAIN_STATE_S5_SILENT);
 
-    /* MQTT 断联先进入 S7.1，提示结束后回到 S3，并清除 S2 子状态。 */
+    /* 瞬时的 S2/S4 断联进入 S7.1，提示结束后落到 S3，并清除旧会话。 */
     const julia_s2_sub_state_t disconnected_s2_states[] = {
         JULIA_S2_SUB_STATE_S2_1_LISTENING,
         JULIA_S2_SUB_STATE_S2_2_THINKING,
@@ -313,7 +319,7 @@ int main(void)
     assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S7_FAULT);
     assert(julia_fsm_handle_event(&disconnected_fsm,
                                   EVT_DISCONNECT_NOTICE_TIMEOUT, NULL));
-    assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
+    assert(disconnected_fsm.main_state == JULIA_MAIN_STATE_S1_COMPANION);
 
     julia_fsm_t disconnected_s4_fsm;
     enter_standby(&disconnected_s4_fsm);
@@ -324,6 +330,16 @@ int main(void)
     assert(julia_fsm_handle_event(&disconnected_s4_fsm,
                                   EVT_DISCONNECT_NOTICE_TIMEOUT, NULL));
     assert(disconnected_s4_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
+
+    julia_fsm_t initial_offline_fsm;
+    enter_standby(&initial_offline_fsm);
+    assert(julia_fsm_handle_event(&initial_offline_fsm,
+                                  EVT_SERVICE_CONNECT_TIMEOUT, NULL));
+    assert(initial_offline_fsm.main_state == JULIA_MAIN_STATE_S7_FAULT);
+    assert(initial_offline_fsm.s7_return_state == JULIA_MAIN_STATE_S3_STANDBY);
+    assert(julia_fsm_handle_event(&initial_offline_fsm,
+                                  EVT_DISCONNECT_NOTICE_TIMEOUT, NULL));
+    assert(initial_offline_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
 
     /* 纯 FSM 测试只验证 S7.2 迁移边；记录与复位由运行时故障通道负责。 */
     assert(julia_fsm_transition_to(&fsm, JULIA_MAIN_STATE_S7_FAULT,

@@ -55,6 +55,9 @@ static const char *const s_event_names[EVT_COUNT] = {
     [EVT_INTENT_DISMISS] = "EVT_INTENT_DISMISS",
     [EVT_MQTT_DISCONNECTED] = "EVT_MQTT_DISCONNECTED",
     [EVT_WSS_DISCONNECTED] = "EVT_WSS_DISCONNECTED",
+    [EVT_MQTT_CONNECTED] = "EVT_MQTT_CONNECTED",
+    [EVT_WSS_CONNECTED] = "EVT_WSS_CONNECTED",
+    [EVT_SERVICE_CONNECT_TIMEOUT] = "EVT_SERVICE_CONNECT_TIMEOUT",
     [EVT_DISCONNECT_NOTICE_TIMEOUT] = "EVT_DISCONNECT_NOTICE_TIMEOUT",
     [EVT_OTA_AVAILABLE] = "EVT_OTA_AVAILABLE",
     [EVT_OTA_SUCCEEDED] = "EVT_OTA_SUCCEEDED",
@@ -152,12 +155,18 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
          from_s2_sub_state == to_s2_sub_state &&
          from_s7_sub_state == to_s7_sub_state)) return false;
 
-    /* S7.2 严重故障只能通过复位重新开机；S7.1 是可恢复提示，显示结束后进入待机。
-     * 如果提示期间又发生真正的核心故障，则升级为 S7.2 并走故障记录与复位。 */
+    /* S7.2 严重故障只能通过复位重新开机；S7.1 是可恢复提示，显示结束后回到
+     * 预先记录的稳定落点。提示期间发生核心故障时可升级为 S7.2。 */
     if (from_main_state == JULIA_MAIN_STATE_S7_FAULT) {
         if (from_s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED) {
             return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
+                             JULIA_MAIN_STATE_S1_COMPANION) ||
+                   target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                              JULIA_MAIN_STATE_S3_STANDBY) ||
+                   target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
+                             JULIA_MAIN_STATE_S5_SILENT) ||
+                   target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
+                             JULIA_MAIN_STATE_S6_SLEEP) ||
                    target_is_fault(to_main_state, to_s2_sub_state,
                                    to_s7_sub_state);
         }
@@ -166,11 +175,14 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
     }
     if (target_is_fault(to_main_state, to_s2_sub_state, to_s7_sub_state)) return true;
     if (target_is_disconnected(to_main_state, to_s2_sub_state, to_s7_sub_state)) {
-        /* 只有依赖 WSS/MQTT 才能继续的交流状态需要显示断联提示。已经待机、睡眠、
-         * 静默或升级中的设备不会因重复断线通知而改变用户已经选择的状态。 */
+        /* S1/S3/S5/S6 提示后恢复原稳定状态；S2/S4 的旧会话不可续传，落到 S3。
+         * S0/S8 使用各自的启动和 OTA 恢复策略，不进入业务断联提示。 */
         return from_main_state == JULIA_MAIN_STATE_S1_COMPANION ||
                from_main_state == JULIA_MAIN_STATE_S2_DIALOG ||
-               from_main_state == JULIA_MAIN_STATE_S4_INTERACTION;
+               from_main_state == JULIA_MAIN_STATE_S3_STANDBY ||
+               from_main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
+               from_main_state == JULIA_MAIN_STATE_S5_SILENT ||
+               from_main_state == JULIA_MAIN_STATE_S6_SLEEP;
     }
 
     switch (from_main_state) {
@@ -277,12 +289,28 @@ bool julia_fsm_transition_to_full(julia_fsm_t *fsm,
     julia_main_state_t from_main_state = fsm->main_state;
     julia_s2_sub_state_t from_s2_sub_state = fsm->s2_sub_state;
     julia_s7_sub_state_t from_s7_sub_state = fsm->s7_sub_state;
+    if (from_main_state == JULIA_MAIN_STATE_S7_FAULT &&
+        from_s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED &&
+        to_main_state != JULIA_MAIN_STATE_S7_FAULT &&
+        to_main_state != fsm->s7_return_state) {
+        return false;
+    }
     if (fsm->on_exit != NULL) {
         fsm->on_exit(fsm, from_main_state, from_s2_sub_state, reason);
     }
     fsm->main_state = to_main_state;
     fsm->s2_sub_state = to_s2_sub_state;
     fsm->s7_sub_state = to_s7_sub_state;
+    if (to_main_state == JULIA_MAIN_STATE_S7_FAULT &&
+        to_s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED) {
+        fsm->s7_return_state =
+            from_main_state == JULIA_MAIN_STATE_S1_COMPANION ||
+            from_main_state == JULIA_MAIN_STATE_S3_STANDBY ||
+            from_main_state == JULIA_MAIN_STATE_S5_SILENT ||
+            from_main_state == JULIA_MAIN_STATE_S6_SLEEP
+                ? from_main_state
+                : JULIA_MAIN_STATE_S3_STANDBY;
+    }
     ESP_LOGI(TAG, "[FSM] %s/%s/%s -> %s/%s/%s (%s)",
              julia_fsm_main_state_name(from_main_state),
              julia_fsm_s2_sub_state_name(from_s2_sub_state),
@@ -315,6 +343,7 @@ void julia_fsm_init(julia_fsm_t *fsm)
     fsm->main_state = JULIA_MAIN_STATE_S0_BOOT;
     fsm->s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     fsm->s7_sub_state = JULIA_S7_SUB_STATE_NONE;
+    fsm->s7_return_state = JULIA_MAIN_STATE_S3_STANDBY;
     fsm->on_enter = default_on_enter;
     fsm->on_exit = default_on_exit;
     fsm->user_ctx = NULL;
@@ -335,19 +364,22 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
 
     if ((fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
          fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG ||
-         fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION) &&
-        (event == EVT_MQTT_DISCONNECTED || event == EVT_WSS_DISCONNECTED)) {
-        /* 控制消息或语音数据任一连接断开后，本轮交流都不再完整。设备先显示断联
-         * 提示，再返回待机，等连接自动恢复后由下一次唤醒重新开始。 */
+         fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY ||
+         fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
+         fsm->main_state == JULIA_MAIN_STATE_S5_SILENT ||
+         fsm->main_state == JULIA_MAIN_STATE_S6_SLEEP) &&
+        (event == EVT_MQTT_DISCONNECTED || event == EVT_WSS_DISCONNECTED ||
+         event == EVT_SERVICE_CONNECT_TIMEOUT)) {
+        /* 控制消息或语音数据任一连接断开后先进入 S7.1。本次迁移同时记录稳定
+         * 返回点：S1/S3/S5/S6 返回原状态，S2/S4 放弃旧会话并返回 S3。 */
         target_main_state = JULIA_MAIN_STATE_S7_FAULT;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
         target_s7_sub_state = JULIA_S7_SUB_STATE_S7_1_DISCONNECTED;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S7_FAULT &&
                fsm->s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED &&
                event == EVT_DISCONNECT_NOTICE_TIMEOUT) {
-        /* 三秒足以让用户看到本轮交流为何结束；随后回到默认待机，避免断联画面
-         * 长期占据屏幕。网络连接由各自后台任务继续恢复。 */
-        target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
+        /* 提示结束后回到记录的稳定落点；offline 标签继续存在，直到连接恢复。 */
+        target_main_state = fsm->s7_return_state;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION &&
                event == EVT_USER_LEAVE) {

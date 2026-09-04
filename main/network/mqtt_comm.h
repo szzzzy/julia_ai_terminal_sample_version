@@ -103,6 +103,8 @@ esp_err_t mqtt_comm_start(void);
  * @return mqtt_comm_start() 的返回值。
  */
 esp_err_t mqtt_comm_ip_ready(void *arg);
+/** 当前 MQTT 会话及全部关键订阅是否已经可用于业务。 */
+bool mqtt_comm_is_ready(void);
 
 #ifdef __cplusplus
 }

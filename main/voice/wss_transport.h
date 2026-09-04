@@ -142,6 +142,8 @@ void wss_transport_fail_session(void);
  * 负责收发的任务会在当前完整写入结束后统一清理。主要用于麦克风缓冲已满。
  */
 esp_err_t wss_transport_request_session_end(wss_transport_end_reason_t reason);
+/** 返回当前 WSS 是否已完成握手认证并可收发业务消息。 */
+bool wss_transport_is_ready(void);
 const char *wss_transport_end_reason_name(wss_transport_end_reason_t reason);
 
 /**

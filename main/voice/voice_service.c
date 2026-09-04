@@ -938,6 +938,7 @@ static void voice_service_on_session_start(void)
 #else
     ESP_LOGI(TAG, "WSS session ready: generation=%" PRIu32, generation);
 #endif
+    post_fsm_event(EVT_WSS_CONNECTED);
 }
 
 /**

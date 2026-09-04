@@ -7,6 +7,8 @@
  */
 #include "julia_fsm_runtime.h"
 
+#include <string.h>
+
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -16,11 +18,17 @@
 #include "julia_avatar.h"
 #include "julia_backlight.h"
 #include "lvgl_port.h"
+#include "mqtt_comm.h"
 #include "sdkconfig.h"
+#include "voice_playback.h"
+#include "wss_transport.h"
 
 #define FSM_EVENT_QUEUE_DEPTH 16
 #define FSM_TASK_STACK_SIZE   4096
 #define FSM_TASK_PRIORITY     4
+#define SERVICE_LINK_MQTT     (1U << 0)
+#define SERVICE_LINK_WSS      (1U << 1)
+#define SERVICE_LINK_ALL      (SERVICE_LINK_MQTT | SERVICE_LINK_WSS)
 /* 断联提示只解释本轮交流中止原因，不应像严重故障一样等待复位或人工处理。 */
 #define DISCONNECT_NOTICE_US  3000000ULL
 
@@ -56,11 +64,60 @@ static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static julia_main_state_t s_committed_main_state = JULIA_MAIN_STATE_S0_BOOT;
 static julia_s2_sub_state_t s_committed_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
 static julia_s7_sub_state_t s_committed_s7_sub_state = JULIA_S7_SUB_STATE_NONE;
+static julia_service_state_t s_committed_service_state = JULIA_SERVICE_CONNECTING;
+static uint8_t s_online_links;
 static esp_timer_handle_t s_standby_timer;
 static esp_timer_handle_t s_silent_timer;
 static esp_timer_handle_t s_disconnect_timer;
+static esp_timer_handle_t s_service_init_timer;
 static julia_fsm_state_observer_t s_state_observer;
 static void *s_state_observer_ctx;
+
+extern const uint8_t network_disconnected_wav_start[]
+    asm("_binary_network_disconnected_16k_mono_16bit_wav_start");
+extern const uint8_t network_disconnected_wav_end[]
+    asm("_binary_network_disconnected_16k_mono_16bit_wav_end");
+
+static uint32_t read_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint16_t read_le16(const uint8_t *p)
+{
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static void play_disconnect_prompt(void)
+{
+    const uint8_t *wav = network_disconnected_wav_start;
+    size_t wav_bytes = (size_t)(network_disconnected_wav_end - wav);
+    if (wav_bytes < 44 || memcmp(wav, "RIFF", 4) != 0 ||
+        memcmp(wav + 8, "WAVE", 4) != 0 || memcmp(wav + 36, "data", 4) != 0 ||
+        read_le16(wav + 20) != 1 || read_le16(wav + 22) != 1 ||
+        read_le32(wav + 24) != 16000 || read_le16(wav + 34) != 16) {
+        ESP_LOGW(TAG, "local disconnect prompt has an invalid WAV header");
+        return;
+    }
+    size_t pcm_bytes = read_le32(wav + 40);
+    if (pcm_bytes > wav_bytes - 44) pcm_bytes = wav_bytes - 44;
+    pcm_bytes &= ~(size_t)1U;
+    if (pcm_bytes == 0) {
+        ESP_LOGW(TAG, "local disconnect prompt has no PCM payload");
+        return;
+    }
+    uint32_t generation = 0;
+    esp_err_t err = voice_playback_start_local(16000, wav + 44, pcm_bytes,
+                                                &generation);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "local disconnect prompt start failed: %s",
+                 esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "local disconnect prompt generation=%lu bytes=%u",
+                 (unsigned long)generation, (unsigned)pcm_bytes);
+    }
+}
 
 static void standby_timer_callback(void *argument)
 {
@@ -86,6 +143,89 @@ static void disconnect_timer_callback(void *argument)
     esp_err_t err = julia_fsm_runtime_post(EVT_DISCONNECT_NOTICE_TIMEOUT);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "断联提示结束事件投递失败：%s", esp_err_to_name(err));
+    }
+}
+
+static void service_init_timer_callback(void *argument)
+{
+    (void)argument;
+    esp_err_t err = julia_fsm_runtime_post(EVT_SERVICE_CONNECT_TIMEOUT);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "初始业务连接超时事件投递失败：%s", esp_err_to_name(err));
+    }
+}
+
+static bool service_state_apply_event(fsm_event_t event)
+{
+    uint8_t bit = 0;
+    bool connected = false;
+    switch (event) {
+    case EVT_MQTT_DISCONNECTED: bit = SERVICE_LINK_MQTT; break;
+    case EVT_WSS_DISCONNECTED: bit = SERVICE_LINK_WSS; break;
+    case EVT_MQTT_CONNECTED: bit = SERVICE_LINK_MQTT; connected = true; break;
+    case EVT_WSS_CONNECTED: bit = SERVICE_LINK_WSS; connected = true; break;
+    case EVT_SERVICE_CONNECT_TIMEOUT: break;
+    default: return false;
+    }
+
+    portENTER_CRITICAL(&s_state_lock);
+    julia_service_state_t previous_state = s_committed_service_state;
+    uint8_t previous_links = s_online_links;
+    if (event == EVT_SERVICE_CONNECT_TIMEOUT) {
+        if (s_committed_service_state == JULIA_SERVICE_CONNECTING) {
+            s_committed_service_state = JULIA_SERVICE_OFFLINE;
+        }
+    } else {
+        if (connected) s_online_links |= bit;
+        else s_online_links &= (uint8_t)~bit;
+        if ((s_online_links & SERVICE_LINK_ALL) == SERVICE_LINK_ALL) {
+            s_committed_service_state = JULIA_SERVICE_ONLINE;
+        } else if (!connected || previous_state == JULIA_SERVICE_OFFLINE) {
+            s_committed_service_state = JULIA_SERVICE_OFFLINE;
+        } else {
+            s_committed_service_state = JULIA_SERVICE_CONNECTING;
+        }
+    }
+    bool changed = previous_state != s_committed_service_state ||
+                   previous_links != s_online_links;
+    julia_service_state_t state = s_committed_service_state;
+    uint8_t online_links = s_online_links;
+    portEXIT_CRITICAL(&s_state_lock);
+
+    if (changed) {
+        julia_avatar_set_offline(state == JULIA_SERVICE_OFFLINE);
+        const char *name = state == JULIA_SERVICE_ONLINE ? "ONLINE" :
+                           state == JULIA_SERVICE_OFFLINE ? "OFFLINE" : "CONNECTING";
+        ESP_LOGI(TAG, "service=%s online_links=0x%02x by %s", name,
+                 (unsigned)online_links, julia_fsm_event_name(event));
+    }
+    if (state == JULIA_SERVICE_ONLINE && s_service_init_timer != NULL) {
+        (void)esp_timer_stop(s_service_init_timer);
+    }
+    return true;
+}
+
+static void service_state_reconcile(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    uint8_t online_links = s_online_links;
+    julia_service_state_t state = s_committed_service_state;
+    portEXIT_CRITICAL(&s_state_lock);
+    bool mqtt_ready = mqtt_comm_is_ready();
+    bool wss_ready = wss_transport_is_ready();
+    if ((online_links & SERVICE_LINK_MQTT) == 0 && mqtt_ready) {
+        (void)service_state_apply_event(EVT_MQTT_CONNECTED);
+    }
+    if ((online_links & SERVICE_LINK_WSS) == 0 && wss_ready) {
+        (void)service_state_apply_event(EVT_WSS_CONNECTED);
+    }
+    if (state == JULIA_SERVICE_ONLINE) {
+        if ((online_links & SERVICE_LINK_MQTT) != 0 && !mqtt_ready) {
+            (void)julia_fsm_runtime_post(EVT_MQTT_DISCONNECTED);
+        }
+        if ((online_links & SERVICE_LINK_WSS) != 0 && !wss_ready) {
+            (void)julia_fsm_runtime_post(EVT_WSS_DISCONNECTED);
+        }
     }
 }
 
@@ -217,12 +357,11 @@ static void apply_presentation(julia_main_state_t main_state,
         }
         break;
     case FSM_PRESENT_S7_1_DISCONNECTED:
-        /* 保持屏幕可见三秒：显示指定的闭眼断联图和状态字幕，不播放嘴型、不呼吸。
-         * 进入 S3 后再切换为普通待机图并开始背光呼吸。 */
+        /* S7.1 只承担短暂提示；长期断联由独立 offline 标签表达。 */
         julia_backlight_breathe_stop();
         julia_backlight_set(CONFIG_JULIA_COMPANION_BRIGHTNESS_PERCENT);
         julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_IDLE);
-        julia_avatar_show_disconnected();
+        julia_avatar_set_dozing(false);
         break;
     case FSM_PRESENT_S5_SILENT:
         /* S5 继续复用 Companion 基础立绘，但用固定低亮度明确区分静默状态。 */
@@ -306,13 +445,14 @@ static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
     }
     if (main_state == JULIA_MAIN_STATE_S7_FAULT &&
         fsm->s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED) {
-        /* 计时器创建或启动失败时立即回待机，宁可缩短提示，也不能永远卡在 S7.1。 */
+        play_disconnect_prompt();
+        /* 计时器失败时立即执行返回策略，不能让提示态永久占用行为状态机。 */
         esp_err_t err = s_disconnect_timer != NULL
                             ? esp_timer_start_once(s_disconnect_timer,
                                                    DISCONNECT_NOTICE_US)
                             : ESP_ERR_INVALID_STATE;
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "断联提示计时启动失败，立即返回待机：%s",
+            ESP_LOGW(TAG, "断联提示计时启动失败，立即返回稳定状态：%s",
                      esp_err_to_name(err));
             (void)julia_fsm_runtime_post(EVT_DISCONNECT_NOTICE_TIMEOUT);
         }
@@ -342,7 +482,11 @@ static void fsm_task(void *argument)
 {
     (void)argument;
     fsm_runtime_message_t message;
-    while (xQueueReceive(s_event_queue, &message, portMAX_DELAY) == pdTRUE) {
+    for (;;) {
+        if (xQueueReceive(s_event_queue, &message, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            service_state_reconcile();
+            continue;
+        }
         if (message.type == FSM_RUNTIME_MESSAGE_FAULT) {
             julia_main_state_t previous_main = s_fsm.main_state;
             julia_s2_sub_state_t previous_sub = s_fsm.s2_sub_state;
@@ -373,6 +517,18 @@ static void fsm_task(void *argument)
             ESP_LOGE(TAG, "FSM 状态非法，立即复位");
             esp_restart();
             continue;
+        }
+        julia_service_state_t previous_service_state =
+            julia_fsm_runtime_get_service_state();
+        bool service_event = service_state_apply_event(message.event);
+        if (service_event) {
+            julia_service_state_t current_service_state =
+                julia_fsm_runtime_get_service_state();
+            if (current_service_state != JULIA_SERVICE_OFFLINE ||
+                previous_service_state == JULIA_SERVICE_OFFLINE) {
+                /* 恢复事件只维护标签；同一离线周期内的后续断联也不重复进入 S7.1。 */
+                continue;
+            }
         }
         if (!julia_fsm_handle_event(&s_fsm, message.event, NULL)) {
             if (message.event == EVT_WAKEUP ||
@@ -432,11 +588,24 @@ esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready)
             ESP_LOGW(TAG, "断联提示计时器创建失败：%s", esp_err_to_name(timer_err));
         }
     }
+    if (s_service_init_timer == NULL) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = service_init_timer_callback,
+            .name = "service_init",
+        };
+        esp_err_t timer_err = esp_timer_create(&timer_args, &s_service_init_timer);
+        if (timer_err != ESP_OK) {
+            ESP_LOGW(TAG, "初始业务连接计时器创建失败：%s", esp_err_to_name(timer_err));
+        }
+    }
     portENTER_CRITICAL(&s_state_lock);
     s_committed_main_state = s_fsm.main_state;
     s_committed_s2_sub_state = s_fsm.s2_sub_state;
     s_committed_s7_sub_state = s_fsm.s7_sub_state;
+    s_online_links = 0;
+    s_committed_service_state = JULIA_SERVICE_CONNECTING;
     portEXIT_CRITICAL(&s_state_lock);
+    julia_avatar_set_offline(false);
     if (boot_dependencies_ready) {
         /* 初始化完成后进入待唤醒的 S3；S1 只保留会话后的免唤醒陪伴语义。 */
         if (!julia_fsm_transition_to(&s_fsm, JULIA_MAIN_STATE_S3_STANDBY,
@@ -464,9 +633,20 @@ esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready)
             (void)esp_timer_delete(s_disconnect_timer);
             s_disconnect_timer = NULL;
         }
+        if (s_service_init_timer != NULL) {
+            (void)esp_timer_delete(s_service_init_timer);
+            s_service_init_timer = NULL;
+        }
         vQueueDelete(s_event_queue);
         s_event_queue = NULL;
         return ESP_ERR_NO_MEM;
+    }
+    if (s_service_init_timer == NULL ||
+        esp_timer_start_once(
+            s_service_init_timer,
+            (uint64_t)CONFIG_JULIA_SERVICE_INIT_TIMEOUT_SECONDS * 1000000ULL) != ESP_OK) {
+        ESP_LOGW(TAG, "初始业务连接计时器不可用，立即按离线处理");
+        (void)julia_fsm_runtime_post(EVT_SERVICE_CONNECT_TIMEOUT);
     }
     ESP_LOGI(TAG, "ready initial=%s/%s/%s queue=%u s1_bl=%d%% "
                   "s3_breathe=%d-%d%% s3_sleep=%ds s5_standby=%ds "
@@ -543,6 +723,15 @@ julia_s7_sub_state_t julia_fsm_runtime_get_s7_sub_state(void)
     julia_s7_sub_state_t state;
     portENTER_CRITICAL(&s_state_lock);
     state = s_committed_s7_sub_state;
+    portEXIT_CRITICAL(&s_state_lock);
+    return state;
+}
+
+julia_service_state_t julia_fsm_runtime_get_service_state(void)
+{
+    julia_service_state_t state;
+    portENTER_CRITICAL(&s_state_lock);
+    state = s_committed_service_state;
     portEXIT_CRITICAL(&s_state_lock);
     return state;
 }

@@ -49,6 +49,9 @@ idf.py -B build build
 | `CONFIG_JULIA_SPEAKER_VOLUME_PERCENT` | 扬声器上电默认音量 50%；运行时可被 `SPKV` 覆盖 |
 | `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS` | S1→S3 驻留阈值，默认 600 秒 |
 | `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS`／`CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS` | S3→S6、S5→S3 驻留阈值，默认分别为 300 秒、1800 秒 |
+| `CONFIG_JULIA_SERVICE_INIT_TIMEOUT_SECONDS` | 启动后等待 MQTT关键订阅与 WSS认证会话全部就绪的期限，默认 30 秒；超时进入一次 S7.1并保持 `offline` 标签 |
+| `CONFIG_NETWORK_WIFI_RETRY_BASE_MS`／`MAX_MS`／`JITTER_PERCENT` | Wi-Fi重连从约1秒指数退避到最多60秒，并减去最多20%的随机抖动；取得 IP 后计数清零 |
+| `CONFIG_NETWORK_WIFI_CONNECT_TIMEOUT_MS` | 单次 `esp_wifi_connect()` 等待 GOT_IP或断开事件的看门狗，默认20秒；超时会取消本次尝试并继续退避重连 |
 | `CONFIG_JULIA_COMPANION_BRIGHTNESS_PERCENT`／`CONFIG_JULIA_SILENT_BRIGHTNESS_PERCENT` | S1、S5 固定背光，默认均为 50% |
 | `CONFIG_JULIA_DISPLAY_BREATHE_*` | S3 背光呼吸范围与周期，默认 5%–30%、4000ms；S6 背光熄灭 |
 | `CONFIG_JULIA_NIGHT_SLEEP_*` | 夜间开始／结束小时、入睡宽限和轮询周期 |

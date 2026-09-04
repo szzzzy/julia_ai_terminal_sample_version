@@ -1643,6 +1643,14 @@ esp_err_t wss_transport_request_session_end(wss_transport_end_reason_t reason)
     return ESP_OK;
 }
 
+bool wss_transport_is_ready(void)
+{
+    portENTER_CRITICAL(&s_start_lock);
+    bool ready = s_session_ready;
+    portEXIT_CRITICAL(&s_start_lock);
+    return ready;
+}
+
 const char *wss_transport_end_reason_name(wss_transport_end_reason_t reason)
 {
     switch (reason) {

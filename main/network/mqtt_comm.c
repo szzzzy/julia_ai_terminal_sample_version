@@ -1376,6 +1376,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             /* 全部 critical topic 都确认后才同时放行状态 flush 和主动检查任务。
              * 置位 READY 即宣告“连接可用”，两个 OTA 专属 topic 的订阅已就绪。 */
             xEventGroupSetBits(s_connection_events, MQTT_OTA_READY_BIT);
+            esp_err_t service_fsm_err = julia_fsm_runtime_post(EVT_MQTT_CONNECTED);
+            if (service_fsm_err != ESP_OK && service_fsm_err != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "MQTT ready FSM event rejected: %s",
+                         esp_err_to_name(service_fsm_err));
+            }
             s_suback_deadline_ms = 0;
             /* flush_pending() 只把 NVS 中的持久化事件与 RAM 最新进度交给本模块的
              * 状态队列（不写入 Flash、不等待发送）；真正的 PUBACK 删除由 ota_report
@@ -1637,4 +1642,9 @@ esp_err_t mqtt_comm_ip_ready(void *arg)
 {
     (void)arg;
     return mqtt_comm_start();
+}
+
+bool mqtt_comm_is_ready(void)
+{
+    return mqtt_status_is_ready();
 }

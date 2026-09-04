@@ -10,6 +10,7 @@ set(embed_binary_files
     "ui/generated/clips/LISTEN.bin"
     "ui/generated/clips/THINK.bin"
     "ui/generated/clips/SPEAK.bin"
+    ${project_dir}/network_disconnected_16k_mono_16bit.wav
 )
 
 if(CONFIG_COMM_DEVICE_AUTH_CERTIFICATE)
@@ -63,7 +64,6 @@ set(srcs
     "ui/avatar_parts/avatar_mouth.c"
     "ui/generated/avatar_layers/avatar_face_base.c"
     "ui/generated/avatar_layers/avatar_face_doze.c"
-    "ui/generated/avatar_layers/avatar_disconnect.c"
     "ui/generated/avatar_layers/avatar_chroma_assets.c"
     "ui/julia_backlight.c"
     "app/julia_idle_display.c"

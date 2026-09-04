@@ -33,29 +33,38 @@ static void verify_disconnect_event(fsm_event_t event)
         assert(fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
     }
 
-    const julia_main_state_t active_states[] = {
+    const julia_main_state_t stable_states[] = {
         JULIA_MAIN_STATE_S1_COMPANION,
-        JULIA_MAIN_STATE_S4_INTERACTION,
+        JULIA_MAIN_STATE_S3_STANDBY,
+        JULIA_MAIN_STATE_S5_SILENT,
+        JULIA_MAIN_STATE_S6_SLEEP,
     };
-    for (size_t i = 0; i < sizeof(active_states) / sizeof(active_states[0]); ++i) {
+    for (size_t i = 0; i < sizeof(stable_states) / sizeof(stable_states[0]); ++i) {
         julia_fsm_t fsm;
-        set_state(&fsm, active_states[i], JULIA_S2_SUB_STATE_NONE);
+        set_state(&fsm, stable_states[i], JULIA_S2_SUB_STATE_NONE);
         assert(julia_fsm_handle_event(&fsm, event, NULL));
         assert(fsm.main_state == JULIA_MAIN_STATE_S7_FAULT);
         assert(fsm.s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED);
+        assert(fsm.s7_return_state == stable_states[i]);
         assert(!julia_fsm_handle_event(
             &fsm, event == EVT_WSS_DISCONNECTED ? EVT_MQTT_DISCONNECTED
                                                 : EVT_WSS_DISCONNECTED,
             NULL));
         assert(julia_fsm_handle_event(&fsm, EVT_DISCONNECT_NOTICE_TIMEOUT, NULL));
-        assert(fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
+        assert(fsm.main_state == stable_states[i]);
     }
+
+    julia_fsm_t interaction_fsm;
+    set_state(&interaction_fsm, JULIA_MAIN_STATE_S4_INTERACTION,
+              JULIA_S2_SUB_STATE_NONE);
+    assert(julia_fsm_handle_event(&interaction_fsm, event, NULL));
+    assert(interaction_fsm.s7_return_state == JULIA_MAIN_STATE_S3_STANDBY);
+    assert(julia_fsm_handle_event(&interaction_fsm,
+                                  EVT_DISCONNECT_NOTICE_TIMEOUT, NULL));
+    assert(interaction_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
 
     const julia_main_state_t unaffected_states[] = {
         JULIA_MAIN_STATE_S0_BOOT,
-        JULIA_MAIN_STATE_S3_STANDBY,
-        JULIA_MAIN_STATE_S5_SILENT,
-        JULIA_MAIN_STATE_S6_SLEEP,
         JULIA_MAIN_STATE_S7_FAULT,
         JULIA_MAIN_STATE_S8_OTA,
     };
@@ -75,6 +84,12 @@ int main(void)
                   "EVT_MQTT_DISCONNECTED") == 0);
     assert(strcmp(julia_fsm_event_name(EVT_WSS_DISCONNECTED),
                   "EVT_WSS_DISCONNECTED") == 0);
+    assert(strcmp(julia_fsm_event_name(EVT_MQTT_CONNECTED),
+                  "EVT_MQTT_CONNECTED") == 0);
+    assert(strcmp(julia_fsm_event_name(EVT_WSS_CONNECTED),
+                  "EVT_WSS_CONNECTED") == 0);
+    assert(strcmp(julia_fsm_event_name(EVT_SERVICE_CONNECT_TIMEOUT),
+                  "EVT_SERVICE_CONNECT_TIMEOUT") == 0);
     assert(strcmp(julia_fsm_s7_sub_state_name(
                       JULIA_S7_SUB_STATE_S7_1_DISCONNECTED),
                   "S7.1_DISCONNECTED") == 0);

@@ -45,16 +45,12 @@ void julia_avatar_set_dialog_phase(julia_avatar_dialog_phase_t phase);
 /** 在普通立绘和完整闭眼休息画面之间切换。 */
 void julia_avatar_set_dozing(bool active);
 
-/**
- * 显示由 doze_frame_preview.png 生成的连接中断立绘，并隐藏独立眼睛和嘴巴图层。
- * 三秒后状态管理进入待机时会自动换回普通待机画面。
- */
-void julia_avatar_show_disconnected(void);
-
 /** 查询当前交流画面阶段，不触发重绘。 */
 julia_avatar_dialog_phase_t julia_avatar_get_dialog_phase(void);
 
 /** 设置固定在屏幕左上侧的黑色小号状态叠字；UI 未初始化时先缓存。 */
 void julia_avatar_set_status_text(const char *text);
+/** 设置独立的离线标签；状态切换不会清除它，服务恢复时才隐藏。 */
+void julia_avatar_set_offline(bool offline);
 
 bool julia_avatar_is_ready(void);

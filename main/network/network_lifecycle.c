@@ -56,6 +56,7 @@ static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_started;
 static bool s_wifi_driver_started;
 static bool s_ip_ready;
+static bool s_connect_attempt_pending;
 static uint32_t s_retry_attempt;
 static int64_t s_next_retry_us = INT64_MAX;
 static bool s_initial_scan_logged;
@@ -108,6 +109,7 @@ static void network_lifecycle_cleanup(void)
     portENTER_CRITICAL(&s_state_lock);
     s_started = false;
     s_ip_ready = false;
+    s_connect_attempt_pending = false;
     s_retry_attempt = 0;
     s_next_retry_us = INT64_MAX;
     for (size_t i = 0; i < s_slot_count; i++) {
@@ -248,6 +250,7 @@ static void network_wifi_event_handler(void *arg, esp_event_base_t event_base,
     if (event_id == WIFI_EVENT_STA_START) {
         portENTER_CRITICAL(&s_state_lock);
         /* 把截止时间设到“现在”：任务唤醒后立即发起首次连接尝试。 */
+        s_connect_attempt_pending = false;
         s_next_retry_us = esp_timer_get_time();
         portEXIT_CRITICAL(&s_state_lock);
         xTaskNotifyGive(s_network_task);
@@ -261,6 +264,7 @@ static void network_wifi_event_handler(void *arg, esp_event_base_t event_base,
         uint32_t retry_attempt;
         portENTER_CRITICAL(&s_state_lock);
         s_ip_ready = false;
+        s_connect_attempt_pending = false;
         /* Every disconnect closes the previous association attempt. Schedule
          * the next one through the capped backoff, whether the failed attempt
          * was initiated at startup or after an online connection. */
@@ -293,6 +297,7 @@ static void network_got_ip_handler(void *arg, esp_event_base_t event_base,
 
     portENTER_CRITICAL(&s_state_lock);
     s_ip_ready = true;
+    s_connect_attempt_pending = false;
     s_retry_attempt = 0;
     s_next_retry_us = INT64_MAX;
     network_reset_service_slots_locked();
@@ -427,10 +432,12 @@ static void network_lifecycle_task(void *parameter)
 
     while (true) {
         bool ip_ready;
+        bool connect_attempt_pending;
         int64_t next_retry_us;
         int64_t service_retry_us;
         portENTER_CRITICAL(&s_state_lock);
         ip_ready = s_ip_ready;
+        connect_attempt_pending = s_connect_attempt_pending;
         next_retry_us = s_next_retry_us;
         portEXIT_CRITICAL(&s_state_lock);
 
@@ -444,17 +451,31 @@ static void network_lifecycle_task(void *parameter)
 
         if (!ip_ready && next_retry_us != INT64_MAX &&
             esp_timer_get_time() >= next_retry_us) {
+            if (connect_attempt_pending) {
+                ESP_LOGW(TAG, "Wi-Fi connect attempt timed out after %d ms; restarting",
+                         CONFIG_NETWORK_WIFI_CONNECT_TIMEOUT_MS);
+                portENTER_CRITICAL(&s_state_lock);
+                s_connect_attempt_pending = false;
+                (void)network_schedule_retry_locked();
+                portEXIT_CRITICAL(&s_state_lock);
+                /* 即使驱动没有补发断开事件，上面安排的重试也会继续推进。 */
+                (void)esp_wifi_disconnect();
+                continue;
+            }
             network_log_initial_scan();
             esp_err_t err = esp_wifi_connect();
-            if (err == ESP_OK || err == ESP_ERR_WIFI_STATE) {
-                /* 连接结果会通过后续系统通知到达。在结果到来前不重复发起第二次连接，
-                 * 失败通知会自行安排下一次重试。 */
+            if (err == ESP_OK) {
+                /* 正常结果仍由 GOT_IP/STA_DISCONNECTED 收口；看门狗防止驱动事件
+                 * 丢失后永久停在“连接中”。 */
                 portENTER_CRITICAL(&s_state_lock);
-                s_next_retry_us = INT64_MAX;
+                s_connect_attempt_pending = true;
+                s_next_retry_us = esp_timer_get_time() +
+                    (int64_t)CONFIG_NETWORK_WIFI_CONNECT_TIMEOUT_MS * 1000LL;
                 portEXIT_CRITICAL(&s_state_lock);
             } else {
                 ESP_LOGW(TAG, "esp_wifi_connect failed: %s", esp_err_to_name(err));
                 portENTER_CRITICAL(&s_state_lock);
+                s_connect_attempt_pending = false;
                 (void)network_schedule_retry_locked();
                 portEXIT_CRITICAL(&s_state_lock);
             }

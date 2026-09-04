@@ -33,7 +33,6 @@
 #include "avatar_chroma_assets.h"
 #include "avatar_face_base.h"
 #include "avatar_face_doze.h"
-#include "avatar_disconnect.h"
 #include "avatar_eyes.h"
 #include "avatar_mouth.h"
 #include "julia_backlight.h"
@@ -54,6 +53,7 @@
 #define STATUS_LABEL_X               60
 #define STATUS_LABEL_Y              100
 #define STATUS_LABEL_WIDTH          220
+#define OFFLINE_LABEL_Y             120
 
 /* 整体移动 360×360 根对象会让每一帧都刷新全屏；当前 QSPI 面板分十条发送且没有
  * 撕裂同步信号，持续全屏更新会出现明显闪烁。因此微动只修改局部眼睛和嘴巴，
@@ -64,6 +64,7 @@ static const char *TAG = "julia_avatar";
 static lv_obj_t *s_motion_root;
 static lv_obj_t *s_base;
 static lv_obj_t *s_status_label;
+static lv_obj_t *s_offline_label;
 static volatile bool s_ready;
 static bool s_talking;
 static uint32_t s_smoothed_rms;
@@ -73,7 +74,7 @@ static uint32_t s_last_pcm_ms;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static julia_avatar_dialog_phase_t s_dialog_phase = JULIA_AVATAR_DIALOG_IDLE;
 static bool s_dozing;
-static bool s_disconnected;
+static bool s_offline;
 /* Last phase successfully assigned to the LVGL base image.  It is separate
  * from the requested state so a lock timeout can be retried safely. */
 static julia_avatar_dialog_phase_t s_applied_dialog_phase =
@@ -105,6 +106,20 @@ void julia_avatar_set_status_text(const char *text)
     /* 每次更新都重新应用固定坐标，防止布局或后续 UI 操作覆盖调试字幕位置。 */
     status_label_place();
     lv_obj_invalidate(s_status_label);
+    lvgl_port_unlock();
+}
+
+void julia_avatar_set_offline(bool offline)
+{
+    portENTER_CRITICAL(&s_phase_lock);
+    s_offline = offline;
+    portEXIT_CRITICAL(&s_phase_lock);
+
+    if (s_offline_label == NULL || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
+    if (offline) lv_obj_clear_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_offline_label);
+    lv_obj_invalidate(s_offline_label);
     lvgl_port_unlock();
 }
 
@@ -291,10 +306,8 @@ void julia_avatar_set_dozing(bool active)
 {
     portENTER_CRITICAL(&s_phase_lock);
     bool previous_dozing = s_dozing;
-    bool previous_disconnected = s_disconnected;
-    bool changed = previous_dozing != active || previous_disconnected;
+    bool changed = previous_dozing != active;
     s_dozing = active;
-    s_disconnected = false;
     julia_avatar_dialog_phase_t phase = s_dialog_phase;
     portEXIT_CRITICAL(&s_phase_lock);
     if (!changed || !s_base) return;
@@ -305,7 +318,6 @@ void julia_avatar_set_dozing(bool active)
     if (!lvgl_port_lock(pdMS_TO_TICKS(250))) {
         portENTER_CRITICAL(&s_phase_lock);
         s_dozing = previous_dozing;
-        s_disconnected = previous_disconnected;
         portEXIT_CRITICAL(&s_phase_lock);
         ESP_LOGW(TAG, "LVGL lock timeout switching doze=%u", active ? 1U : 0U);
         return;
@@ -329,41 +341,6 @@ void julia_avatar_set_dozing(bool active)
         avatar_apply_phase_eyes(phase);
     }
     ESP_LOGI(TAG, "portrait=%s", active ? "sleep" : dialog_phase_name(phase));
-}
-
-void julia_avatar_show_disconnected(void)
-{
-    /* 断联图本身已经包含闭眼和装饰元素，因此必须隐藏额外眼睛与嘴巴，避免两套
-     * 部件重叠。把它标记为完整覆盖画面，也可阻止迟到的对话相位重新换回旧底图。 */
-    portENTER_CRITICAL(&s_phase_lock);
-    bool changed = !s_dozing || !s_disconnected;
-    bool previous_dozing = s_dozing;
-    bool previous_disconnected = s_disconnected;
-    s_dozing = true;
-    s_disconnected = true;
-    portEXIT_CRITICAL(&s_phase_lock);
-    if (!changed || !s_base) return;
-
-    if (!lvgl_port_lock(pdMS_TO_TICKS(250))) {
-        portENTER_CRITICAL(&s_phase_lock);
-        s_dozing = previous_dozing;
-        s_disconnected = previous_disconnected;
-        portEXIT_CRITICAL(&s_phase_lock);
-        ESP_LOGW(TAG, "LVGL lock timeout showing disconnected portrait");
-        return;
-    }
-    lv_img_set_src(s_base, &avatar_asset_julia_s7_1_disconnected);
-    lv_obj_t *layers[] = {
-        avatar_eyes_left_object(), avatar_eyes_right_object(), avatar_mouth_object(),
-    };
-    for (size_t i = 0; i < sizeof(layers) / sizeof(layers[0]); ++i) {
-        if (layers[i] == NULL) continue;
-        lv_obj_add_flag(layers[i], LV_OBJ_FLAG_HIDDEN);
-        lv_obj_invalidate(layers[i]);
-    }
-    lv_obj_invalidate(s_base);
-    lvgl_port_unlock();
-    ESP_LOGI(TAG, "portrait=disconnected");
 }
 
 /* 整数平方根（用于求 RMS）：逐位逼近，避免在音频回调里用浮点 sqrt。
@@ -636,6 +613,18 @@ esp_err_t julia_avatar_init(void)
     portEXIT_CRITICAL(&s_phase_lock);
     lv_label_set_text(s_status_label, status_snapshot);
     status_label_place();
+
+    s_offline_label = lv_label_create(screen);
+    lv_label_set_text(s_offline_label, "offline");
+    lv_obj_set_pos(s_offline_label, STATUS_LABEL_X, OFFLINE_LABEL_Y);
+    lv_obj_set_width(s_offline_label, STATUS_LABEL_WIDTH);
+    lv_obj_set_style_text_color(s_offline_label, lv_palette_main(LV_PALETTE_RED),
+                                LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_offline_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_offline_label, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_clear_flag(s_offline_label, LV_OBJ_FLAG_SCROLLABLE);
+    if (!s_offline) lv_obj_add_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_offline_label);
     ESP_LOGI(TAG, "status label ready x=%d y=%d width=%d text=%s",
              lv_obj_get_x(s_status_label), lv_obj_get_y(s_status_label),
              lv_obj_get_width(s_status_label), status_snapshot);

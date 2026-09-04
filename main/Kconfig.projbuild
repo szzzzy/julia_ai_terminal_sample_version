@@ -195,6 +195,15 @@ menu "Example Configuration"
             Randomly subtract up to this percentage from each capped backoff
             delay, spreading reconnection attempts across devices.
 
+    config NETWORK_WIFI_CONNECT_TIMEOUT_MS
+        int "Wi-Fi connection attempt watchdog (ms)"
+        range 1000 120000
+        default 20000
+        help
+            Maximum time to wait after esp_wifi_connect() succeeds for either
+            GOT_IP or STA_DISCONNECTED. Expiry cancels the stale attempt and
+            returns it to the normal bounded retry schedule.
+
     config OTA_PROGRESS_STEP_PERCENT
         int "Minimum OTA progress step (percent)"
         range 1 100
@@ -598,6 +607,15 @@ menu "Example Configuration"
             default 1800
             help
                 Continuous time in S5 silent state before returning to S3 standby.
+
+        config JULIA_SERVICE_INIT_TIMEOUT_SECONDS
+            int "Seconds to wait for initial cloud services"
+            range 5 300
+            default 30
+            help
+                Time after the behavior FSM starts to wait for both MQTT critical
+                subscriptions and the authenticated WSS session. Expiry starts one
+                S7.1 notice and leaves the persistent offline label visible.
 
         config JULIA_COMPANION_BRIGHTNESS_PERCENT
             int "S1 companion-state brightness (percent)"

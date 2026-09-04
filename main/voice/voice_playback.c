@@ -36,6 +36,9 @@ static uint32_t s_generation;
 static uint32_t s_rate;
 static bool s_active;
 static bool s_test;
+static const uint8_t *s_local_pcm;
+static size_t s_local_bytes;
+static size_t s_local_offset;
 static int64_t s_last_input_us;
 static uint32_t s_completion_generation;
 static esp_err_t s_completion_result;
@@ -78,7 +81,8 @@ static void playback_task(void *arg)
         uint32_t rate = s_rate;
         bool active = s_active;
         bool test = s_test;
-        bool ended = s_buffer.ended;
+        bool local = s_local_pcm != NULL;
+        bool ended = local ? s_local_offset >= s_local_bytes : s_buffer.ended;
         size_t queued = s_buffer.size;
         int64_t last_input = s_last_input_us;
         unlock();
@@ -125,6 +129,15 @@ static void playback_task(void *arg)
             } else {
                 ended = true;
             }
+        } else if (local && !ended) {
+            lock();
+            if (s_active && generation == s_generation && s_local_pcm != NULL) {
+                size_t remaining = s_local_bytes - s_local_offset;
+                bytes = remaining < sizeof(pcm) ? remaining : sizeof(pcm);
+                memcpy(pcm, s_local_pcm + s_local_offset, bytes);
+                s_local_offset += bytes;
+            }
+            unlock();
         } else if (queued > 0) {
             if (buffering_since == 0) buffering_since = now;
             if (buffering && !ended && queued < rate * 2U * PLAYBACK_PREBUFFER_MS / 1000U &&
@@ -222,6 +235,35 @@ esp_err_t voice_playback_start(uint32_t rate, bool self_test, uint32_t *generati
     pcm_buffer_reset(&s_buffer);
     s_rate = rate;
     s_test = self_test;
+    s_local_pcm = NULL;
+    s_local_bytes = 0;
+    s_local_offset = 0;
+    s_active = true;
+    s_completion_generation = 0;
+    s_last_input_us = esp_timer_get_time();
+    s_high_water = 0;
+    unlock();
+    xTaskNotifyGive(s_task);
+    return ESP_OK;
+}
+
+esp_err_t voice_playback_start_local(uint32_t rate, const uint8_t *pcm, size_t bytes,
+                                     uint32_t *generation)
+{
+    if (s_task == NULL) return ESP_ERR_INVALID_STATE;
+    if (generation == NULL || pcm == NULL || bytes == 0 || (bytes & 1U) ||
+        (rate != 16000 && rate != 24000)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    lock();
+    if (++s_generation == 0) ++s_generation;
+    *generation = s_generation;
+    pcm_buffer_reset(&s_buffer);
+    s_rate = rate;
+    s_test = false;
+    s_local_pcm = pcm;
+    s_local_bytes = bytes;
+    s_local_offset = 0;
     s_active = true;
     s_completion_generation = 0;
     s_last_input_us = esp_timer_get_time();
@@ -237,7 +279,7 @@ esp_err_t voice_playback_write(const uint8_t *pcm, size_t bytes)
     if (pcm == NULL || bytes == 0 || (bytes & 1U) || bytes > 1200U) return ESP_ERR_INVALID_ARG;
     lock();
     esp_err_t result = ESP_OK;
-    if (!s_active || s_test || s_buffer.ended) {
+    if (!s_active || s_test || s_local_pcm != NULL || s_buffer.ended) {
         result = ESP_ERR_INVALID_STATE;
     } else if (!pcm_buffer_write(&s_buffer, pcm, bytes)) {
         /* Abort the whole turn explicitly; never silently truncate speech. */
@@ -273,6 +315,9 @@ void voice_playback_stop(void)
     s_active = false;
     s_completion_generation = 0;
     pcm_buffer_reset(&s_buffer);
+    s_local_pcm = NULL;
+    s_local_bytes = 0;
+    s_local_offset = 0;
     unlock();
     xTaskNotifyGive(s_task);
 }

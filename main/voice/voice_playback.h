@@ -15,6 +15,9 @@
 esp_err_t voice_playback_init(audio_pcm_sink_t pcm_sink, void *ctx);
 /** 开始一轮回答或扬声器自检，返回本轮编号用于拒绝迟到的旧结果。 */
 esp_err_t voice_playback_start(uint32_t rate, bool self_test, uint32_t *generation);
+/** 直接播放生命周期覆盖整个应用的本地 PCM16 资源，不占用网络抖动缓冲。 */
+esp_err_t voice_playback_start_local(uint32_t rate, const uint8_t *pcm, size_t bytes,
+                                     uint32_t *generation);
 /** 追加一块服务器回答声音；缓冲区已满时明确返回错误。 */
 esp_err_t voice_playback_write(const uint8_t *pcm, size_t bytes);
 /** 声明服务器已经发完；设备仍会播完已接收声音和扬声器尾音后才报告完成。 */

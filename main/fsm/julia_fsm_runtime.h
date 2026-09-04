@@ -18,6 +18,13 @@ typedef void (*julia_fsm_state_observer_t)(julia_main_state_t main_state,
                                             fsm_event_t event,
                                             void *ctx);
 
+/** 与行为状态机正交的云端业务可用性；离线标签由它统一控制。 */
+typedef enum {
+    JULIA_SERVICE_CONNECTING = 0,
+    JULIA_SERVICE_ONLINE,
+    JULIA_SERVICE_OFFLINE,
+} julia_service_state_t;
+
 /**
  * 初始化设备行为管理。显示、声音和语音服务都可用时，开机完成后直接进入
  * 等待唤醒状态；关键能力不可用时仍保持开机状态，由应用报告严重故障。
@@ -42,6 +49,8 @@ julia_main_state_t julia_fsm_runtime_get_state(void);
 julia_s2_sub_state_t julia_fsm_runtime_get_s2_sub_state(void);
 /** 返回当前 S7 阶段；不在 S7 时返回 NONE。 */
 julia_s7_sub_state_t julia_fsm_runtime_get_s7_sub_state(void);
+/** 返回由 MQTT/WSS 断开和恢复事件维护的业务连接状态。 */
+julia_service_state_t julia_fsm_runtime_get_service_state(void);
 
 #ifdef __cplusplus
 }

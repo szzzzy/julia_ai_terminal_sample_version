@@ -126,6 +126,16 @@ int main(void)
     puts("PASS: short END drains the entire tail without prebuffer delay");
 
     reset();
+    assert(voice_playback_start_local(16000, (const uint8_t *)old_pcm,
+                                      sizeof(old_pcm), &current_generation) == ESP_OK);
+    assert(voice_playback_write((const uint8_t *)new_pcm, sizeof(new_pcm)) ==
+           ESP_ERR_INVALID_STATE);
+    run();
+    assert(old_samples == 320 && writes == 7);
+    assert(completion_generation == current_generation && completion_result == ESP_OK);
+    puts("PASS: embedded local PCM bypasses the network buffer and drains fully");
+
+    reset();
     inject_cancel = true;
     assert(voice_playback_start(16000, false, &current_generation) == ESP_OK);
     assert(voice_playback_write((const uint8_t *)old_pcm, sizeof(old_pcm)) == ESP_OK);
