@@ -14,7 +14,7 @@
  * 注意：
  * - 文件必须存在于 SD 卡（/sdcard 挂载由本模块或产品代码负责）；缺失时 WSS
  *   会话会向服务端回复 ERROR file_open_failed，日志同样可证明路径已打通；
- * - 命令只入队不阻塞：断线期间命令滞留在有界队列中，重连后自动执行；
+ * - 命令只入队不阻塞：离线时拒绝入队，演示会在会话恢复后重试；
  *   队列满时入队返回 ESP_ERR_NO_MEM，演示会等待后重试；
  * - 主动推送的服务端语义需要服务端配合（接受"不请自来"的 BEGIN FILE 流）。
  */
@@ -65,7 +65,7 @@ static const char *const DEMO_AUDIO_FILES[] = {
  * 其余错误（如参数/长度非法）立即向上返回，不做无意义重试。
  *
  * 由于同一 WSS 会话按序消费有界命令队列，这里
- * 在"入队成功"与"队列满"之间自然形成节拍：每批准一个文件、等会话跑完再入队下一个，
+ * 在"入队成功"与"队列满"之间自然形成节拍：外层在已预约/活动文件释放后才提交下一项，
  * 从而在多文件之间串行且不会把队列撑爆。
  *
  * @param[in] uri 文件 URI，不允许为 NULL。
@@ -93,6 +93,7 @@ static esp_err_t demo_enqueue_blocking(const char *uri)
 static esp_err_t demo_push_list_once(void)
 {
     for (size_t i = 0; i < DEMO_AUDIO_FILE_COUNT; i++) {
+        while (voice_service_file_busy()) vTaskDelay(pdMS_TO_TICKS(50));
         ESP_LOGI(TAG, "Explicit push [%u/%u]: %s",
                  (unsigned)(i + 1U), (unsigned)DEMO_AUDIO_FILE_COUNT, DEMO_AUDIO_FILES[i]);
         esp_err_t err = demo_enqueue_blocking(DEMO_AUDIO_FILES[i]);
@@ -100,8 +101,9 @@ static esp_err_t demo_push_list_once(void)
             ESP_LOGW(TAG, "Enqueue %s failed: %s", DEMO_AUDIO_FILES[i], esp_err_to_name(err));
             return ESP_FAIL;
         }
+        while (voice_service_file_busy()) vTaskDelay(pdMS_TO_TICKS(50));
     }
-    ESP_LOGI(TAG, "All %u files enqueued; WSS session will send BEGIN FILE ... END for each",
+    ESP_LOGI(TAG, "All %u file attempts completed; check WSS results for cancellation/errors",
              (unsigned)DEMO_AUDIO_FILE_COUNT);
     return ESP_OK;
 }
@@ -111,8 +113,7 @@ static esp_err_t demo_push_list_once(void)
  *        > 0 时按周期重复整个列表。
  *
  * 任务在后台阻塞式入队（见 demo_enqueue_blocking）。interval==0 时分发一次后
- * 永久休眠（vTaskDelay(portMAX_DELAY)），任务仍存活但不再动作——这是一种简单
- * 的"演示结束不销毁任务"做法，代价是保留一个 3KB 栈。
+ * 结束后删除自身任务，释放任务栈；重复启动仍由 s_demo_started 保持幂等。
  */
 static void voice_push_demo_task(void *parameter)
 {
@@ -130,7 +131,7 @@ static void voice_push_demo_task(void *parameter)
     }
 #else
     ESP_LOGI(TAG, "Single explicit transfer done; sleeping (enable interval to repeat)");
-    vTaskDelay(portMAX_DELAY);
+    vTaskDelete(NULL);
 #endif
 }
 

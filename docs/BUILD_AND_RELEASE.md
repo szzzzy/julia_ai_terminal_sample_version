@@ -52,8 +52,10 @@ idf.py -B build build
 | `CONFIG_JULIA_BOOT_STAGE_DELAY_MS`／`CONFIG_JULIA_BOOT_SETTLE_DELAY_MS` | 高电流外设间隔及 Wi-Fi 启动后的稳定期，默认250ms／1500ms |
 | `CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT` | 开机动画背光上限，默认25% |
 | `CONFIG_JULIA_BATTERY_DIAGNOSTICS`／`SAMPLE_COUNT` | GPIO9 BAT_ADC 启动阶段诊断、运行期监测及每次采样数 |
-| `CONFIG_JULIA_BATTERY_MONITOR_INTERVAL_SECONDS` | 运行期电量刷新周期，默认30秒 |
+| `CONFIG_JULIA_BATTERY_MONITOR_INTERVAL_SECONDS` | 运行期电量刷新与充电趋势判断周期，默认10秒 |
 | `CONFIG_JULIA_BATTERY_PRESENT_MIN_MV`／`MAX_MV` | BAT节点有效电池电压窗口，默认2500～4350mV |
+| `CONFIG_JULIA_BATTERY_LOW_ENTER_PERCENT`／`LOW_EXIT_PERCENT` | 低电量进入／恢复回差，默认15%／25% |
+| `CONFIG_JULIA_BATTERY_CHARGE_*` | 疑似充电所需的持续上升、拔电压降与确认样本数；默认40mV／80mV／3次 |
 | `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS` | S1→S3 驻留阈值，默认 600 秒 |
 | `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS`／`CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS` | S3→S6、S5→S3 驻留阈值，默认分别为 300 秒、1800 秒 |
 | `CONFIG_JULIA_SERVICE_INIT_TIMEOUT_SECONDS` | 启动后等待 MQTT关键订阅与 WSS认证会话全部就绪的期限，默认 30 秒；超时进入一次 S7.1并保持 `offline` 标签 |
@@ -200,8 +202,8 @@ idf.py -B build -p COM3 flash monitor
 
 ## 8. 发布限制
 
-- 当前 `CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS` 未在生效配置中定义，所用 SDK 的 HTTP client Kconfig／头文件也未提供代码引用的开关／取头接口。仅添加同名配置不能形成已验证的续传支持；206 恢复分支需要适配，当前可能返回 `RANGE_MISMATCH`。
-- 电源与业务状态检查钩子默认通过；产品启动验收钩子也默认通过，且业务外设初始化发生在 OTA 启动流程之后。
+- ETag／Content-Range 已通过 HTTP_EVENT_ON_HEADER 复制和校验，206 不再依赖不存在的响应头保存开关；真实断网恢复仍需按验收清单测试。
+- OTA 下载前须得到 FSM 的 S8 准入；待验证新镜像在关键应用初始化成功后才确认。电源提交钩子仍默认通过，本轮没有新增低电量升级阈值。
 - 当前未启用安全启动、Flash 加密和强制签名镜像；WSS 跳过服务器名称校验。生产启用安全功能前应制定密钥保管和恢复方案，eFuse 操作不得作为普通构建步骤执行。
 - 开发 Wi-Fi／认证信息可能被编译进镜像；分发固件前必须审查配置与凭据。
 - `build-ota-name` 是独立构建目录，不是唯一发布目录。本文统一以 `build` 示范，产物名称由实际工程名决定。

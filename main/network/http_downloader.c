@@ -46,6 +46,13 @@ static const char *TAG = "http_downloader";
 /** 下载缓冲区，由下载器独占使用；sink 返回后不得再引用其中的数据。 */
 static char s_buffer[HTTP_DOWNLOADER_BUFFER_SIZE];
 
+esp_err_t http_downloader_collect_headers(esp_http_client_event_t *event)
+{
+    if (event != NULL && event->event_id == HTTP_EVENT_ON_HEADER)
+        download_response_header(event->user_data, event->header_key, event->header_value);
+    return ESP_OK;
+}
+
 /** 构建系统嵌入的服务器根证书起始地址（main/CMakeLists.txt EMBED_TXTFILES）。 */
 extern const uint8_t server_cert_pem_start[] asm("_binary_ca_cert_pem_start");
 
@@ -102,9 +109,12 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
     size_t resume_offset = config->resume_offset;
     esp_http_client_handle_t client = NULL;
     bool client_open = false;
+    download_response_headers_t headers;
 
     /* 最多允许一次“服务器忽略 Range 后从零重试”，避免把完整对象追加到旧偏移。 */
     for (unsigned http_attempt = 0; http_attempt < 2; ++http_attempt) {
+        memset(&headers, 0, sizeof(headers));
+        result->etag[0] = '\0';
         /* 每次重试都创建新的 HTTP 客户端，确保上一次连接的响应状态不会被复用。 */
         esp_http_client_config_t http_config = {
             .url = config->url,
@@ -112,6 +122,8 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
                         config->cert_pem : (const char *)server_cert_pem_start,
             .timeout_ms = config->timeout_ms,
             .keep_alive_enable = true,
+            .event_handler = http_downloader_collect_headers,
+            .user_data = &headers,
         };
         if (config->skip_cert_common_name_check) {
             http_config.skip_cert_common_name_check = true;
@@ -164,10 +176,12 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
          * CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS；关闭时 response_etag 恒为 NULL，
          * 带 expected_etag 的续传会因“识别不到 ETag”被强制从零重试，Range 校验也会走
          * RANGE_MISMATCH 失败路径。需用断点续传时请确认该开关已开启。 */
-        char *response_etag = NULL;
-#if CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS
-        (void)esp_http_client_get_response_header(client, "ETag", &response_etag);
-#endif
+        if (headers.invalid) {
+            result->failure_reason = NATIVE_OTA_FAILURE_HTTP_STATUS_INVALID;
+            err_out = ESP_FAIL;
+            goto cleanup;
+        }
+        const char *response_etag = headers.etag[0] != '\0' ? headers.etag : NULL;
         if (response_etag != NULL && response_etag[0] != '\0') {
             strncpy(result->etag, response_etag, sizeof(result->etag) - 1U);
             result->etag[sizeof(result->etag) - 1U] = '\0';
@@ -217,10 +231,8 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
                 err_out = ESP_FAIL;
                 goto cleanup;
             }
-#if CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS
             /* Content-Range 进一步确认响应覆盖的区间和完整对象大小。 */
-            char *content_range = NULL;
-            (void)esp_http_client_get_response_header(client, "Content-Range", &content_range);
+            const char *content_range = headers.content_range;
             size_t range_start = 0;
             size_t range_end = 0;
             size_t range_total = 0;
@@ -234,12 +246,6 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
                 goto cleanup;
             }
             result->total_size = range_total;
-#else
-            ESP_LOGE(TAG, "Range resume requires saved HTTP response headers");
-            result->failure_reason = NATIVE_OTA_FAILURE_RANGE_MISMATCH;
-            err_out = ESP_FAIL;
-            goto cleanup;
-#endif
         } else {
             if (status_code != 200) {
                 ESP_LOGW(TAG, "Full download request returned transient/invalid HTTP status=%d",
@@ -248,7 +254,8 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
                 err_out = ESP_FAIL;
                 goto cleanup;
             }
-            if (content_length > 0 && content_length != (int64_t)config->expected_size) {
+            if (config->expected_size > 0 && content_length > 0 &&
+                content_length != (int64_t)config->expected_size) {
                 ESP_LOGE(TAG, "Full download response invalid: status=%d length=%" PRId64
                          " expected=%zu", status_code, content_length, config->expected_size);
                 result->failure_reason = NATIVE_OTA_FAILURE_HTTP_STATUS_INVALID;

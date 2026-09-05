@@ -18,6 +18,8 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "esp_http_client.h"
+#include "download_protocol.h"
 
 #include "ota_types.h"
 
@@ -27,6 +29,9 @@ extern "C" {
 
 /** 下载结果中的 ETag 文本容量，包含末尾 NUL。 */
 #define HTTP_DOWNLOADER_ETAG_SIZE 128
+
+/** event.user_data 指向本次请求的 download_response_headers_t。 */
+esp_err_t http_downloader_collect_headers(esp_http_client_event_t *event);
 
 /**
  * @brief 数据接收回调，下载器每读到一个网络块就同步调用一次。

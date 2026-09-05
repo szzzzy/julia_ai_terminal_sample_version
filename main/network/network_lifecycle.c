@@ -465,30 +465,38 @@ static void network_lifecycle_task(void *parameter)
                 ESP_LOGW(TAG, "Wi-Fi connect attempt timed out after %d ms; restarting",
                          CONFIG_NETWORK_WIFI_CONNECT_TIMEOUT_MS);
                 portENTER_CRITICAL(&s_state_lock);
-                s_connect_attempt_pending = false;
-                (void)network_schedule_retry_locked();
+                bool timed_out = !s_ip_ready && s_connect_attempt_pending &&
+                                 esp_timer_get_time() >= s_next_retry_us;
+                if (timed_out) {
+                    s_connect_attempt_pending = false;
+                    (void)network_schedule_retry_locked();
+                }
                 portEXIT_CRITICAL(&s_state_lock);
                 /* 先安排重试再请求断开；即使驱动不补发事件，Task 也不会失去截止时间。 */
-                (void)esp_wifi_disconnect();
+                if (timed_out) (void)esp_wifi_disconnect();
                 continue;
             }
 #if CONFIG_NETWORK_WIFI_INITIAL_DIAGNOSTIC_SCAN
             network_log_initial_scan();
 #endif
-            esp_err_t err = esp_wifi_connect();
-            if (err == ESP_OK) {
-                /* 正常结果仍由 GOT_IP/STA_DISCONNECTED 收口；看门狗防止驱动事件
-                 * 丢失后永久停在“连接中”。 */
-                portENTER_CRITICAL(&s_state_lock);
+            /* 调用前预约看门狗；成功返回不能覆写已经到达的 GOT_IP/断开事件。 */
+            portENTER_CRITICAL(&s_state_lock);
+            bool can_connect = !s_ip_ready && !s_connect_attempt_pending;
+            if (can_connect) {
                 s_connect_attempt_pending = true;
                 s_next_retry_us = esp_timer_get_time() +
                     (int64_t)CONFIG_NETWORK_WIFI_CONNECT_TIMEOUT_MS * 1000LL;
-                portEXIT_CRITICAL(&s_state_lock);
-            } else {
+            }
+            portEXIT_CRITICAL(&s_state_lock);
+            if (!can_connect) continue;
+            esp_err_t err = esp_wifi_connect();
+            if (err != ESP_OK) {
                 ESP_LOGW(TAG, "esp_wifi_connect failed: %s", esp_err_to_name(err));
                 portENTER_CRITICAL(&s_state_lock);
-                s_connect_attempt_pending = false;
-                (void)network_schedule_retry_locked();
+                if (s_connect_attempt_pending && !s_ip_ready) {
+                    s_connect_attempt_pending = false;
+                    (void)network_schedule_retry_locked();
+                }
                 portEXIT_CRITICAL(&s_state_lock);
             }
             continue;

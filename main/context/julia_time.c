@@ -43,10 +43,7 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
  */
 static bool datetime_valid(const board_rtc_datetime_t *value)
 {
-    return value != NULL && value->year >= 2024U && value->year <= 2069U &&
-           value->month >= 1U && value->month <= 12U &&
-           value->day >= 1U && value->day <= 31U &&
-           value->hour < 24U && value->minute < 60U && value->second < 60U;
+    return board_rtc_datetime_valid(value) && value->year >= 2024U;
 }
 
 /*

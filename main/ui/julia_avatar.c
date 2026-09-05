@@ -83,6 +83,8 @@ static julia_avatar_dialog_phase_t s_dialog_phase = JULIA_AVATAR_DIALOG_IDLE;
 static bool s_dozing;
 static bool s_offline;
 static bool s_battery_present;
+static bool s_battery_charging;
+static bool s_battery_low;
 static uint8_t s_battery_percent;
 static uint16_t s_battery_voltage_mv;
 /* 已应用相位与请求相位分开保存；LVGL 锁超时时保留请求，后续刷新可以安全重试。 */
@@ -132,12 +134,14 @@ void julia_avatar_set_offline(bool offline)
     lvgl_port_unlock();
 }
 
-void julia_avatar_set_battery_status(bool present, uint8_t percent,
-                                     uint16_t voltage_mv)
+void julia_avatar_set_battery_status(bool present, bool charging, bool low,
+                                     uint8_t percent, uint16_t voltage_mv)
 {
     if (percent > 100U) percent = 100U;
     portENTER_CRITICAL(&s_phase_lock);
     s_battery_present = present;
+    s_battery_charging = charging;
+    s_battery_low = low;
     s_battery_percent = percent;
     s_battery_voltage_mv = voltage_mv;
     portEXIT_CRITICAL(&s_phase_lock);
@@ -147,11 +151,14 @@ void julia_avatar_set_battery_status(bool present, uint8_t percent,
         lv_obj_add_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
     } else {
         char text[16];
-        snprintf(text, sizeof(text), "BAT %u%%", percent);
+        snprintf(text, sizeof(text), charging ? "CHG %u%%" :
+                                             low ? "LOW %u%%" : "BAT %u%%",
+                 percent);
         lv_label_set_text(s_battery_label, text);
         lv_obj_set_style_text_color(
             s_battery_label,
-            percent <= 15U ? lv_palette_main(LV_PALETTE_RED) : lv_color_black(),
+            charging ? lv_palette_main(LV_PALETTE_GREEN) :
+            low ? lv_palette_main(LV_PALETTE_RED) : lv_color_black(),
             LV_PART_MAIN);
         lv_obj_clear_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
     }
@@ -668,20 +675,28 @@ esp_err_t julia_avatar_init(void)
     lv_obj_set_style_bg_opa(s_battery_label, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_clear_flag(s_battery_label, LV_OBJ_FLAG_SCROLLABLE);
     bool battery_present;
+    bool battery_charging;
+    bool battery_low;
     uint8_t battery_percent;
     uint16_t battery_voltage_mv;
     portENTER_CRITICAL(&s_phase_lock);
     battery_present = s_battery_present;
+    battery_charging = s_battery_charging;
+    battery_low = s_battery_low;
     battery_percent = s_battery_percent;
     battery_voltage_mv = s_battery_voltage_mv;
     portEXIT_CRITICAL(&s_phase_lock);
     if (battery_present) {
         char battery_text[16];
-        snprintf(battery_text, sizeof(battery_text), "BAT %u%%", battery_percent);
+        snprintf(battery_text, sizeof(battery_text),
+                 battery_charging ? "CHG %u%%" :
+                 battery_low ? "LOW %u%%" : "BAT %u%%",
+                 battery_percent);
         lv_label_set_text(s_battery_label, battery_text);
         lv_obj_set_style_text_color(
             s_battery_label,
-            battery_percent <= 15U ? lv_palette_main(LV_PALETTE_RED) : lv_color_black(),
+            battery_charging ? lv_palette_main(LV_PALETTE_GREEN) :
+            battery_low ? lv_palette_main(LV_PALETTE_RED) : lv_color_black(),
             LV_PART_MAIN);
     } else {
         lv_label_set_text(s_battery_label, "BAT --");
@@ -753,7 +768,7 @@ esp_err_t julia_avatar_play_boot_sequence(void)
     esp_err_t fade_err = julia_backlight_fade_to(
         CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT, 600);
     if (fade_err == ESP_OK) {
-        fade_err = julia_backlight_wait_fade(500);
+        fade_err = julia_backlight_wait_fade(700);
     }
     if (fade_err != ESP_OK) {
         ESP_LOGW(TAG, "Boot backlight fade failed: %s; using %d%% brightness",

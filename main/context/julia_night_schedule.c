@@ -19,6 +19,8 @@
 #include "julia_time.h"
 #include "sdkconfig.h"
 
+#if CONFIG_JULIA_NIGHT_SLEEP_ENABLE
+
 #define NIGHT_SCHEDULE_TASK_STACK_SIZE 3072
 #define NIGHT_SCHEDULE_TASK_PRIORITY   2
 #define INVALID_HOUR                   (-1)
@@ -148,3 +150,9 @@ esp_err_t julia_night_schedule_init(void)
              CONFIG_JULIA_NIGHT_SCHEDULE_POLL_MS);
     return ESP_OK;
 }
+#else
+esp_err_t julia_night_schedule_init(void)
+{
+    return ESP_ERR_NOT_SUPPORTED;
+}
+#endif

@@ -6,7 +6,7 @@
  * 只能在普通任务中调用。
  *
  * 对外时间使用普通十进制字段，不暴露芯片内部 BCD 格式。1970～2069 是本项目为
- * 两位年份选择的软件映射；写接口只验证该年份范围，其它日期字段由调用者验证。
+ * 两位年份选择的软件映射；为保持旧固件兼容，本轮保留该格式并验证完整日期。
  */
 #pragma once
 
@@ -30,7 +30,10 @@ typedef struct {
 esp_err_t board_rtc_init(void);
 /** 查询 RTC 是否已经可以进行时间读写。 */
 bool board_rtc_ready(void);
-/** 读取本地日期时间；成功只表示 I2C/BCD 转换完成，调用方仍须验证日期可信度。 */
+/** 读取本地日期时间；停振或非法日期返回 INVALID_STATE，不更新输出。 */
 esp_err_t board_rtc_read_time(board_rtc_datetime_t *time);
-/** 保存本地日期时间；本层只检查年份为 1970～2069，不校验其它字段。 */
+/** 保存有效公历日期，保留 1970～2069 年份编码以兼容旧固件。 */
 esp_err_t board_rtc_set_time(const board_rtc_datetime_t *time);
+bool board_rtc_datetime_valid(const board_rtc_datetime_t *time);
+bool board_rtc_encode(const board_rtc_datetime_t *time, uint8_t data[7]);
+bool board_rtc_decode(const uint8_t data[7], uint16_t year_base, board_rtc_datetime_t *time);

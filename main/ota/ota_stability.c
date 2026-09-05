@@ -1,3 +1,4 @@
+#include "download_protocol.h"
 /**
  * @file    ota_stability.c
  * @brief   OTA 恢复、完整性与提交安全增强实现。
@@ -197,33 +198,7 @@ void ota_stability_quarantine_record(ota_resume_record_t *record,
 bool ota_stability_parse_content_range(const char *value, size_t *range_start,
                                        size_t *range_end, size_t *total_size)
 {
-    if (value == NULL || range_start == NULL || range_end == NULL || total_size == NULL ||
-        strncmp(value, "bytes ", 6) != 0) {
-        return false;
-    }
-
-    /* 使用无符号解析并逐段检查分隔符，避免把部分合法数字当成完整 Range。 */
-    char *end = NULL;
-    unsigned long long start = strtoull(value + 6, &end, 10);
-    if (end == value + 6 || *end != '-') {
-        return false;
-    }
-    unsigned long long last = strtoull(end + 1, &end, 10);
-    if (end == NULL || *end != '/') {
-        return false;
-    }
-    unsigned long long total = strtoull(end + 1, &end, 10);
-    if (*end != '\0' || start > SIZE_MAX || last < start || total == 0U ||
-        total > SIZE_MAX || last >= total) {
-        return false;
-    }
-
-    /* 只在所有边界检查通过后写出结果，调用者不会看到半解析状态。 */
-    /* 三个输出值的单位均为字节；range_end 是闭区间终点，total 是完整对象长度。 */
-    *range_start = (size_t)start;
-    *range_end = (size_t)last;
-    *total_size = (size_t)total;
-    return true;
+    return download_parse_content_range(value, range_start, range_end, total_size);
 }
 
 /**

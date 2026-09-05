@@ -33,16 +33,6 @@
 static const char *TAG = "PCF85063";
 static i2c_master_dev_handle_t s_dev;
 
-static uint8_t dec_to_bcd(unsigned value)
-{
-    return (uint8_t)(((value / 10U) << 4U) | (value % 10U));
-}
-
-static uint8_t bcd_to_dec(uint8_t value)
-{
-    return (uint8_t)(((value >> 4U) * 10U) + (value & 0x0fU));
-}
-
 /* I2C helper 最多阻塞 100 ms，只能在 s_dev 完成初始化后由任务上下文调用。 */
 static esp_err_t write_regs(uint8_t reg, const uint8_t *data, size_t length)
 {
@@ -100,8 +90,7 @@ bool board_rtc_ready(void)
 /**
  * @brief 读取 RTC 时间（7 字节，从秒寄存器 0x04 起连续读）。
  *
- * 连续读取可以保持寄存器顺序，但本层只屏蔽状态／保留位并转换 BCD，不判定 OS
- * 振荡停止标志，也不校验所得日期。调用方必须用 datetime_valid() 拒绝不可信时间。
+ * 连续读取完整日期；OS 停振标志、非法 BCD 或非法公历日期均不可用于恢复墙钟。
  * @param[out] time 解析后的时间结构。
  * @return ESP_OK 成功；ESP_ERR_INVALID_ARG time 为空。
  */
@@ -111,30 +100,19 @@ esp_err_t board_rtc_read_time(board_rtc_datetime_t *time)
     uint8_t data[7];
     ESP_RETURN_ON_ERROR(read_regs(PCF85063_SECONDS_REG, data, sizeof(data)),
                         TAG, "read time failed");
-    time->second = bcd_to_dec(data[0] & 0x7fU);
-    time->minute = bcd_to_dec(data[1] & 0x7fU);
-    time->hour = bcd_to_dec(data[2] & 0x3fU);
-    time->day = bcd_to_dec(data[3] & 0x3fU);
-    time->dotw = bcd_to_dec(data[4] & 0x07U);
-    time->month = bcd_to_dec(data[5] & 0x1fU);
-    time->year = (uint16_t)(bcd_to_dec(data[6]) + PCF85063_YEAR_OFFSET);
-    return ESP_OK;
+    return board_rtc_decode(data, PCF85063_YEAR_OFFSET, time)
+               ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
 /**
  * @brief 写 RTC 时间（7 字节，从秒寄存器 0x04 起连续写，BCD 编码）。
  *
- * 只检查指针和 1970～2069 年份范围；月、日和时分秒必须由调用方先验证。写入时
+ * 校验完整公历日期，保留旧固件的 1970～2069 年份编码。写入时
  * 不停止振荡器，跨秒边界可能产生轻微偏差，不能把成功返回理解为精确校时确认。
  */
 esp_err_t board_rtc_set_time(const board_rtc_datetime_t *time)
 {
-    if (time == NULL || time->year < PCF85063_YEAR_OFFSET ||
-        time->year > PCF85063_YEAR_OFFSET + 99U) return ESP_ERR_INVALID_ARG;
-    uint8_t data[7] = {
-        dec_to_bcd(time->second), dec_to_bcd(time->minute), dec_to_bcd(time->hour),
-        dec_to_bcd(time->day), dec_to_bcd(time->dotw), dec_to_bcd(time->month),
-        dec_to_bcd((unsigned)time->year - PCF85063_YEAR_OFFSET),
-    };
+    uint8_t data[7];
+    if (!board_rtc_encode(time, data)) return ESP_ERR_INVALID_ARG;
     return write_regs(PCF85063_SECONDS_REG, data, sizeof(data));
 }

@@ -63,11 +63,11 @@ void julia_avatar_set_status_text(const char *text);
 void julia_avatar_set_offline(bool offline);
 
 /**
- * 设置屏幕顶部的电量提示。未检测到有效电池电压时隐藏；15%及以下显示为红色。
- * voltage_mv 作为监测快照保留，百分比是单节锂电池带载电压的近似换算。
+ * 设置屏幕顶部的正交电量提示。充电优先显示绿色 CHG，低电量显示红色 LOW，
+ * 正常显示 BAT；未检测到有效电池电压时隐藏。百分比是带载电压的近似换算。
  */
-void julia_avatar_set_battery_status(bool present, uint8_t percent,
-                                     uint16_t voltage_mv);
+void julia_avatar_set_battery_status(bool present, bool charging, bool low,
+                                     uint8_t percent, uint16_t voltage_mv);
 
 /** 返回对象树与刷新 Task 均已创建的瞬时快照；不作为跨任务内存同步屏障。 */
 bool julia_avatar_is_ready(void);

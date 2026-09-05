@@ -42,6 +42,12 @@ void julia_fsm_runtime_set_state_observer(julia_fsm_state_observer_t observer,
  */
 esp_err_t julia_fsm_runtime_post(fsm_event_t event);
 /**
+ * 等待 owner 消费事件并完成呈现；ESP_OK 表示事件已应用，INVALID_STATE 表示拒绝。
+ * 只供语音/OTA 任务的顺序控制使用；不得持有 owner 所需的锁，也不得从 ISR、
+ * timer callback 或状态 observer 调用。入队后一直等待消费，保证确认对象生命周期。
+ */
+esp_err_t julia_fsm_runtime_post_sync(fsm_event_t event);
+/**
  * 优先报告严重故障。设备会保存故障记录、显示故障状态并按配置尝试复位；
  * 同类故障短时间重复超过上限后停止自动复位，等待人工处理。
  */

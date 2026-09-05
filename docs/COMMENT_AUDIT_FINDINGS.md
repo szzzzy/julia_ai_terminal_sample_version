@@ -14,8 +14,8 @@
 | VOICE-06 | 命令确认 | MQTT 仅支持 MIC_START、MIC_STOP、FILE_SEND，没有 vstatus 应用回执 | 服务器不能把 PUBACK 当作执行成功；定义实际回执再对接 |
 | FILE-01 | 文件与语音 | 文件按块推进、读取失败关闭会话；语音启动可发 file_cancelled 结束文件区间 | 服务端需处理取消并丢弃部分文件；SD 底层 I/O 时延仍需测试 |
 | FILE-02 | SD 生命周期 | `sd_card_start()` 只尝试挂载，没有后台重试／拔卡检测；文件服务的 SD 锁是弱默认实现 | 验证无卡、失败挂载和读取中断；建立共享访问和卡状态管理 |
-| HW-01 | 共享 I2C／IMU | TCA9554 初始化未检查 mutex 分配；QMI8658 为每轴 ±64dps，而默认 120dps 向量门限高于三轴满量程约 111dps | 补齐低内存失败清理；重新选择陀螺仪量程或门限并上板标定 |
-| DISPLAY-01 | 显示驱动契约 | `julia_display_set_backlight()` 只有声明；ST77916 `swap_xy` 的 QSPI 路径绕过命令封装并忽略错误；panel 关屏错误会被日志化后吞掉 | 新代码使用 `julia_backlight`；修复 QSPI 命令与错误传播后再开放对应 API |
+| HW-01 | 共享 I2C／IMU | TCA9554 初始化失败清理已修复；QMI8658 为每轴 ±64dps，而默认 120dps 向量门限高于三轴满量程约 111dps | 验证低内存恢复；陀螺仪量程或门限仍需上板标定 |
+| DISPLAY-01 | 显示驱动契约 | `julia_display_set_backlight()` 只有声明；ST77916 `swap_xy` 的 QSPI 路径绕过命令封装并忽略错误；panel 开关错误现在保留为待重试状态 | 新代码使用 `julia_backlight`；修复 QSPI 命令与错误传播后再开放对应 API |
 
 源码定位：[voice_service.c](../main/voice/voice_service.c)、[wss_transport.c](../main/voice/wss_transport.c)、[board_audio.c](../components/julia_board_audio/board_audio.c)、[sd_card.c](../main/storage/sd_card.c)、[tca9554.c](../main/hardware/tca9554.c)、[qmi8658_shared.c](../main/hardware/qmi8658_shared.c)、[esp_lcd_st77916.c](../main/display/esp_lcd_st77916.c)。
 
@@ -23,13 +23,13 @@
 
 ### Range 恢复
 
-OTA 有断点存储和 Range 请求逻辑，但当前配置未定义 `CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS`；ESP-IDF 5.5.4 对应 HTTP client 的 Kconfig／头文件未提供该开关和代码使用的 `esp_http_client_get_response_header()`。206 恢复分支进入 `RANGE_MISMATCH`。不能通过只往 defaults 写一个符号就宣称续传可用。
+OTA 和音频下载现通过 HTTP_EVENT_ON_HEADER 收集响应头，严格校验 Content-Range／ETag，已移除对不存在的 SDK 开关/取头 API 的依赖。合法 206 不再因客户端缺少该能力被隔离。
 
 完整 200 下载与恢复下载必须分别验收；服务器忽略 Range 后的从零下载，也不能记作 Range 恢复通过。源码定位：[ota_engine.c](../main/ota/ota_engine.c)、[http_downloader.c](../main/network/http_downloader.c)。
 
 ### 提交与启动验收
 
-`native_ota_check_power()` 和 `native_ota_check_business_state()` 默认返回成功，没有真实电量、充电或对话忙碌输入。`ota_boot_health_product_check()` 默认通过，且应用显示／音频初始化位于 OTA 启动确认之后。因此通用启动健康检查不能替代产品外设验收。
+OTA 下载已经通过 FSM 确认准入，S2/S4/S5/S6 的清单以已有 deferred 状态结束本次处理；任务退出（包括链路错误）回到 S3。新镜像只有在关键显示、音频、语音和 FSM 初始化成功后才确认。电源提交钩子与额外产品自检钩子仍为预留接口，本轮未新增电量阈值或在线服务健康标准。
 
 准入名称应与工程名 `julia_fused_base` 一致。镜像名、产品 ID、硬件版本、应用版本和安全版本分别校验，不能混用。源码定位：[ota_stability.c](../main/ota/ota_stability.c)、[ota_boot_health.c](../main/ota/ota_boot_health.c)、[main.c](../main/app/main.c)。
 

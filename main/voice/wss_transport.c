@@ -27,7 +27,7 @@
  *   CONFIG_WSS_PONG_TIMEOUT_SECONDS 内收到任意下行帧（PONG 或其他帧都能证明
  *   链路存活）就取消待定探测并重置保活计时，只有该窗口内完全没有下行帧才判定
  *   链路死亡并重连自愈；
- *   写方向的 WANT_READ/WANT_WRITE/EAGAIN 在同一帧 2 秒绝对期限内保持原参数
+ *   写方向的 WANT_READ/WANT_WRITE/EAGAIN 在同一帧可配置预算内保持原参数
  *   重试；期限耗尽或永久错误才结束会话，既容忍短时背压也避免永久卡死；
  * - Bearer token 优先取 COMM_DEVICE_AUTH_TOKEN_VALUE，为空时回退 CONFIG_WSS_TOKEN；
  * - 服务器证书仍由 server_certs/ca_cert.pem 内嵌信任锚校验，不引入新证书。
@@ -80,7 +80,7 @@
  * - s_started / s_starting / s_session_ready / s_requested_end_reason 由
  *   s_start_lock 保护，允许普通任务提交结束请求但不直接修改 owner 状态。
  * - s_cmd_queue 是跨任务的有界通道：外部任务入队（非阻塞），会话任务出队。
- * - 会话任务只在 recv/send 上分别受 20ms 读取超时和 2s 帧写期限约束；
+ * - 会话任务分别使用 20ms 读取超时和默认 3.5s 帧写重试预算；
  *   控制分派和上层 on_poll 也必须保持有界。
  */
 
@@ -135,7 +135,10 @@ static const char *TAG = "wss_transport";
 /** 单次会话写调用的 SO_SNDTIMEO；暂时错误仍由帧级绝对期限约束重试。 */
 #define WSS_WRITE_TIMEOUT_MS 500
 /** 单个 WebSocket 帧的头与载荷共享同一个绝对写入期限。 */
-#define WSS_FRAME_WRITE_DEADLINE_MS 2000
+#ifndef CONFIG_WSS_FRAME_WRITE_BUDGET_MS
+#define CONFIG_WSS_FRAME_WRITE_BUDGET_MS 3500
+#endif
+#define WSS_FRAME_WRITE_DEADLINE_MS CONFIG_WSS_FRAME_WRITE_BUDGET_MS
 /** 帧内读取允许的连续空闲超时次数，超过即判定链路故障，防止中途死亡挂死。 */
 #define WSS_READ_EAGAIN_BUDGET 5
 /** HTTP 升级响应读取允许的连续空闲超时次数。 */
@@ -329,12 +332,22 @@ static bool wss_tls_write_is_transient(void *ctx, int result,
             (system_error == EAGAIN || system_error == EWOULDBLOCK));
 }
 
+static bool wss_tls_write_should_abort(void *ctx)
+{
+    (void)ctx;
+    portENTER_CRITICAL(&s_start_lock);
+    bool abort = s_requested_end_reason != WSS_TRANSPORT_END_NONE;
+    portEXIT_CRITICAL(&s_start_lock);
+    return abort;
+}
+
 static const wss_tx_writer_ops_t s_tls_writer_ops = {
     .ctx = NULL,
     .write = wss_tls_write_once,
     .now_us = wss_tls_write_now_us,
     .wait_once = wss_tls_write_wait_once,
     .is_transient = wss_tls_write_is_transient,
+    .should_abort = wss_tls_write_should_abort,
 };
 
 /** 设置 socket 读取超时。HTTP 升级和实时会话使用不同的时间预算。 */
@@ -376,6 +389,14 @@ static esp_err_t wss_tls_write_all(const void *data, size_t len,
     wss_tx_write_result_t result = wss_tx_write_all(
         &s_tls_writer_ops, data, len, frame_deadline_us, &stats);
     int64_t elapsed_us = stats.finished_us - stats.started_us;
+    if (result == WSS_TX_WRITE_ABORTED) {
+        portENTER_CRITICAL(&s_start_lock);
+        wss_transport_end_reason_t reason = s_requested_end_reason;
+        portEXIT_CRITICAL(&s_start_lock);
+        s_last_write_end_reason = reason;
+        wss_set_owner_end_reason(reason);
+        return ESP_FAIL;
+    }
     if (result == WSS_TX_WRITE_OK) {
         if (stats.transient_retries > 0) {
             ESP_LOGW(TAG,
@@ -1058,7 +1079,7 @@ static bool wss_connect(void)
     if (esp_tls_get_conn_sockfd(tls, &sockfd) == ESP_OK && sockfd >= 0) {
         wss_set_receive_timeout(sockfd, WSS_HANDSHAKE_READ_TIMEOUT_MS);
         /* 单次 send 由 SO_SNDTIMEO 限制；返回暂时错误后仍保持同一写入区间，
-         * 由 WebSocket 帧共享的 2 秒绝对期限限制总重试时间。 */
+         * 帧共享预算限制后续重试；已经进入的单次写调用可能超过预算。 */
         struct timeval wtv;
         wtv.tv_sec = WSS_WRITE_TIMEOUT_MS / 1000;
         wtv.tv_usec = (WSS_WRITE_TIMEOUT_MS % 1000) * 1000;

@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -11,7 +13,7 @@ extern "C" {
 /**
  * @brief 在屏幕、语音和网络业务启动前确认当前固件是否可以继续运行。
  *
- * 如果当前是刚升级的新固件，则执行本地健康检查；通过后正式确认，失败时立即
+ * 如果当前是刚升级的新固件，则执行本地健康检查；通过后仍保持待确认，失败时立即
  * 请求回滚。已经由 bootloader 回滚的情况会与之前任务对账并报告服务器。
  * 没有可恢复版本或连本地状态都无法确认时进入安全模式，不继续启动业务。
  *
@@ -23,6 +25,12 @@ extern "C" {
  *       永久停留，因此只能在普通任务上下文调用。
  */
 void ota_boot_flow_run(void);
+
+/**
+ * app_main 完成关键显示、音频、语音和 FSM 初始化后调用一次；不以联网作为条件。
+ * app_healthy=false 时待验证镜像立即回滚；已确认镜像仍走应用原有故障处理。
+ */
+void ota_boot_flow_complete(bool app_healthy);
 
 #ifdef __cplusplus
 }

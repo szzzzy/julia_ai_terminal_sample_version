@@ -648,6 +648,8 @@ esp_err_t native_ota_report_event(const native_ota_report_context_t *context,
         s_progress_valid = false;
         s_last_progress_percent = 0;
         s_last_progress_ms = 0;
+    } else {
+        s_progress_valid = false;
     }
     ota_report_give_lock();
 
@@ -738,7 +740,7 @@ esp_err_t native_ota_report_progress(const native_ota_report_context_t *context,
  *
  * @note 不在本函数中删除 NVS 事件；删除仅由 PUBACK 路径触发。
  */
-esp_err_t native_ota_report_flush_pending(void)
+static esp_err_t ota_report_flush_pending(bool include_progress)
 {
     if (!s_initialized) {
         return ESP_ERR_INVALID_STATE;
@@ -781,7 +783,7 @@ esp_err_t native_ota_report_flush_pending(void)
     }
 
     if (ota_report_take_lock()) {
-        if (s_progress_valid) {
+        if (include_progress && s_progress_valid) {
             native_ota_report_message_t progress = s_latest_progress;
             ota_report_give_lock();
             (void)transport(&progress, transport_context);
@@ -790,6 +792,16 @@ esp_err_t native_ota_report_flush_pending(void)
         }
     }
     return ESP_OK;
+}
+
+esp_err_t native_ota_report_flush_pending(void)
+{
+    return ota_report_flush_pending(true);
+}
+
+esp_err_t native_ota_report_retry_pending(void)
+{
+    return ota_report_flush_pending(false);
 }
 
 /**

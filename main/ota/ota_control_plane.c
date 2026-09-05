@@ -1,3 +1,4 @@
+#include "download_protocol.h"
 /**
  * @file    ota_control_plane.c
  * @brief   在下载前拒绝串台、迟到、过期或字段不可信的固件清单。
@@ -304,52 +305,7 @@ static int ota_control_plane_compare_version(const ota_control_plane_version_t *
  */
 static bool ota_control_plane_url_host_allowed(const char *url)
 {
-    static const char *scheme = "https://";
-
-    if (url == NULL || strncmp(url, scheme, strlen(scheme)) != 0) {
-        return false;
-    }
-
-    /* 端口、路径、查询和片段都不属于主机名；允许列表比较必须停在这些分隔符之前。 */
-    const char *host_start = url + strlen(scheme);
-    /* host_len 是主机名文本长度，单位为字节；它不包含 URL 分隔符。 */
-    size_t host_len = strcspn(host_start, "/?#:");
-    if (host_len == 0U) {
-        return false;
-    }
-
-    const char *allowlist = CONFIG_OTA_ALLOWED_URL_HOSTS;
-    if (allowlist[0] == '\0') {
-        ESP_LOGW(TAG, "OTA URL host allowlist is empty; enable it for production builds");
-        return true;
-    }
-
-    /* 允许列表是逗号分隔文本，逐项去除空格后做精确主机名匹配，不允许后缀模糊匹配。 */
-    const char *cursor = allowlist;
-    while (*cursor != '\0') {
-        while (*cursor == ',' || *cursor == ' ' || *cursor == '\t') {
-            ++cursor;
-        }
-
-        const char *token_start = cursor;
-        while (*cursor != '\0' && *cursor != ',') {
-            ++cursor;
-        }
-        const char *token_end = cursor;
-        while (token_end > token_start &&
-               (token_end[-1] == ' ' || token_end[-1] == '\t')) {
-            --token_end;
-        }
-        if ((size_t)(token_end - token_start) == host_len &&
-            strncasecmp(token_start, host_start, host_len) == 0) {
-            return true;
-        }
-        if (*cursor == ',') {
-            ++cursor;
-        }
-    }
-
-    return false;
+    return download_url_host_allowed(url, CONFIG_OTA_ALLOWED_URL_HOSTS);
 }
 
 /**

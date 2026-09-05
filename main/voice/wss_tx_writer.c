@@ -29,6 +29,10 @@ wss_tx_write_result_t wss_tx_write_all(const wss_tx_writer_ops_t *ops,
     stats->started_us = ops->now_us(ops->ctx);
 
     while (stats->bytes_sent < len) {
+        if (ops->should_abort != NULL && ops->should_abort(ops->ctx)) {
+            finish_stats(ops, stats);
+            return WSS_TX_WRITE_ABORTED;
+        }
         /* 帧头与载荷可以分两次调用本函数，但共享同一个绝对截止时间；因此即使
          * 每次都有少量正向进展，也不能把一个 WebSocket 帧无限拖长。 */
         if (ops->now_us(ops->ctx) >= deadline_us) {

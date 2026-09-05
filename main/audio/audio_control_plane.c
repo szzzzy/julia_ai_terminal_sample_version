@@ -1,3 +1,4 @@
+#include "download_protocol.h"
 /**
  * @file    audio_control_plane.c
  * @brief   拒绝迟到、串台或字段不可信的音频素材响应，只把安全清单交给下载模块。
@@ -151,47 +152,7 @@ static bool audio_control_plane_get_i64(const cJSON *item, int64_t *value)
  */
 static bool audio_control_plane_url_host_allowed(const char *url)
 {
-    static const char *scheme = "https://";
-
-    if (url == NULL || strncmp(url, scheme, strlen(scheme)) != 0) {
-        return false;
-    }
-
-    const char *host_start = url + strlen(scheme);
-    size_t host_len = strcspn(host_start, "/?#:");
-    if (host_len == 0U) {
-        return false;
-    }
-
-    const char *allowlist = CONFIG_OTA_ALLOWED_URL_HOSTS;
-    if (allowlist[0] == '\0') {
-        ESP_LOGW(TAG, "Audio URL host allowlist is empty; enable it for production builds");
-        return true;
-    }
-
-    const char *cursor = allowlist;
-    while (*cursor != '\0') {
-        while (*cursor == ',' || *cursor == ' ' || *cursor == '\t') {
-            ++cursor;
-        }
-        const char *token_start = cursor;
-        while (*cursor != '\0' && *cursor != ',') {
-            ++cursor;
-        }
-        const char *token_end = cursor;
-        while (token_end > token_start &&
-               (token_end[-1] == ' ' || token_end[-1] == '\t')) {
-            --token_end;
-        }
-        if ((size_t)(token_end - token_start) == host_len &&
-            strncasecmp(token_start, host_start, host_len) == 0) {
-            return true;
-        }
-        if (*cursor == ',') {
-            ++cursor;
-        }
-    }
-    return false;
+    return download_url_host_allowed(url, CONFIG_OTA_ALLOWED_URL_HOSTS);
 }
 
 /* 实现说明：这里只"构造并关联"，不发送。每次成功生成都会刷新 s_last_request_id，

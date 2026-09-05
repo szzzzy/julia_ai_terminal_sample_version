@@ -28,6 +28,7 @@ set(srcs
     "network/network_lifecycle.c"
     "network/mqtt_comm.c"
     "network/http_downloader.c"
+    "network/download_protocol.c"
 
     # 语音服务：纯传输层 + 业务协议 + URI 映射 + 演示。
     "voice/wss_transport.c"
@@ -48,6 +49,7 @@ set(srcs
     "hardware/breathing_led.c"
     "hardware/julia_led.c"
     "hardware/pcf85063_shared.c"
+    "hardware/rtc_calendar.c"
     "hardware/qmi8658_shared.c"
 
     # Local wall-clock restore and SNTP-to-RTC synchronization.
@@ -90,6 +92,7 @@ set(srcs
 )
 set(priv_requires
     esp_http_client
+    http_parser
     app_update
     bootloader_support
     esp_hw_support
@@ -100,6 +103,7 @@ set(priv_requires
     esp_driver_gpio
     esp_netif
     esp_wifi
+    protocol_examples_common
     esp_timer
     esp_driver_rmt 
     esp_driver_ledc

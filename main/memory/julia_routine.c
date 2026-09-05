@@ -76,6 +76,8 @@ typedef struct {
  * 成功落盘的时刻；一系列“上次…”记录用于连续活跃/冷却判定；s_active_slot 指示当前
  * 正在使用的拷贝槽位（配对写另一份）。 */
 static SemaphoreHandle_t s_lock;
+static SemaphoreHandle_t s_flush_lock;
+static uint32_t s_change_generation;
 static routine_store_t s_store;
 static bool s_dirty;
 static int64_t s_last_flush_us;
@@ -141,12 +143,17 @@ static int learned_days_before(int32_t today)
  * 写入相邻（异或）槽位，崩溃时保留上一版合法快照。 */
 static esp_err_t write_snapshot(void)
 {
+    xSemaphoreTake(s_flush_lock, portMAX_DELAY);
     FILE *file = fopen(ROUTINE_PATH, "r+b");
     if (!file) file = fopen(ROUTINE_PATH, "w+b");
-    if (!file) return ESP_FAIL;
+    if (!file) {
+        xSemaphoreGive(s_flush_lock);
+        return ESP_FAIL;
+    }
     routine_store_t snapshot;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     snapshot = s_store;
+    uint32_t captured_generation = s_change_generation;
     snapshot.generation++;
     snapshot.crc32 = store_crc(&snapshot);
     xSemaphoreGive(s_lock);
@@ -156,14 +163,17 @@ static esp_err_t write_snapshot(void)
         fwrite(&snapshot, 1, sizeof(snapshot), file) == sizeof(snapshot) &&
         fflush(file) == 0 && fsync(fileno(file)) == 0) {
         xSemaphoreTake(s_lock, portMAX_DELAY);
-        s_store = snapshot;
-        s_dirty = false;
+        /* 写盘期间的活动仍属于实时状态，只推进已保存的磁盘代次。 */
+        s_store.generation = snapshot.generation;
+        s_store.crc32 = store_crc(&s_store);
+        s_dirty = s_change_generation != captured_generation;
         s_active_slot = next_slot;
         s_last_flush_us = esp_timer_get_time();
         xSemaphoreGive(s_lock);
         err = ESP_OK;
     }
     fclose(file);
+    xSemaphoreGive(s_flush_lock);
     return err;
 }
 
@@ -173,7 +183,14 @@ esp_err_t julia_routine_init(void)
 {
     if (!julia_sd_is_mounted()) return ESP_ERR_INVALID_STATE;
     s_lock = xSemaphoreCreateMutex();
-    if (!s_lock) return ESP_ERR_NO_MEM;
+    s_flush_lock = xSemaphoreCreateMutex();
+    if (!s_lock || !s_flush_lock) {
+        if (s_lock) vSemaphoreDelete(s_lock);
+        if (s_flush_lock) vSemaphoreDelete(s_flush_lock);
+        s_lock = NULL;
+        s_flush_lock = NULL;
+        return ESP_ERR_NO_MEM;
+    }
     memset(&s_store, 0, sizeof(s_store));
     s_store.magic = ROUTINE_MAGIC;
     FILE *file = fopen(ROUTINE_PATH, "rb");
@@ -224,6 +241,7 @@ void julia_routine_on_activity(activity_kind_t kind)
         s_continuous_start_second = now;
     s_last_activity_second = now;
     s_dirty = true;
+    ++s_change_generation;
     xSemaphoreGive(s_lock);
 }
 

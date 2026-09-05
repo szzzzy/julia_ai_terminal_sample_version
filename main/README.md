@@ -53,7 +53,7 @@
 7. 打开交互启动门槛，Wi-Fi 启动稳定默认等待1500ms后将 CPU 上限切到160MHz；MQTT／WSS 仅在此前置条件满足后启动。
 8. 仅在 `CONFIG_VOICE_PUSH_DEMO_ENABLE` 启用时启动文件推送演示。
 
-启动流程刻意用更长时间换取较低的重叠峰值；网络不可达不阻塞本地运行时。OTA 启动验收仍在最前执行，外设错误不会被错峰流程自动变为产品验收失败。`JULIA_BATTERY` 的 `power_hold`、`ota_ready`、`display_ready`、`audio_ready`、`storage_ready`、`runtime_ready`、`wifi_started` 与 `wifi_settled` 日志用于比较各阶段电池电压，不能据此直接计算电流。进入运行期后 `battery_monitor` 默认每30秒更新一次滤波电压与近似百分比；有效电池在屏幕顶部显示 `BAT xx%`，15%及以下变红。
+启动流程刻意用更长时间换取较低的重叠峰值；网络不可达不阻塞本地运行时。OTA 通用检查在最前执行；新镜像在关键应用初始化完成后才确认，验收失败保留回滚路径。RTC 年份编码仍保留旧格式，格式迁移待多版本联调。`JULIA_BATTERY` 的 `power_hold`、`ota_ready`、`display_ready`、`audio_ready`、`storage_ready`、`runtime_ready`、`wifi_started` 与 `wifi_settled` 日志用于比较各阶段电池电压，不能据此直接计算电流。进入运行期后 `battery_monitor` 默认每10秒更新滤波电压，并在模块内部维护 NORMAL／LOW／CHARGING 提示状态；它不进入行为FSM。屏幕正常显示 `BAT xx%`，低电量显示红色 `LOW xx%`，疑似充电显示绿色 `CHG xx%`且覆盖低电量提示。
 
 Wi-Fi 关联失败后从约 1 秒开始指数退避，最大 60 秒并带最多 20% 的负向随机抖动，重试次数不封顶；取得 IPv4 后退避清零并重新确认所有 IP-ready 服务。单次 `esp_wifi_connect()` 默认最多等待 20 秒，若 GOT_IP和断开事件都未到达，会主动结束卡住的尝试并继续重连。`ESP_ERR_WIFI_STATE` 不再被误当成已成功发起连接。
 
@@ -133,9 +133,9 @@ FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发�
 | 严重故障消息 | S0～S6／S7.1／S8 | S7.2 |
 | 自动复位 | S7.2 | S0 |
 
-`intent_result=normal` 只表示没有特殊语义，不改变状态。OTA 任务、NVS 检查点、目标分区、启动分区设置或普通镜像校验失败都不会触发 S7.2，因为活动固件尚未被替换；这类失败由 S8 回到 S3 等待唤醒。Wi-Fi、TLS、HTTP 等临时链路失败保持 S8 和下载断点，等待现有恢复流程。只有已经无法回滚到可用固件时才从 S8 进入 S7.2。
+`intent_result=normal` 只表示没有特殊语义，不改变状态。OTA 任务、NVS 检查点、目标分区、启动分区设置或普通镜像校验失败都不会触发 S7.2，因为活动固件尚未被替换；这类失败由 S8 回到 S3 等待唤醒。Wi-Fi、TLS、HTTP 等错误导致 OTA 任务退出时同样回到 S3，保留符合恢复条件的下载断点，后续仍按既有检查/通知机制尝试。只有已经无法回滚到可用固件时才从 S8 进入 S7.2。
 
-S7.2 只接收关键初始化、FSM 内部损坏和 OTA 无法安全恢复等严重故障，并保存 NVS 快照后按策略复位。S7.1 不写严重故障快照、不触发复位：每个离线周期只在第一次由 `ONLINE` 变为 `OFFLINE` 时播放固件内嵌的 `network_disconnected_16k_mono_16bit.wav`，嘴型按实际送往扬声器的本地 PCM能量同步，并显示 `S7.1 DISCONNECTED` 与 `offline`；保持离线期间的重复断联不再播报。三秒后，S3/S5/S6 返回原稳定状态；S1的免唤醒资格与 S2/S4的交互上下文均绑定旧 WSS generation，断联后统一进入 S3。WSS/MQTT 各自继续后台重连。S8 的临时链路失败仍保持 S8 和下载断点，不套用 S7.1。
+S7.2 只接收关键初始化、FSM 内部损坏和 OTA 无法安全恢复等严重故障，并保存 NVS 快照后按策略复位。S7.1 不写严重故障快照、不触发复位：每个离线周期只在第一次由 `ONLINE` 变为 `OFFLINE` 时播放固件内嵌的 `network_disconnected_16k_mono_16bit.wav`，嘴型按实际送往扬声器的本地 PCM能量同步，并显示 `S7.1 DISCONNECTED` 与 `offline`；保持离线期间的重复断联不再播报。三秒后，S3/S5/S6 返回原稳定状态；S1的免唤醒资格与 S2/S4的交互上下文均绑定旧 WSS generation，断联后统一进入 S3。WSS/MQTT 各自继续后台重连。OTA 任务发生链路错误退出后回 S3；仅业务链路断开而 OTA 仍在运行时，不套用 S7.1。
 
 ## 编译范围与参考源码
 

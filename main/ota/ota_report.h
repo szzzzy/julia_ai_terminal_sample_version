@@ -166,6 +166,8 @@ esp_err_t native_ota_report_progress(const native_ota_report_context_t *context,
  * @note 本函数不会执行 NVS 写入；通常由 MQTT 连接/订阅就绪路径调用。
  */
 esp_err_t native_ota_report_flush_pending(void);
+/** 定期核对只重投未确认的关键事件，不重放缓存的进度。 */
+esp_err_t native_ota_report_retry_pending(void);
 
 /**
  * @brief 记录 Broker 已确认收到哪一条升级结果。

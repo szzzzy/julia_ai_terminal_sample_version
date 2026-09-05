@@ -108,6 +108,8 @@ static bool ota_local_health_check(bool include_gpio_diagnostic)
  *       或外部复位。只能在普通任务上下文调用。
  */
 static bool s_fault_nvs_ready;
+static bool s_pending_verify;
+static void ota_reconcile_boot_state(bool pending_verify);
 
 static void __attribute__((noreturn)) ota_enter_safe_mode(
     julia_fault_reason_t fault_reason, esp_err_t error, const char *reason)
@@ -246,10 +248,47 @@ void ota_boot_flow_run(void)
                             "local health check failed");
     }
 
+    s_pending_verify = pending_verify;
+    if (!pending_verify) ota_reconcile_boot_state(false);
+}
+
+static void ota_reconcile_boot_state(bool pending_verify)
+{
+    esp_err_t err;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running != NULL) {
+        esp_app_desc_t running_desc;
+        if (esp_ota_get_partition_description(running, &running_desc) == ESP_OK) {
+            ESP_LOGI(TAG, "Running firmware version: %s", running_desc.version);
+            char last_invalid_version[sizeof(running_desc.version)] = { 0 };
+            const char *invalid_version =
+                ota_get_last_invalid_version(last_invalid_version, sizeof(last_invalid_version)) ?
+                last_invalid_version : NULL;
+            if (!pending_verify && invalid_version != NULL) {
+                err = native_ota_report_reconcile_rollback(running_desc.version,
+                                                           invalid_version);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "Could not reconcile OTA rollback report: %s",
+                             esp_err_to_name(err));
+                }
+            }
+            err = ota_state_store_reconcile_running_version(running_desc.version);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to reconcile OTA resume record: %s", esp_err_to_name(err));
+            }
+        }
+    }
+}
+
+void ota_boot_flow_complete(bool app_healthy)
+{
+    bool pending_verify = s_pending_verify;
+    if (!pending_verify) return;
+    esp_err_t err;
     /* A product override must finish critical local business initialization before a
      * PENDING_VERIFY image can become VALID. Remote connectivity is intentionally not
      * an acceptance condition. */
-    if (pending_verify && !ota_boot_health_product_check()) {
+    if (!app_healthy || !ota_boot_health_product_check()) {
         native_ota_failure_reason_t rollback_reason =
             esp_ota_check_rollback_is_possible() ?
             NATIVE_OTA_FAILURE_BOOT_SELF_TEST_FAILED :
@@ -284,33 +323,6 @@ void ota_boot_flow_run(void)
         }
     }
 
-    /* 启动对账（仅在“本次不是 PENDING_VERIFY 首次验收”时做回滚识别）：
-     * - 若 bootloader 最近把某分区标记为无效（存在 `esp_ota_get_last_invalid_partition`），
-     *   说明上一次升级曾在启动时被判定无效并回滚；只有在“没有新镜像待验收”时才上报
-     *   rolled_back，避免与上面 PENDING_VERIFY 分支已经上报的回滚事件重复。
-     * - 无论是否回滚，都按当前运行版本清理断点记录中已确认/已提交的条目，使下次检查
-     *   不会误把已成功运行的镜像当成待恢复状态。 */
-    const esp_partition_t *running = esp_ota_get_running_partition();
-    if (running != NULL) {
-        esp_app_desc_t running_desc;
-        if (esp_ota_get_partition_description(running, &running_desc) == ESP_OK) {
-            ESP_LOGI(TAG, "Running firmware version: %s", running_desc.version);
-            char last_invalid_version[sizeof(running_desc.version)] = { 0 };
-            const char *invalid_version =
-                ota_get_last_invalid_version(last_invalid_version, sizeof(last_invalid_version)) ?
-                last_invalid_version : NULL;
-            if (!pending_verify && invalid_version != NULL) {
-                err = native_ota_report_reconcile_rollback(running_desc.version,
-                                                           invalid_version);
-                if (err != ESP_OK) {
-                    ESP_LOGW(TAG, "Could not reconcile OTA rollback report: %s",
-                             esp_err_to_name(err));
-                }
-            }
-            err = ota_state_store_reconcile_running_version(running_desc.version);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to reconcile OTA resume record: %s", esp_err_to_name(err));
-            }
-        }
-    }
+    s_pending_verify = false;
+    ota_reconcile_boot_state(true);
 }

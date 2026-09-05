@@ -42,6 +42,8 @@ static lv_disp_draw_buf_t s_draw_buf;
 static lv_disp_drv_t s_disp_drv;
 static esp_timer_handle_t s_tick_timer;
 static volatile bool s_display_off;
+static volatile bool s_display_target_off;
+static volatile bool s_display_state_known = true;
 static volatile bool s_refresh_paused;
 static esp_lcd_panel_handle_t s_panel;
 static SemaphoreHandle_t s_color_done;
@@ -51,6 +53,7 @@ static volatile uint64_t s_flush_total_us;
 static volatile uint32_t s_flush_max_us;
 static volatile int64_t s_wake_started_us;
 static volatile bool s_last_flush_was_final;
+static esp_err_t apply_display_target(void);
 
 /**
  * @brief 面板色彩传输完成回调（在 SPI 驱动 ISR 上下文执行，IRAM_ATTR）。
@@ -122,7 +125,7 @@ esp_err_t lvgl_port_draw_bitmap_sync(esp_lcd_panel_handle_t panel, int x1, int y
  */
 static void lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
 {
-    if (s_display_off || s_refresh_paused) {
+    if (s_display_target_off || s_display_off || !s_display_state_known || s_refresh_paused) {
         lv_disp_flush_ready(drv);
         return;
     }
@@ -191,7 +194,12 @@ static void lvgl_task(void *arg)
     (void)arg;
 
     while (1) {
-        if (s_display_off || s_refresh_paused) {
+        if ((!s_display_state_known || s_display_target_off != s_display_off) &&
+            apply_display_target() != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+        if (s_display_target_off || s_display_off || s_refresh_paused) {
             /* 不持有 LVGL 锁，任务保持可调度；系统 idle/task WDT 均可正常运行。 */
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
@@ -212,34 +220,32 @@ static void lvgl_task(void *arg)
  *        mutex 超时，门控仍保持关闭，调用方必须根据错误决定是否恢复。
  *
  * @param[in] off true 关屏；false 开屏。
- * @return ESP_OK 只表示本地门控状态已更新。panel 命令失败只记录警告并被吞掉，
- *         因此调用方仍须独立控制背光；ESP_ERR_TIMEOUT 表示未取得 panel mutex。
+ * @return ESP_OK 面板已完成目标操作；错误时保留目标，由 LVGL 任务继续重试。
  * @note  本函数禁止用于启动同步：它保持 LVGL 任务存活，并非阻塞式等待。
  */
 esp_err_t lvgl_port_set_display_off(bool off)
 {
-    if (!s_panel) return ESP_ERR_INVALID_STATE;
-    if (off == s_display_off) return ESP_OK;
-    if (off) {
-        s_display_off = true;
-        if (xSemaphoreTake(s_panel_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return ESP_ERR_TIMEOUT;
-        esp_err_t err = esp_lcd_panel_disp_on_off(s_panel, false);
-        xSemaphoreGive(s_panel_mutex);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "panel display-off unsupported: %s; backlight-only fallback",
-                     esp_err_to_name(err));
-        }
-        return ESP_OK;
-    }
+    if (!s_panel || !s_panel_mutex) return ESP_ERR_INVALID_STATE;
+    s_display_target_off = off;
+    return apply_display_target();
+}
+
+/* 重试只读取最新目标，不能把旧快照写回目标并覆盖 FSM 后来的请求。 */
+static esp_err_t apply_display_target(void)
+{
     if (xSemaphoreTake(s_panel_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return ESP_ERR_TIMEOUT;
-    esp_err_t err = esp_lcd_panel_disp_on_off(s_panel, true);
+    bool off = s_display_target_off;
+    esp_err_t err = ESP_OK;
+    if (!s_display_state_known || s_display_off != off) {
+        err = esp_lcd_panel_disp_on_off(s_panel, !off);
+        s_display_state_known = err == ESP_OK;
+        if (err == ESP_OK) {
+            s_display_off = off;
+            if (!off) s_wake_started_us = esp_timer_get_time();
+        }
+    }
     xSemaphoreGive(s_panel_mutex);
-    if (err != ESP_OK)
-        ESP_LOGW(TAG, "panel display-on unsupported: %s; backlight-only fallback",
-                 esp_err_to_name(err));
-    s_wake_started_us = esp_timer_get_time();
-    s_display_off = false;
-    return ESP_OK;
+    return err;
 }
 
 bool lvgl_port_display_off(void) { return s_display_off; }

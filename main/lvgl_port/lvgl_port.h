@@ -27,7 +27,7 @@ esp_err_t lvgl_port_init(esp_lcd_panel_handle_t panel_handle);
 bool lvgl_port_lock(TickType_t timeout_ticks);
 /** 只能由持有递归 LVGL mutex 的同一任务配对调用。 */
 void lvgl_port_unlock(void);
-/* 只控制 panel 显示和 flush 门控，不控制背光，也不销毁 LVGL task。 */
+/* 只控制 panel 和 flush，不控制背光；成功表示硬件已应用，失败由 LVGL task 重试。 */
 esp_err_t lvgl_port_set_display_off(bool off);
 bool lvgl_port_display_off(void);
 /* 冻结动画和刷新但保留当前画面，适合短时独占显示，不代表屏幕已经关闭。 */

@@ -36,6 +36,7 @@
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_tls_errors.h"
+#include "http_downloader.h"
 
 #include "ota_control_plane.h"
 #include "ota_engine.h"
@@ -84,13 +85,6 @@ static bool ota_failure_requires_s7(native_ota_failure_reason_t reason)
 }
 
 /** 链路类失败保留 S8 和断点，等待现有 OTA 检查/下载流程恢复。 */
-static bool ota_failure_is_link_failure(native_ota_failure_reason_t reason)
-{
-    return reason == NATIVE_OTA_FAILURE_NETWORK_TIMEOUT ||
-           reason == NATIVE_OTA_FAILURE_TLS_VERIFY_FAILED ||
-           reason == NATIVE_OTA_FAILURE_HTTP_STATUS_INVALID;
-}
-
 static julia_fault_reason_t ota_fault_reason(native_ota_failure_reason_t reason)
 {
     (void)reason;
@@ -229,16 +223,27 @@ esp_err_t ota_engine_handle_server_json(const char *json, size_t json_len)
              request->artifact_id, request->version, request->image_size, (int)request->force_update);
     /* 必须先把 S8 事件排入 FSM，再创建高优先级 OTA 任务，避免任务快速失败时
      * EVT_OTA_TASK_FAILED 先于 EVT_OTA_AVAILABLE 到达。 */
-    esp_err_t fsm_err = julia_fsm_runtime_post(EVT_OTA_AVAILABLE);
+    esp_err_t fsm_err = julia_fsm_runtime_post_sync(EVT_OTA_AVAILABLE);
     if (fsm_err != ESP_OK) {
-        ESP_LOGW(TAG, "OTA accepted but S8 event was rejected: %s",
-                 esp_err_to_name(fsm_err));
+        ESP_LOGI(TAG, "OTA deferred because FSM did not admit S8: %s",
+                  esp_err_to_name(fsm_err));
+        native_ota_report_context_t context;
+        const esp_app_desc_t *app = esp_app_get_description();
+        if (app != NULL &&
+            native_ota_report_context_init(&context, request, app->version) == ESP_OK) {
+            (void)native_ota_report_event(&context, NATIVE_OTA_REPORT_DEFERRED,
+                                          0, NATIVE_OTA_FAILURE_NONE);
+        }
+        ota_clear_in_progress();
+        free(request);
+        /* 本次清单已处理；保持既有检查节奏，不缓存任务也不强行中断当前业务。 */
+        return ESP_OK;
     }
     if (xTaskCreate(ota_engine_task, "ota_engine_task", 12288, request, 5, NULL) != pdPASS) {
         ota_clear_in_progress();
         free(request);
         if (fsm_err == ESP_OK) {
-            (void)julia_fsm_runtime_post(EVT_OTA_TASK_FAILED);
+            (void)julia_fsm_runtime_post_sync(EVT_OTA_TASK_FAILED);
         }
         return ESP_ERR_NO_MEM;
     }
@@ -375,13 +380,11 @@ static void ota_quarantine_record(ota_resume_record_t *record,
  * @note 该函数只解析字符串，不执行网络访问；调用者仍需把结果与 manifest 和恢复偏移
  *       比较，单独的格式正确不足以证明响应属于当前 artifact。
  */
-#if CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS
 static bool ota_parse_content_range(const char *value, size_t *range_start,
                                     size_t *range_end, size_t *total_size)
 {
     return ota_stability_parse_content_range(value, range_start, range_end, total_size);
 }
-#endif
 
 /**
  * @brief 校验网络收到的 ESP 应用头和应用描述信息。
@@ -495,6 +498,7 @@ static void ota_engine_task(void *pvParameter)
     bool terminal_failure = false;
     bool keep_record = false;
     esp_http_client_handle_t client = NULL;
+    download_response_headers_t headers;
     native_ota_failure_reason_t failure_reason = NATIVE_OTA_FAILURE_NONE;
     ota_resume_record_t record;
     bool record_active = false;
@@ -669,12 +673,15 @@ static void ota_engine_task(void *pvParameter)
     /* 最多允许一次“服务器忽略 Range 后从零重试”，避免把完整镜像追加到旧偏移。 */
     /* 仅允许一次从 Range 退回全量下载；超过后不会无限循环消耗网络和 Flash。 */
     for (unsigned http_attempt = 0; http_attempt < 2; ++http_attempt) {
+        memset(&headers, 0, sizeof(headers));
         /* 每次重试都创建新的 HTTP 客户端，确保上一次连接的响应状态不会被复用。 */
         esp_http_client_config_t config = {
             .url = request.url,
             .cert_pem = (char *)server_cert_pem_start,
             .timeout_ms = CONFIG_EXAMPLE_OTA_RECV_TIMEOUT,
             .keep_alive_enable = true,
+            .event_handler = http_downloader_collect_headers,
+            .user_data = &headers,
         };
 #ifdef CONFIG_EXAMPLE_SKIP_COMMON_NAME_CHECK
         config.skip_cert_common_name_check = true;
@@ -719,10 +726,11 @@ static void ota_engine_task(void *pvParameter)
         /* status_code 与 content_length 共同决定当前响应是完整下载还是可续传响应。 */
         int status_code = esp_http_client_get_status_code(client);
         /* ETag 用于确认断点对应的服务器对象没有在两次请求之间被替换。 */
-        char *response_etag = NULL;
-#if CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS
-        (void)esp_http_client_get_response_header(client, "ETag", &response_etag);
-#endif
+        if (headers.invalid) {
+            failure_reason = NATIVE_OTA_FAILURE_HTTP_STATUS_INVALID;
+            goto cleanup;
+        }
+        const char *response_etag = headers.etag[0] != '\0' ? headers.etag : NULL;
 
         if (resume && record.etag[0] != '\0' &&
             (response_etag == NULL || strcmp(record.etag, response_etag) != 0)) {
@@ -782,10 +790,8 @@ static void ota_engine_task(void *pvParameter)
                 terminal_failure = true;
                 goto cleanup;
             }
-#if CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS
             /* Content-Range 进一步确认响应覆盖的区间和完整镜像大小。 */
-            char *content_range = NULL;
-            (void)esp_http_client_get_response_header(client, "Content-Range", &content_range);
+            const char *content_range = headers.content_range;
             size_t range_start = 0;
             size_t range_end = 0;
             size_t range_total = 0;
@@ -797,12 +803,6 @@ static void ota_engine_task(void *pvParameter)
                 terminal_failure = true;
                 goto cleanup;
             }
-#else
-            ESP_LOGE(TAG, "Range resume requires saved HTTP response headers");
-            failure_reason = NATIVE_OTA_FAILURE_RANGE_MISMATCH;
-            terminal_failure = true;
-            goto cleanup;
-#endif
         } else if (status_code != 200) {
             ESP_LOGW(TAG, "Full OTA request returned transient/invalid HTTP status=%d", status_code);
             failure_reason = NATIVE_OTA_FAILURE_HTTP_STATUS_INVALID;
@@ -1094,13 +1094,12 @@ cleanup:
                      esp_err_to_name(report_err));
         }
     }
-    ota_clear_in_progress();
     if (failure_reason != NATIVE_OTA_FAILURE_NONE) {
         ESP_LOGE(TAG, "OTA task finished with reason=%s (%s)",
                  native_ota_failure_reason_name(failure_reason), esp_err_to_name(err));
     }
     if (reboot) {
-        esp_err_t fsm_err = julia_fsm_runtime_post(EVT_OTA_SUCCEEDED);
+        esp_err_t fsm_err = julia_fsm_runtime_post_sync(EVT_OTA_SUCCEEDED);
         if (fsm_err != ESP_OK) {
             ESP_LOGW(TAG, "OTA success S0 event rejected: %s", esp_err_to_name(fsm_err));
         }
@@ -1113,17 +1112,14 @@ cleanup:
         if (ota_failure_requires_s7(failure_reason)) {
             fsm_err = julia_fsm_runtime_raise_fault(
                 ota_fault_reason(failure_reason), err);
-        } else if (!ota_failure_is_link_failure(failure_reason)) {
-            fsm_err = julia_fsm_runtime_post(EVT_OTA_TASK_FAILED);
         } else {
-            ESP_LOGW(TAG, "OTA link failure keeps S8 pending recovery: %s",
-                     native_ota_failure_reason_name(failure_reason));
-            fsm_err = ESP_OK;
+            fsm_err = julia_fsm_runtime_post_sync(EVT_OTA_TASK_FAILED);
         }
         if (fsm_err != ESP_OK) {
             ESP_LOGW(TAG, "OTA terminal FSM event rejected: %s", esp_err_to_name(fsm_err));
         }
     }
+    ota_clear_in_progress();
     vTaskDelete(NULL);
     while (1) {
         vTaskDelay(portMAX_DELAY);

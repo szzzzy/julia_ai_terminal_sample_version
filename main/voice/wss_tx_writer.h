@@ -18,6 +18,7 @@ typedef int64_t (*wss_tx_writer_now_fn_t)(void *ctx);
 typedef void (*wss_tx_writer_wait_fn_t)(void *ctx);
 typedef bool (*wss_tx_writer_transient_fn_t)(void *ctx, int result,
                                              int system_error);
+typedef bool (*wss_tx_writer_abort_fn_t)(void *ctx);
 
 typedef struct {
     void *ctx;
@@ -25,12 +26,14 @@ typedef struct {
     wss_tx_writer_now_fn_t now_us;
     wss_tx_writer_wait_fn_t wait_once;
     wss_tx_writer_transient_fn_t is_transient;
+    wss_tx_writer_abort_fn_t should_abort; /**< 可选；在后续写入前响应 owner 的终止请求。 */
 } wss_tx_writer_ops_t;
 
 typedef enum {
     WSS_TX_WRITE_OK = 0,
     WSS_TX_WRITE_FATAL,
     WSS_TX_WRITE_TIMEOUT,
+    WSS_TX_WRITE_ABORTED,
 } wss_tx_write_result_t;
 
 typedef struct {
@@ -47,7 +50,8 @@ typedef struct {
 
 /**
  * 写完一个连续字节区间，暂时错误保持当前 data+offset/remaining 不变。
- * deadline_us 是调用方单调时钟域中的绝对截止时间，可由帧头和帧载荷共享。
+ * deadline_us 限制后续调用/重试，可由帧头和载荷共享；已进入的底层 write
+ * 不能被中断，因此实际返回时间允许多出一次底层调用的耗时。
  */
 wss_tx_write_result_t wss_tx_write_all(const wss_tx_writer_ops_t *ops,
                                         const uint8_t *data, size_t len,

@@ -19,6 +19,8 @@
 #include "qmi8658_shared.h"
 #include "sdkconfig.h"
 
+#if CONFIG_JULIA_IMU_MOTION_ENABLE
+
 #define MOTION_TASK_STACK_SIZE 3072
 #define MOTION_TASK_PRIORITY   3
 #define MOTION_ACCEL_DELTA_G \
@@ -117,3 +119,9 @@ esp_err_t julia_motion_init(void)
              (double)CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS);
     return ESP_OK;
 }
+#else
+esp_err_t julia_motion_init(void)
+{
+    return ESP_ERR_NOT_SUPPORTED;
+}
+#endif

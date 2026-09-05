@@ -229,14 +229,41 @@ static esp_err_t persist_event(const julia_event_t *event)
 
 /* 后台写盘任务：排队收到事件即 persist（fsync 可能较慢，借助队列做背压），
  * 每次循环顺带触发例行检测的延迟落盘。取到事件即持久化，无其它任务写事件文件。 */
+typedef struct {
+    bool clear;
+    julia_event_t event;
+    SemaphoreHandle_t completed;
+    esp_err_t *result;
+} memory_write_job_t;
+
+static esp_err_t clear_events_owned(void)
+{
+    if (remove(EVENT_PATH) != 0 && errno != ENOENT) return ESP_FAIL;
+    xSemaphoreTake(s_event_lock, portMAX_DELAY);
+    memset(s_events, 0, sizeof(s_events));
+    init_event_header();
+    s_event_header_slot = 0;
+    xSemaphoreGive(s_event_lock);
+    return ESP_OK;
+}
+
+static void memory_process_job(memory_write_job_t *job)
+{
+    esp_err_t err = job->clear ? clear_events_owned() : persist_event(&job->event);
+    if (err != ESP_OK) ESP_LOGE("memory", "event persist failed: %s", esp_err_to_name(err));
+    if (job->completed != NULL) {
+        *job->result = err;
+        xSemaphoreGive(job->completed);
+    }
+}
+
 static void event_writer_task(void *arg)
 {
     (void)arg;
-    julia_event_t event;
+    memory_write_job_t job;
     while (true) {
-        if (xQueueReceive(s_event_queue, &event, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            esp_err_t err = persist_event(&event);
-            if (err != ESP_OK) ESP_LOGE("memory", "event persist failed: %s", esp_err_to_name(err));
+        if (xQueueReceive(s_event_queue, &job, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            memory_process_job(&job);
         }
         julia_routine_background_flush();
     }
@@ -273,7 +300,7 @@ static esp_err_t load_events(void)
         }
         fclose(file);
     }
-    s_event_queue = xQueueCreate(EVENT_QUEUE_DEPTH, sizeof(julia_event_t));
+    s_event_queue = xQueueCreate(EVENT_QUEUE_DEPTH, sizeof(memory_write_job_t));
     if (!s_event_queue) return ESP_ERR_NO_MEM;
     BaseType_t writer = xTaskCreateWithCaps(event_writer_task, "memory_writer", 8192,
                                             NULL, 2, NULL,
@@ -282,7 +309,11 @@ static esp_err_t load_events(void)
         ESP_LOGW(TAG, "PSRAM memory_writer stack unavailable; trying internal RAM");
         writer = xTaskCreate(event_writer_task, "memory_writer", 8192, NULL, 2, NULL);
     }
-    if (writer != pdPASS) return ESP_ERR_NO_MEM;
+    if (writer != pdPASS) {
+        vQueueDelete(s_event_queue);
+        s_event_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
     ESP_LOGI("memory", "event ring ready: count=%lu epoch=%lu", (unsigned long)s_event_header.count,
              (unsigned long)s_event_header.epoch);
     return ESP_OK;
@@ -630,7 +661,8 @@ esp_err_t julia_memory_append(uint8_t type, uint8_t emotion, const char *summary
     utf8_copy(event.summary, summary_size, summary, strlen(summary));
     event.crc32 = event_crc(&event);
     /* 写入任务执行 fsync 可能较慢；短暂背压比静默丢失记忆更可靠。 */
-    return xQueueSend(s_event_queue, &event, pdMS_TO_TICKS(500)) == pdTRUE
+    memory_write_job_t job = {.event = event};
+    return xQueueSend(s_event_queue, &job, pdMS_TO_TICKS(500)) == pdTRUE
                ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
@@ -692,16 +724,17 @@ int julia_memory_format_for_prompt(char *buf, int buf_size)
     return (int)strlen(buf);
 }
 
-/* 清空全部事件：丢弃在途队列、清内存缓存、复位头、删除事件文件。
- * 仅针对事件日志，不影响画像/摘要/会话日志。 */
+/* 清空与写入使用同一个 FIFO owner；确认返回后，先前出队的旧事件不可能再写回。
+ * 仅针对事件日志，不影响画像/摘要/会话日志；不得从 writer 自身调用。 */
 esp_err_t julia_memory_forget_all(void)
 {
     if (!s_event_lock || !s_event_queue) return ESP_ERR_INVALID_STATE;
-    xQueueReset(s_event_queue);
-    xSemaphoreTake(s_event_lock, portMAX_DELAY);
-    memset(s_events, 0, sizeof(s_events));
-    init_event_header();
-    s_event_header_slot = 0;
-    xSemaphoreGive(s_event_lock);
-    return remove(EVENT_PATH) == 0 || errno == ENOENT ? ESP_OK : ESP_FAIL;
+    SemaphoreHandle_t completed = xSemaphoreCreateBinary();
+    if (completed == NULL) return ESP_ERR_NO_MEM;
+    esp_err_t result = ESP_FAIL;
+    memory_write_job_t job = {.clear = true, .completed = completed, .result = &result};
+    if (xQueueSend(s_event_queue, &job, portMAX_DELAY) == pdTRUE)
+        (void)xSemaphoreTake(completed, portMAX_DELAY);
+    vSemaphoreDelete(completed);
+    return result;
 }

@@ -83,6 +83,9 @@ static bool mqtt_uri_uses_tls(const char *uri)
  *  深度 = 关键队列深度 + 4：QoS 1 队列最多容纳 CONFIG_OTA_REPORT_QUEUE_DEPTH 条
  *  关键事件，额外槽位覆盖「PUBACK 尚未关联进来」的并发窗口，避免关联表先于队列打满。 */
 #define MQTT_STATUS_TRACK_SIZE (CONFIG_OTA_REPORT_QUEUE_DEPTH + 4)
+#ifndef CONFIG_MQTT_OUTBOX_EXPIRED_TIMEOUT_MS
+#define CONFIG_MQTT_OUTBOX_EXPIRED_TIMEOUT_MS 30000
+#endif
 
 /** 已注册下行 topic 的最大数量；OTA 占 2 个，语音命令占 1 个，剩余供扩展。 */
 #define MQTT_MAX_REGISTERED_TOPICS 8
@@ -168,6 +171,7 @@ static volatile bool s_status_reset_tracks;
 typedef struct {
     bool used; /**< 槽位是否正在跟踪一条关键状态。 */
     int msg_id; /**< ESP-MQTT 返回的消息 ID；0 表示尚未建立关联。 */
+    int64_t sent_us;
     char event_id[NATIVE_OTA_EVENT_ID_SIZE]; /**< 报告模块生成的幂等事件 ID。 */
 } mqtt_status_track_t;
 
@@ -317,6 +321,7 @@ static esp_err_t mqtt_status_transport(const native_ota_report_message_t *messag
         s_status_reset_tracks = false;
     }
     if (message->critical) {
+        if (message->state != NATIVE_OTA_REPORT_DOWNLOADING) s_latest_progress_valid = false;
         if (mqtt_status_find_event_locked(message->event_id) >= 0) {
             /* 重连 flush 可能再次看到同一持久化事件；event_id 保证幂等。 */
             xSemaphoreGive(s_status_lock);
@@ -388,10 +393,18 @@ static bool mqtt_status_drain_one_critical(void)
         return false;
     }
 
-    if (s_status_lock != NULL && xSemaphoreTake(s_status_lock, 0) == pdTRUE) {
+    /* 消息已进入 outbox，必须完成关联；不能因瞬时锁竞争丢掉唯一 PUBACK 匹配键。 */
+    if (s_status_lock != NULL && xSemaphoreTake(s_status_lock, portMAX_DELAY) == pdTRUE) {
         int slot = mqtt_status_find_event_locked(message.event_id);
+        if (slot < 0) slot = mqtt_status_find_free_locked();
         if (slot >= 0) {
+            s_status_tracks[slot].used = true;
+            strncpy(s_status_tracks[slot].event_id, message.event_id,
+                    sizeof(s_status_tracks[slot].event_id) - 1U);
             s_status_tracks[slot].msg_id = msg_id;
+            s_status_tracks[slot].sent_us = esp_timer_get_time();
+        } else {
+            s_status_need_flush = true;
         }
         xSemaphoreGive(s_status_lock);
     }
@@ -500,9 +513,25 @@ static bool mqtt_status_process_published(void)
  * 任务只在 MQTT 就绪时调用 ESP-MQTT enqueue；空闲时最多阻塞 1 s 等待通知。它不直接
  * 写 NVS，PUBACK 删除由 ota_report_ack_task 完成。
  */
+static void mqtt_status_expire_tracks(void)
+{
+    if (s_status_lock == NULL || xSemaphoreTake(s_status_lock, portMAX_DELAY) != pdTRUE) return;
+    int64_t now = esp_timer_get_time();
+    const int64_t retry_us = ((int64_t)CONFIG_MQTT_OUTBOX_EXPIRED_TIMEOUT_MS + 5000LL) * 1000LL;
+    for (size_t i = 0; i < MQTT_STATUS_TRACK_SIZE; ++i) {
+        if (s_status_tracks[i].used && s_status_tracks[i].msg_id > 0 &&
+            now - s_status_tracks[i].sent_us >= retry_us) {
+            s_status_tracks[i].used = false;
+            s_status_need_flush = true;
+        }
+    }
+    xSemaphoreGive(s_status_lock);
+}
+
 static void mqtt_status_task(void *parameter)
 {
     (void)parameter;
+    int64_t next_pending_check_us = 0;
     while (1) {
         bool sent = false;
         if (s_status_reset_tracks && s_status_lock != NULL &&
@@ -512,6 +541,7 @@ static void mqtt_status_task(void *parameter)
             xSemaphoreGive(s_status_lock);
         }
         if (mqtt_status_is_ready()) {
+            mqtt_status_expire_tracks();
             while (mqtt_status_drain_one_critical()) {
                 sent = true;
             }
@@ -524,16 +554,17 @@ static void mqtt_status_task(void *parameter)
 
             bool need_flush = false;
             if (s_status_lock != NULL && xSemaphoreTake(s_status_lock, 0) == pdTRUE) {
-                need_flush = s_status_need_flush &&
-                             uxQueueMessagesWaiting(s_status_queue) == 0;
+                need_flush = esp_timer_get_time() >= next_pending_check_us &&
+                              uxQueueMessagesWaiting(s_status_queue) == 0;
                 if (need_flush) {
                     s_status_need_flush = false;
                 }
                 xSemaphoreGive(s_status_lock);
             }
             if (need_flush) {
-                (void)native_ota_report_flush_pending();
-                sent = true;
+                /* 只重投关键记录，不绕过进度节流；队满时也必须让出 CPU。 */
+                (void)native_ota_report_retry_pending();
+                next_pending_check_us = esp_timer_get_time() + 1000000LL;
             }
         }
         if (!sent) {
@@ -1281,6 +1312,16 @@ static void mqtt_handle_data(const esp_mqtt_event_handle_t event)
  * @note 回调运行在 ESP-MQTT 任务上下文，不允许阻塞等待 OTA 完成。
  * @note 与检查任务共享事件组和任务通知，均使用 FreeRTOS 线程安全接口同步。
  */
+static bool mqtt_suback_succeeded(const esp_mqtt_event_handle_t event)
+{
+    if (event->data == NULL || event->data_len <= 0) return false;
+    if (event->error_handle != NULL &&
+        event->error_handle->error_type == MQTT_ERROR_TYPE_SUBSCRIBE_FAILED) return false;
+    for (int i = 0; i < event->data_len; ++i)
+        if ((uint8_t)event->data[i] > 2U) return false;
+    return true;
+}
+
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id,
                                void *event_data)
 {
@@ -1357,12 +1398,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
          * 消息 ID，不含 topic 字符串，必须靠「这是哪个订阅调用返回的 ID」来匹配
          * 具体 topic。匹配后把对应 sub_msg_id 置回 -1（无待确认订阅）。 */
         ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
+        bool accepted = mqtt_suback_succeeded(event);
         bool matched = false;
+        bool critical = false;
         portENTER_CRITICAL(&s_registry_lock);
         for (size_t i = 0; i < s_registered_topic_count; i++) {
             if (event->msg_id >= 0 &&
                 s_registered_topics[i].sub_msg_id == event->msg_id) {
-                s_registered_topics[i].sub_msg_id = -1;
+                if (accepted) s_registered_topics[i].sub_msg_id = -1;
+                critical = s_registered_topics[i].critical;
                 matched = true;
                 break;
             }
@@ -1370,6 +1414,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         portEXIT_CRITICAL(&s_registry_lock);
         if (!matched) {
             ESP_LOGW(TAG, "Ignoring unrelated SUBACK, msg_id=%d", event->msg_id);
+            break;
+        }
+        if (!accepted) {
+            ESP_LOGW(TAG, "Broker rejected subscription msg_id=%d", event->msg_id);
+            if (critical) mqtt_request_reconnect("Critical topic SUBACK rejected");
             break;
         }
         if (s_suback_deadline_ms != 0 && mqtt_all_critical_subscribed()) {

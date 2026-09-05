@@ -196,7 +196,9 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
                target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S3_STANDBY) ||
                target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
-                         JULIA_MAIN_STATE_S8_OTA);
+                          JULIA_MAIN_STATE_S6_SLEEP) ||
+               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
+                          JULIA_MAIN_STATE_S8_OTA);
 
     case JULIA_MAIN_STATE_S2_DIALOG:
         if (from_s2_sub_state == JULIA_S2_SUB_STATE_S2_3_SPEAKING &&
@@ -240,7 +242,9 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
         return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S4_INTERACTION) ||
                target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
-                         JULIA_MAIN_STATE_S3_STANDBY);
+                          JULIA_MAIN_STATE_S3_STANDBY) ||
+               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
+                          JULIA_MAIN_STATE_S6_SLEEP);
 
     case JULIA_MAIN_STATE_S6_SLEEP:
         return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
@@ -394,8 +398,11 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
         /* 只有已经确认的唤醒词才能让待机设备开始一轮交流。 */
         target_main_state = JULIA_MAIN_STATE_S4_INTERACTION;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
-    } else if (fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY &&
-               (event == EVT_NIGHT_TIME || event == EVT_STANDBY_TIMEOUT)) {
+    } else if ((fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY &&
+                event == EVT_STANDBY_TIMEOUT) ||
+               ((fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
+                 fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY ||
+                 fsm->main_state == JULIA_MAIN_STATE_S5_SILENT) && event == EVT_NIGHT_TIME)) {
         /* 夜间窗口或 S3 驻留超时都进入睡眠态。 */
         target_main_state = JULIA_MAIN_STATE_S6_SLEEP;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;

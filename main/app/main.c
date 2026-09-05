@@ -51,8 +51,12 @@ static void battery_status_updated(const julia_battery_status_t *status, void *c
 {
     (void)ctx;
     if (status == NULL || !status->valid) return;
-    julia_avatar_set_battery_status(status->present, status->percent,
-                                    status->voltage_mv);
+    julia_avatar_set_battery_status(
+        status->present,
+        status->state == JULIA_BATTERY_STATE_CHARGING,
+        status->state == JULIA_BATTERY_STATE_LOW,
+        status->percent,
+        status->voltage_mv);
 }
 
 static void boot_stage_settle(const char *stage)
@@ -221,6 +225,7 @@ void app_main(void)
     err = julia_fsm_runtime_init(boot_dependencies_ready);
     esp_err_t fsm_error = err;
     bool fsm_ready = err == ESP_OK;
+    esp_err_t wake_error = ESP_OK;
     if (!fsm_ready) ESP_LOGW(TAG, "FSM runtime init failed: %s", esp_err_to_name(err));
 
     if (fsm_ready && boot_dependencies_ready) {
@@ -235,12 +240,16 @@ void app_main(void)
 #if !CONFIG_JULIA_SERVER_WAKE_ENABLE
         if (audio_ready && voice_initialized) {
             err = wake_detector_init();
+            wake_error = err;
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Wake detector init failed: %s", esp_err_to_name(err));
-                (void)julia_fsm_runtime_raise_fault(JULIA_FAULT_VOICE_INIT, err);
             }
         }
 #endif
+    }
+    ota_boot_flow_complete(boot_dependencies_ready && fsm_ready && wake_error == ESP_OK);
+    if (fsm_ready && wake_error != ESP_OK) {
+        (void)julia_fsm_runtime_raise_fault(JULIA_FAULT_VOICE_INIT, wake_error);
     }
     if (fsm_ready && !boot_dependencies_ready) {
         julia_fault_reason_t reason = JULIA_FAULT_CRITICAL_INIT;
@@ -282,7 +291,8 @@ void app_main(void)
      * 不可用仍由后台永久重试，不阻断本地应用或 pending 镜像验收。 */
     boot_stage_settle("runtime_ready");
     ESP_LOGI(TAG, "Starting background Wi-Fi lifecycle after local startup");
-    err = network_lifecycle_start();
+    esp_err_t network_err = network_lifecycle_start();
+    err = network_err;
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Background Wi-Fi lifecycle is unavailable: %s; local application remains active",
                  esp_err_to_name(err));
@@ -307,7 +317,7 @@ void app_main(void)
     }
     /* RF 关联稳定后才开放 MQTT/WSS，避免 TLS 与首轮 Wi-Fi 扫描/握手重叠。 */
     portENTER_CRITICAL(&s_boot_lock);
-    s_voice_ready = boot_dependencies_ready && fsm_ready;
+    s_voice_ready = boot_dependencies_ready && fsm_ready && wake_error == ESP_OK;
     s_runtime_ready = fsm_ready;
     portEXIT_CRITICAL(&s_boot_lock);
     network_lifecycle_retry_services();
@@ -322,4 +332,14 @@ void app_main(void)
         ESP_LOGW(TAG, "Voice push demo not started: %s", esp_err_to_name(err));
     }
 #endif
+    /* 生命周期自身也可能暂时创建失败。保留 app task 重试，无需再申请监督任务栈。 */
+    uint32_t retry_ms = CONFIG_NETWORK_WIFI_RETRY_BASE_MS;
+    while (network_err != ESP_OK && network_err != ESP_ERR_NOT_SUPPORTED) {
+        vTaskDelay(pdMS_TO_TICKS(retry_ms));
+        network_err = network_lifecycle_start();
+        if (retry_ms < CONFIG_NETWORK_WIFI_RETRY_MAX_MS) {
+            retry_ms = retry_ms > CONFIG_NETWORK_WIFI_RETRY_MAX_MS / 2U
+                           ? CONFIG_NETWORK_WIFI_RETRY_MAX_MS : retry_ms * 2U;
+        }
+    }
 }

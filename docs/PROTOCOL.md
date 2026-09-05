@@ -34,7 +34,7 @@ WSS 使用 `server_certs/ca_cert.pem` 验证证书链；当前传输实现设置
 | 断链判定 | 发出 PING 后默认 10 秒未收到下行帧；任意合法下行帧均可清除等待状态，不限 PONG |
 | 重连 | 默认等待 5 秒后再次连接 |
 
-连接与 socket 读写仍由单一会话任务负责；播放经缓冲交给独立任务，文件每轮推进一个块。MIC 上行先进入 256 帧（约 5.12 秒）的 PSRAM ring：正常每轮发送 1 帧，积压时每轮最多 8 帧且最多占用 8ms；控制队列优先且每轮最多处理 4 条。单次 socket 写等待配置为 500ms。`WANT_READ`、`WANT_WRITE` 和 socket `EAGAIN` 保持同一写入地址及剩余长度重试，WebSocket 帧头与载荷共享 2 秒绝对期限；期限耗尽或永久错误才结束连接。SD 文件打开／读取和 TLS 自身仍可能耗时，不能将这些设置解释为整条命令链路的硬实时保证。TCP／TLS 在线不表示 ASR 或回答生成仍正常。
+连接与 socket 读写仍由单一会话任务负责；播放经缓冲交给独立任务，文件每轮推进一个块。MIC 上行先进入 256 帧（约 5.12 秒）的 PSRAM ring：正常每轮发送 1 帧，积压时每轮最多 8 帧且最多占用 8ms；控制队列优先且每轮最多处理 4 条。单次 socket 写等待配置为 500ms。`WANT_READ`、`WANT_WRITE` 和 socket `EAGAIN` 保持同一写入地址及剩余长度重试，WebSocket 帧头与载荷共享可配置重试预算（CONFIG_WSS_FRAME_WRITE_BUDGET_MS，默认 3500ms）；预算耗尽、永久错误或 ring 溢出终止请求会结束连接。预算限制后续重试，已进入的单次 TLS 写调用可能使实际返回时间超过预算。SD 文件打开／读取和 TLS 自身仍可能耗时，不能将这些设置解释为整条命令链路的硬实时保证。TCP／TLS 在线不表示 ASR 或回答生成仍正常。
 
 ## 3. MIC 上行与对话语义
 
@@ -185,7 +185,7 @@ FILE_SEND SD:/sample.wav
 
 处理器允许纯文本命令末尾带空白和换行，不支持一条消息中的多行命令列表。注册载荷上限为 128 字节，FILE_SEND URI 缓冲区含 NUL 共 128 字节；语义 JSON 必须是单个完整对象。
 
-纯文本命令、`state_ready` 和 MQTT 终止语义进入独立 4 槽控制队列，不与 MIC 的 256 帧 PSRAM ring 争用容量，并统一在 WSS 会话任务中执行；会话未就绪或控制队列已满时拒绝，连接边界清理控制队列及旧 generation PCM，不重放断链期间的内容。MQTT PUBACK 只表示 broker 收到消息，不表示状态迁移已执行；`state_ready` 只确认设备已提交 S4。
+MQTT 语音作业和终止语义进入独立 4 槽控制队列，不与 MIC 的 256 帧 PSRAM ring 争用容量，并统一在 WSS 会话任务中执行；会话未就绪或控制队列已满时拒绝，连接边界清理控制队列及旧 generation PCM，不重放断链期间的内容。MQTT PUBACK 只表示 broker 收到消息，不表示状态迁移已执行。`state_ready` 在 FSM 提交 S4 后由 WSS owner 直接发送，并保留至发送成功，不占用四槽控制队列；它只确认设备已提交 S4。
 
 ## 7. OTA 检查、清单与通知
 
@@ -283,7 +283,7 @@ MQTT 连接并收到 critical 主题的 SUBACK 后执行检查；默认周期为
 
 存在恢复偏移时发送 `Range: bytes=<offset>-`。服务器返回 200 或 416 时，设备可放弃断点从零下载。206 的恢复路径依赖 ETag／Content-Range 处理。
 
-**当前构建限制：** 生效配置没有 `CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS`，ESP-IDF 5.5.4 对应头文件／Kconfig 也未提供代码引用的开关／取头接口，206 分支会进入 `RANGE_MISMATCH`。当前不能向服务端承诺已具备可用的 Range 续传；保留断点数据不等于恢复路径已经验收。
+设备通过 HTTP_EVENT_ON_HEADER 保存本次响应的 ETag／Content-Range；206 的起点、终点、总长和清单必须匹配。合法 206 不再因缺少 SDK 配置开关而被隔离。实际网络中断、Flash 续写和最终哈希仍需端到端验收。
 
 下载后检查镜像头、芯片、项目名、版本、安全版本、SHA-256 与镜像有效性；只有满足提交条件才设置启动分区。双 OTA 分区、启动确认和回滚流程与网络是否在线分开处理。
 

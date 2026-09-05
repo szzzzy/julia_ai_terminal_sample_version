@@ -76,6 +76,16 @@ static volatile TickType_t s_segment_started_tick;
 static TaskHandle_t s_breathe_task;
 /* ISR 只发送完成信号，下一段 LEDC 配置仍由呼吸任务执行。 */
 static SemaphoreHandle_t s_fade_done;
+/* 配置、停止和一次完整 LEDC 提交共享递归锁；ISR 只发通知，从不取此锁。 */
+static SemaphoreHandle_t s_control_lock;
+
+static bool control_lock(void)
+{
+    return s_control_lock != NULL &&
+           xSemaphoreTakeRecursive(s_control_lock, portMAX_DELAY) == pdTRUE;
+}
+
+static void control_unlock(void) { xSemaphoreGiveRecursive(s_control_lock); }
 
 
 static uint32_t duty_for(uint8_t percent)
@@ -110,10 +120,12 @@ static bool IRAM_ATTR fade_done(const ledc_cb_param_t *param, void *arg)
     return wake == pdTRUE;
 }
 
-static void start_segment(uint16_t index)
+static esp_err_t start_segment(uint16_t index)
 {
-    ledc_set_fade_with_time(BL_MODE, BL_CHANNEL, curve_duty(index), s_segment_ms);
-    ledc_fade_start(BL_MODE, BL_CHANNEL, LEDC_FADE_NO_WAIT);
+    esp_err_t err = ledc_set_fade_with_time(BL_MODE, BL_CHANNEL, curve_duty(index), s_segment_ms);
+    if (err == ESP_OK) err = ledc_fade_start(BL_MODE, BL_CHANNEL, LEDC_FADE_NO_WAIT);
+    if (err != ESP_OK) s_breathing = false;
+    return err;
 }
 
 /* 相邻 gamma 样本量化为相同 duty 时，LEDC 会立即报告完成；owner task 仍等待原定
@@ -125,8 +137,11 @@ static void breathe_task(void *arg)
     TickType_t segment_deadline = 0;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (!control_lock()) continue;
         if (!s_breathing) {
-            if (s_fade_done) xSemaphoreGive(s_fade_done);
+            if (s_fade_done && ledc_get_duty(BL_MODE, BL_CHANNEL) == duty_for(s_percent))
+                xSemaphoreGive(s_fade_done);
+            control_unlock();
             continue;
         }
         uint32_t current_generation = s_generation;
@@ -134,8 +149,14 @@ static void breathe_task(void *arg)
             generation = current_generation;
             segment_deadline = s_segment_started_tick;
         }
-        vTaskDelayUntil(&segment_deadline, pdMS_TO_TICKS(s_segment_ms));
-        if (!s_breathing || generation != s_generation) continue;
+        TickType_t segment_ticks = pdMS_TO_TICKS(s_segment_ms);
+        control_unlock();
+        vTaskDelayUntil(&segment_deadline, segment_ticks ? segment_ticks : 1);
+        if (!control_lock()) continue;
+        if (!s_breathing || generation != s_generation) {
+            control_unlock();
+            continue;
+        }
         uint32_t duty = curve_duty(s_curve_index);
         s_percent = (uint8_t)((duty * 100U + BL_MAX_DUTY / 2U) / BL_MAX_DUTY);
 #if JULIA_DISPLAY_LOG
@@ -149,13 +170,15 @@ static void breathe_task(void *arg)
         s_curve_index = (s_curve_index + 1U) % (s_segments + 1U);
         /* Index zero is the duplicated cycle endpoint; proceed to one. */
         if (s_curve_index == 0U) s_curve_index = 1U;
-        if (s_breathing) start_segment(s_curve_index);
+        (void)start_segment(s_curve_index);
+        control_unlock();
     }
 }
 
 /* 初始化完成后 duty 仍为零；只有首帧提交者可以显式点亮，避免暴露未初始化画面。 */
 esp_err_t julia_backlight_init(void)
 {
+    if (s_breathe_task != NULL) return ESP_OK;
     gpio_set_level(JULIA_BACKLIGHT_GPIO, 0);
     gpio_config_t gpio = {.pin_bit_mask = 1ULL << JULIA_BACKLIGHT_GPIO, .mode = GPIO_MODE_OUTPUT};
     ESP_RETURN_ON_ERROR(gpio_config(&gpio), "BACKLIGHT", "gpio");
@@ -170,42 +193,55 @@ esp_err_t julia_backlight_init(void)
     ledc_cbs_t callbacks = {.fade_cb = fade_done};
     ESP_RETURN_ON_ERROR(ledc_cb_register(BL_MODE, BL_CHANNEL, &callbacks, NULL),
                         "BACKLIGHT", "callback");
+    s_control_lock = xSemaphoreCreateRecursiveMutex();
     s_fade_done = xSemaphoreCreateBinary();
-    if (!s_fade_done || xTaskCreateWithCaps(breathe_task, "bl_breathe", 4096, NULL, 4,
+    if (!s_control_lock || !s_fade_done || xTaskCreateWithCaps(breathe_task, "bl_breathe", 4096, NULL, 4,
                                             &s_breathe_task,
-                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS)
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        if (s_control_lock) vSemaphoreDelete(s_control_lock);
+        if (s_fade_done) vSemaphoreDelete(s_fade_done);
+        s_control_lock = NULL;
+        s_fade_done = NULL;
         return ESP_ERR_NO_MEM;
+    }
     ESP_LOGI("BACKLIGHT", "LEDC gpio=%d freq=20000Hz bits=10", JULIA_BACKLIGHT_GPIO);
     return ESP_OK;
 }
 
 void julia_backlight_breathe_stop(void)
 {
+    if (!control_lock()) return;
     s_breathing = false;
+    ++s_generation;
     ledc_fade_stop(BL_MODE, BL_CHANNEL);
+    control_unlock();
 }
 
 /* 立即设置亮度（无渐变）。先停呼吸，避免二者抢占同一通道。 */
 void julia_backlight_set(uint8_t percent)
 {
+    if (!control_lock()) return;
     julia_backlight_breathe_stop();
     if (percent > 100U) percent = 100U;
     s_percent = percent;
     ledc_set_duty(BL_MODE, BL_CHANNEL, duty_for(percent));
     ledc_update_duty(BL_MODE, BL_CHANNEL);
+    control_unlock();
 }
 
 /* 渐变到目标亮度（duration_ms 内）。先停呼吸并清掉旧完成信号，再发起硬件 fade。 */
 esp_err_t julia_backlight_fade_to(uint8_t percent, uint32_t duration_ms)
 {
+    if (!control_lock()) return ESP_ERR_INVALID_STATE;
     julia_backlight_breathe_stop();
     if (percent > 100U) percent = 100U;
     if (s_fade_done) xSemaphoreTake(s_fade_done, 0);
-    ESP_RETURN_ON_ERROR(ledc_set_fade_with_time(BL_MODE, BL_CHANNEL,
-                                                duty_for(percent), duration_ms),
-                        "BACKLIGHT", "fade");
+    esp_err_t err = ledc_set_fade_with_time(BL_MODE, BL_CHANNEL,
+                                           duty_for(percent), duration_ms);
     s_percent = percent;
-    return ledc_fade_start(BL_MODE, BL_CHANNEL, LEDC_FADE_NO_WAIT);
+    if (err == ESP_OK) err = ledc_fade_start(BL_MODE, BL_CHANNEL, LEDC_FADE_NO_WAIT);
+    control_unlock();
+    return err;
 }
 
 /* 等待最近一次 fade 完成（由 ISR 给 s_fade_done）。 */
@@ -223,14 +259,19 @@ esp_err_t julia_backlight_breathe_start(uint8_t min_percent, uint8_t max_percent
                                              BREATHE_DEFAULT_SEGMENTS);
 }
 
-/* period/segments 必须保证单段不少于 BREATHE_MIN_SEGMENT_MS；每次有效配置递增
- * generation，使 owner task 不再推进旧参数对应的剩余 fade。 */
+/* 短周期减少分段数以适应 tick 精度，保持端点和总周期，不提交零 tick 等待。 */
 esp_err_t julia_backlight_breathe_start_ex(uint8_t min_percent, uint8_t max_percent,
                                            uint32_t period_ms, uint16_t segments)
 {
     if (min_percent >= max_percent || max_percent > 100U || !segments ||
-        segments > BREATHE_LUT_SEGMENTS || period_ms / segments < BREATHE_MIN_SEGMENT_MS)
+        segments > BREATHE_LUT_SEGMENTS)
         return ESP_ERR_INVALID_ARG;
+    uint32_t minimum_ms = portTICK_PERIOD_MS > BREATHE_MIN_SEGMENT_MS
+                              ? portTICK_PERIOD_MS : BREATHE_MIN_SEGMENT_MS;
+    uint32_t allowed_segments = period_ms / minimum_ms;
+    if (allowed_segments == 0) return ESP_ERR_INVALID_ARG;
+    if (segments > allowed_segments) segments = (uint16_t)allowed_segments;
+    if (!control_lock()) return ESP_ERR_INVALID_STATE;
     julia_backlight_breathe_stop();
     s_min_percent = min_percent;
     s_max_percent = max_percent;
@@ -244,20 +285,23 @@ esp_err_t julia_backlight_breathe_start_ex(uint8_t min_percent, uint8_t max_perc
     ledc_update_duty(BL_MODE, BL_CHANNEL);
     s_percent = min_percent;
     s_segment_started_tick = xTaskGetTickCount();
-    start_segment(s_curve_index);
+    esp_err_t err = start_segment(s_curve_index);
     ESP_LOGI("BACKLIGHT", "breathe min=%u max=%u period_ms=%lu segments=%u segment_ms=%lu gamma=%u",
              min_percent, max_percent, (unsigned long)period_ms,
              segments, (unsigned long)s_segment_ms, s_gamma_enabled ? 1U : 0U);
-    return ESP_OK;
+    control_unlock();
+    return err;
 }
 
 /* 切换 gamma。若正在呼吸，用当前参数重启以立即生效。 */
 esp_err_t julia_backlight_set_gamma(bool enabled)
 {
+    if (!control_lock()) return ESP_ERR_INVALID_STATE;
     s_gamma_enabled = enabled;
-    if (!s_breathing) return ESP_OK;
-    return julia_backlight_breathe_start_ex(s_min_percent, s_max_percent,
-                                             s_period_ms, s_segments);
+    esp_err_t err = s_breathing ? julia_backlight_breathe_start_ex(s_min_percent, s_max_percent,
+                                                                  s_period_ms, s_segments) : ESP_OK;
+    control_unlock();
+    return err;
 }
 
 bool julia_backlight_gamma_enabled(void) { return s_gamma_enabled; }
@@ -268,8 +312,10 @@ uint32_t julia_backlight_get_duty(void) { return ledc_get_duty(BL_MODE, BL_CHANN
 int julia_backlight_get_gpio_level(void) { return gpio_get_level(JULIA_BACKLIGHT_GPIO); }
 void julia_backlight_force_off(void)
 {
+    if (!control_lock()) return;
     julia_backlight_breathe_stop();
     ledc_stop(BL_MODE, BL_CHANNEL, 0);
     gpio_set_level(JULIA_BACKLIGHT_GPIO, 0);
     s_percent = 0;
+    control_unlock();
 }

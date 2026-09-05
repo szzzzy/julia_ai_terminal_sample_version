@@ -77,24 +77,30 @@ esp_err_t julia_fault_record(julia_fault_reason_t reason, esp_err_t error,
     julia_fault_record_t previous;
     bool previous_valid = julia_fault_read_last(&previous) == ESP_OK;
     uint32_t sequence = previous_valid ? previous.sequence + 1U : 1U;
+    const esp_app_desc_t *app = esp_app_get_description();
+    uint64_t uptime_ms = (uint64_t)esp_timer_get_time() / 1000ULL;
+    const uint64_t quick_ms = (uint64_t)CONFIG_JULIA_FAULT_QUICK_UPTIME_SECONDS * 1000ULL;
+    /* 健康运行或换版后是新的故障链；不能让历史启动故障禁用本次运行期恢复。 */
     uint32_t repeat_count = previous_valid &&
                             previous.reason == (uint32_t)reason &&
-                            previous.uptime_ms <
-                                (uint32_t)CONFIG_JULIA_FAULT_QUICK_UPTIME_SECONDS * 1000U
-                                ? previous.repeat_count + 1U : 1U;
+                            previous.uptime_ms < quick_ms && uptime_ms < quick_ms &&
+                            app != NULL &&
+                            strncmp(previous.firmware_version, app->version,
+                                    sizeof(previous.firmware_version)) == 0
+                                ? (previous.repeat_count == UINT32_MAX
+                                       ? UINT32_MAX : previous.repeat_count + 1U) : 1U;
     julia_fault_record_t record = {
         .schema_version = FAULT_SCHEMA_VERSION,
         .sequence = sequence,
         .repeat_count = repeat_count,
         .reason = (uint32_t)reason,
         .error_code = (int32_t)error,
-        .uptime_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+        .uptime_ms = uptime_ms > UINT32_MAX ? UINT32_MAX : (uint32_t)uptime_ms,
         .free_heap = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_8BIT),
         .reset_reason = (uint32_t)esp_reset_reason(),
         .main_state = (uint8_t)main_state,
         .s2_sub_state = (uint8_t)s2_sub_state,
     };
-    const esp_app_desc_t *app = esp_app_get_description();
     if (app != NULL) {
         strncpy(record.firmware_version, app->version,
                 sizeof(record.firmware_version) - 1U);

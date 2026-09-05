@@ -14,6 +14,8 @@
  */
 #pragma once
 
+#include <stdbool.h>
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -75,6 +77,8 @@ esp_err_t voice_service_ip_ready(void *arg);
  * @note 本函数只登记请求并立即返回；实际读取和发送由语音连接任务完成。
  */
 esp_err_t voice_service_send_file(const char *uri);
+/** 包括已预约入队及正在传输的文件；断线、拒绝、取消和完成均释放预约。 */
+bool voice_service_file_busy(void);
 
 /**
  * @brief 把一块麦克风声音加入当前语音连接的待发送缓冲区。

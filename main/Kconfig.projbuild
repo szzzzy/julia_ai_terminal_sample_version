@@ -85,7 +85,7 @@ menu "Example Configuration"
         int "Battery monitor interval (seconds)"
         depends on JULIA_BATTERY_DIAGNOSTICS
         range 5 3600
-        default 30
+        default 10
 
     config JULIA_BATTERY_PRESENT_MIN_MV
         int "Minimum plausible connected-battery voltage (mV)"
@@ -98,6 +98,36 @@ menu "Example Configuration"
         depends on JULIA_BATTERY_DIAGNOSTICS
         range 4000 5000
         default 4350
+
+    config JULIA_BATTERY_LOW_ENTER_PERCENT
+        int "Enter low-battery state at or below (percent)"
+        depends on JULIA_BATTERY_DIAGNOSTICS
+        range 1 50
+        default 15
+
+    config JULIA_BATTERY_LOW_EXIT_PERCENT
+        int "Leave low-battery state at or above (percent)"
+        depends on JULIA_BATTERY_DIAGNOSTICS
+        range JULIA_BATTERY_LOW_ENTER_PERCENT 80
+        default 25
+
+    config JULIA_BATTERY_CHARGE_RISE_MV
+        int "Voltage rise used to infer charging (mV)"
+        depends on JULIA_BATTERY_DIAGNOSTICS
+        range 10 300
+        default 40
+
+    config JULIA_BATTERY_CHARGE_EXIT_DROP_MV
+        int "Voltage drop used to infer charger removal (mV)"
+        depends on JULIA_BATTERY_DIAGNOSTICS
+        range 20 500
+        default 80
+
+    config JULIA_BATTERY_CHARGE_CONFIRM_SAMPLES
+        int "Consecutive samples required for charge-state changes"
+        depends on JULIA_BATTERY_DIAGNOSTICS
+        range 2 10
+        default 3
 
     config OTA_PRODUCT_ID
         string "OTA product identifier"
@@ -565,6 +595,15 @@ menu "Example Configuration"
                 Maximum time to wait for the peer to close TLS/TCP after this
                 client replies to a WebSocket CLOSE frame. On timeout the
                 transport is forcibly cleaned up and reconnects normally.
+
+        config WSS_FRAME_WRITE_BUDGET_MS
+            int "WSS frame write retry budget (ms)"
+            range 500 4500
+            default 3500
+            help
+                Budget shared by frame header and payload. Already-running TLS
+                writes may exceed it by one socket write timeout. Ring overflow
+                terminates the generation independently of this budget.
 
         config WSS_TASK_STACK_SIZE
             int "WSS session task stack size (bytes)"

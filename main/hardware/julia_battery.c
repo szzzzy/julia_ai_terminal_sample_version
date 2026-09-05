@@ -35,6 +35,21 @@
 #ifndef CONFIG_JULIA_BATTERY_PRESENT_MAX_MV
 #define CONFIG_JULIA_BATTERY_PRESENT_MAX_MV 4350
 #endif
+#ifndef CONFIG_JULIA_BATTERY_LOW_ENTER_PERCENT
+#define CONFIG_JULIA_BATTERY_LOW_ENTER_PERCENT 15
+#endif
+#ifndef CONFIG_JULIA_BATTERY_LOW_EXIT_PERCENT
+#define CONFIG_JULIA_BATTERY_LOW_EXIT_PERCENT 25
+#endif
+#ifndef CONFIG_JULIA_BATTERY_CHARGE_RISE_MV
+#define CONFIG_JULIA_BATTERY_CHARGE_RISE_MV 40
+#endif
+#ifndef CONFIG_JULIA_BATTERY_CHARGE_EXIT_DROP_MV
+#define CONFIG_JULIA_BATTERY_CHARGE_EXIT_DROP_MV 80
+#endif
+#ifndef CONFIG_JULIA_BATTERY_CHARGE_CONFIRM_SAMPLES
+#define CONFIG_JULIA_BATTERY_CHARGE_CONFIRM_SAMPLES 3
+#endif
 
 static const char *TAG = "JULIA_BATTERY";
 static adc_oneshot_unit_handle_t s_adc;
@@ -44,6 +59,12 @@ static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static julia_battery_status_t s_status;
 static julia_battery_update_cb_t s_callback;
 static void *s_callback_ctx;
+static bool s_low_latched;
+static bool s_charging_latched;
+static uint16_t s_charge_reference_mv;
+static uint16_t s_charge_peak_mv;
+static uint8_t s_rise_samples;
+static uint8_t s_drop_samples;
 
 typedef struct {
     uint16_t mv;
@@ -70,6 +91,17 @@ static uint8_t percent_for_voltage(uint16_t mv)
         }
     }
     return 100U;
+}
+
+static const char *battery_state_name(julia_battery_state_t state)
+{
+    switch (state) {
+    case JULIA_BATTERY_STATE_NORMAL: return "NORMAL";
+    case JULIA_BATTERY_STATE_LOW: return "LOW";
+    case JULIA_BATTERY_STATE_CHARGING: return "CHARGING";
+    case JULIA_BATTERY_STATE_UNKNOWN:
+    default: return "UNKNOWN";
+    }
 }
 
 static esp_err_t read_voltage(uint16_t *voltage_mv, uint16_t *minimum_mv,
@@ -113,6 +145,8 @@ static julia_battery_status_t update_status(uint16_t measured_mv)
     bool present = measured_mv >= CONFIG_JULIA_BATTERY_PRESENT_MIN_MV &&
                    measured_mv <= CONFIG_JULIA_BATTERY_PRESENT_MAX_MV;
     portENTER_CRITICAL(&s_status_lock);
+    uint16_t previous_mv = s_status.voltage_mv;
+    bool previous_present = s_status.valid && s_status.present;
     if (present && s_status.valid && s_status.present) {
         measured_mv = (uint16_t)(((uint32_t)s_status.voltage_mv * 3U + measured_mv + 2U) / 4U);
     }
@@ -120,6 +154,63 @@ static julia_battery_status_t update_status(uint16_t measured_mv)
     s_status.present = present;
     s_status.voltage_mv = measured_mv;
     s_status.percent = present ? percent_for_voltage(measured_mv) : 0U;
+
+    if (!present) {
+        s_low_latched = false;
+        s_charging_latched = false;
+        s_charge_reference_mv = 0U;
+        s_charge_peak_mv = 0U;
+        s_rise_samples = 0U;
+        s_drop_samples = 0U;
+        s_status.state = JULIA_BATTERY_STATE_UNKNOWN;
+    } else {
+        if (!previous_present) {
+            s_charge_reference_mv = measured_mv;
+            s_charge_peak_mv = measured_mv;
+            s_rise_samples = 0U;
+            s_drop_samples = 0U;
+        } else if (s_charging_latched) {
+            if (measured_mv > s_charge_peak_mv) s_charge_peak_mv = measured_mv;
+            if ((uint32_t)measured_mv + CONFIG_JULIA_BATTERY_CHARGE_EXIT_DROP_MV <=
+                s_charge_peak_mv) {
+                if (s_drop_samples < UINT8_MAX) ++s_drop_samples;
+            } else {
+                s_drop_samples = 0U;
+            }
+            if (s_drop_samples >= CONFIG_JULIA_BATTERY_CHARGE_CONFIRM_SAMPLES) {
+                s_charging_latched = false;
+                s_charge_reference_mv = measured_mv;
+                s_charge_peak_mv = measured_mv;
+                s_rise_samples = 0U;
+                s_drop_samples = 0U;
+            }
+        } else {
+            if (measured_mv < s_charge_reference_mv) {
+                s_charge_reference_mv = measured_mv;
+                s_rise_samples = 0U;
+            } else if ((uint32_t)measured_mv >=
+                       (uint32_t)s_charge_reference_mv + CONFIG_JULIA_BATTERY_CHARGE_RISE_MV &&
+                       measured_mv >= previous_mv + 3U) {
+                if (s_rise_samples < UINT8_MAX) ++s_rise_samples;
+            } else {
+                s_rise_samples = 0U;
+            }
+            if (s_rise_samples >= CONFIG_JULIA_BATTERY_CHARGE_CONFIRM_SAMPLES) {
+                s_charging_latched = true;
+                s_charge_peak_mv = measured_mv;
+                s_drop_samples = 0U;
+            }
+        }
+
+        if (s_status.percent <= CONFIG_JULIA_BATTERY_LOW_ENTER_PERCENT) {
+            s_low_latched = true;
+        } else if (s_status.percent >= CONFIG_JULIA_BATTERY_LOW_EXIT_PERCENT) {
+            s_low_latched = false;
+        }
+        s_status.state = s_charging_latched ? JULIA_BATTERY_STATE_CHARGING :
+                         s_low_latched ? JULIA_BATTERY_STATE_LOW :
+                         JULIA_BATTERY_STATE_NORMAL;
+    }
     snapshot = s_status;
     portEXIT_CRITICAL(&s_status_lock);
     return snapshot;
@@ -186,10 +277,11 @@ void julia_battery_log_stage(const char *stage)
         return;
     }
     julia_battery_status_t status = update_status(voltage_mv);
-    ESP_LOGI(TAG, "stage=%s vbat=%umV range=%u..%umV percent=%u present=%u",
+    ESP_LOGI(TAG, "stage=%s vbat=%umV range=%u..%umV percent=%u present=%u state=%s",
              stage ? stage : "unknown",
              status.voltage_mv, minimum_mv, maximum_mv,
-             status.percent, status.present ? 1U : 0U);
+             status.percent, status.present ? 1U : 0U,
+             battery_state_name(status.state));
 #else
     (void)stage;
 #endif
@@ -203,8 +295,9 @@ static void battery_monitor_task(void *arg)
         uint16_t voltage_mv = 0;
         if (read_voltage(&voltage_mv, NULL, NULL) == ESP_OK) {
             julia_battery_status_t status = update_status(voltage_mv);
-            ESP_LOGI(TAG, "monitor vbat=%umV percent=%u present=%u",
-                     status.voltage_mv, status.percent, status.present ? 1U : 0U);
+            ESP_LOGI(TAG, "monitor vbat=%umV percent=%u present=%u state=%s",
+                     status.voltage_mv, status.percent, status.present ? 1U : 0U,
+                     battery_state_name(status.state));
             if (s_callback != NULL) s_callback(&status, s_callback_ctx);
         } else {
             ESP_LOGW(TAG, "periodic ADC read failed");

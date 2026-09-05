@@ -133,13 +133,13 @@ static esp_err_t audio_record_load(audio_resume_record_t *record)
     nvs_handle_t handle;
     esp_err_t err = audio_nvs_open(&handle, NVS_READONLY);
     if (err != ESP_OK) {
-        return err;
+        return err == ESP_ERR_NVS_NOT_FOUND ? ESP_ERR_NOT_FOUND : err;
     }
     size_t length = sizeof(*record);
     err = nvs_get_blob(handle, "record", record, &length);
     nvs_close(handle);
     if (err != ESP_OK) {
-        return err;
+        return err == ESP_ERR_NVS_NOT_FOUND ? ESP_ERR_NOT_FOUND : err;
     }
     if (length != sizeof(*record) ||
         record->schema_version != AUDIO_ENGINE_STORE_SCHEMA_VERSION) {
@@ -328,6 +328,7 @@ typedef struct {
     audio_resume_record_t *record; /**< 当前断点记录，sink 更新它的 verified_offset。 */
     size_t offset; /**< 已写入分区的字节数（含断点前缀），同时是摘要校验的边界。 */
     size_t last_checkpoint; /**< 上次已持久化到 NVS 的检查点偏移，用于触发下一次写。 */
+    size_t erased_until; /**< 本次已擦除范围的右端；恢复点按 Flash 扇区对齐。 */
 } audio_engine_sink_ctx_t;
 
 /**
@@ -362,6 +363,17 @@ static esp_err_t audio_engine_sink(void *ctx, const uint8_t *data, size_t len)
         len > (size_t)s->manifest->file_size - s->offset) {
         ESP_LOGE(TAG, "Audio response exceeds manifest size");
         return ESP_ERR_INVALID_SIZE;
+    }
+    size_t erase_size = s->partition->erase_size;
+    if (erase_size == 0) return ESP_ERR_INVALID_STATE;
+    size_t end = s->offset + len;
+    if (end > s->erased_until) {
+        size_t rounded_end = end + (erase_size - end % erase_size) % erase_size;
+        if (rounded_end > s->partition->size || rounded_end < end) return ESP_ERR_INVALID_SIZE;
+        esp_err_t erase_err = esp_partition_erase_range(
+            s->partition, s->erased_until, rounded_end - s->erased_until);
+        if (erase_err != ESP_OK) return erase_err;
+        s->erased_until = rounded_end;
     }
     esp_err_t err = esp_partition_write(s->partition, s->offset, data, len);
     if (err != ESP_OK) {
@@ -403,6 +415,7 @@ static esp_err_t audio_engine_restart(void *ctx)
     }
     s->offset = 0;
     s->last_checkpoint = 0;
+    s->erased_until = 0;
     audio_record_init(s->record, s->manifest);
     return audio_record_save(s->record);
 }
@@ -478,8 +491,16 @@ static void audio_download_task(void *pvParameter)
             record_active = true;
             /* normalize 会把 offset 向下对齐到 Flash 加密安全写入边界；若启用加密，
              * 对齐可能丢弃尚未持久化的尾部数据，因此续传以它的返回值为准。 */
-            resume_offset = ota_stability_normalize_resume_offset(record.verified_offset);
+            /* 重读最后一个未完整提交的扇区，不能原地改写尚未擦除的 NOR 数据。 */
+            resume_offset = record.verified_offset -
+                            record.verified_offset % partition->erase_size;
             resume = resume_offset > 0U;
+            record.verified_offset = (uint32_t)resume_offset;
+            err = audio_record_save(&record);
+            if (err != ESP_OK) {
+                failure_reason = NATIVE_OTA_FAILURE_NVS_WRITE_FAILED;
+                goto cleanup;
+            }
             ESP_LOGI(TAG, "Resuming audio artifact %s from offset=%zu",
                      manifest.audio_id, resume_offset);
         } else {
@@ -510,6 +531,7 @@ static void audio_download_task(void *pvParameter)
     sink_ctx.record = &record;
     sink_ctx.offset = resume_offset;
     sink_ctx.last_checkpoint = resume_offset;
+    sink_ctx.erased_until = resume_offset;
 
     /* 下载器配置：expected_size / resume_offset / expected_etag 从断点恢复而来；
      * cert_pem=NULL 表示用构建嵌入的 CA；sink 与 restart 回调把"写分区 + 检查点"

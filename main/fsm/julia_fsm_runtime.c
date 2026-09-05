@@ -15,6 +15,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "julia_avatar.h"
 #include "julia_backlight.h"
@@ -43,6 +44,8 @@ typedef struct {
     fsm_event_t event;
     julia_fault_reason_t fault_reason;
     esp_err_t error;
+    SemaphoreHandle_t completed;
+    bool *applied;
 } fsm_runtime_message_t;
 
 typedef enum {
@@ -72,6 +75,11 @@ static esp_timer_handle_t s_standby_timer;
 static esp_timer_handle_t s_silent_timer;
 static esp_timer_handle_t s_disconnect_timer;
 static esp_timer_handle_t s_service_init_timer;
+/* owner 持有截止时间；timer 事件只是及时唤醒，满队列不能丢掉状态退出条件。 */
+static int64_t s_standby_deadline_us;
+static int64_t s_silent_deadline_us;
+static int64_t s_disconnect_deadline_us;
+static int64_t s_service_deadline_us;
 static julia_fsm_state_observer_t s_state_observer;
 static void *s_state_observer_ctx;
 
@@ -215,6 +223,7 @@ static bool service_state_apply_event(fsm_event_t event)
     if (state == JULIA_SERVICE_ONLINE && s_service_init_timer != NULL) {
         (void)esp_timer_stop(s_service_init_timer);
     }
+    if (state == JULIA_SERVICE_ONLINE) s_service_deadline_us = 0;
     return true;
 }
 
@@ -444,6 +453,14 @@ static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
     julia_avatar_set_status_text(
         state_status_text(main_state, s2_sub_state, fsm->s7_sub_state));
     apply_presentation(main_state, s2_sub_state, fsm->s7_sub_state);
+    if (main_state == JULIA_MAIN_STATE_S3_STANDBY) {
+        s_standby_deadline_us = esp_timer_get_time() +
+            (int64_t)CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS * 1000000LL;
+    }
+    if (main_state == JULIA_MAIN_STATE_S5_SILENT) {
+        s_silent_deadline_us = esp_timer_get_time() +
+            (int64_t)CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS * 1000000LL;
+    }
     if (main_state == JULIA_MAIN_STATE_S3_STANDBY && s_standby_timer != NULL) {
         esp_err_t err = esp_timer_start_once(
             s_standby_timer,
@@ -465,15 +482,16 @@ static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
         /* talking 必须先于首块 PCM 生效，嘴型才表示实际播放而非网络收包。 */
         julia_avatar_talking_start();
         if (!play_disconnect_prompt()) julia_avatar_talking_stop();
+
+        s_disconnect_deadline_us = esp_timer_get_time() + DISCONNECT_NOTICE_US;
         /* 计时器失败时立即执行返回策略，不能让提示态永久占用行为状态机。 */
         esp_err_t err = s_disconnect_timer != NULL
                             ? esp_timer_start_once(s_disconnect_timer,
                                                    DISCONNECT_NOTICE_US)
                             : ESP_ERR_INVALID_STATE;
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "断联提示计时启动失败，立即返回稳定状态：%s",
+            ESP_LOGW(TAG, "断联提示计时启动失败，owner 将按截止时间返回：%s",
                      esp_err_to_name(err));
-            (void)julia_fsm_runtime_post(EVT_DISCONNECT_NOTICE_TIMEOUT);
         }
     }
 }
@@ -484,6 +502,9 @@ static void runtime_on_exit(julia_fsm_t *fsm, julia_main_state_t main_state,
     (void)fsm;
     (void)s2_sub_state;
     (void)event;
+    if (main_state == JULIA_MAIN_STATE_S3_STANDBY) s_standby_deadline_us = 0;
+    if (main_state == JULIA_MAIN_STATE_S5_SILENT) s_silent_deadline_us = 0;
+    if (main_state == JULIA_MAIN_STATE_S7_FAULT) s_disconnect_deadline_us = 0;
     if (main_state == JULIA_MAIN_STATE_S3_STANDBY && s_standby_timer != NULL) {
         (void)esp_timer_stop(s_standby_timer);
     }
@@ -497,11 +518,52 @@ static void runtime_on_exit(julia_fsm_t *fsm, julia_main_state_t main_state,
     }
 }
 
+static int64_t *event_deadline(fsm_event_t event)
+{
+    switch (event) {
+    case EVT_STANDBY_TIMEOUT: return &s_standby_deadline_us;
+    case EVT_SILENT_TIMEOUT: return &s_silent_deadline_us;
+    case EVT_DISCONNECT_NOTICE_TIMEOUT: return &s_disconnect_deadline_us;
+    case EVT_SERVICE_CONNECT_TIMEOUT: return &s_service_deadline_us;
+    default: return NULL;
+    }
+}
+
+static bool runtime_process_event(fsm_event_t event)
+{
+    int64_t *deadline = event_deadline(event);
+    if (deadline != NULL) {
+        if (*deadline == 0 || esp_timer_get_time() < *deadline) return false;
+        *deadline = 0;
+    }
+    julia_service_state_t previous = julia_fsm_runtime_get_service_state();
+    bool service_event = service_state_apply_event(event);
+    if (service_event && (julia_fsm_runtime_get_service_state() != JULIA_SERVICE_OFFLINE ||
+                          previous == JULIA_SERVICE_OFFLINE)) return true;
+    bool applied = julia_fsm_handle_event(&s_fsm, event, NULL);
+    if (!applied) ESP_LOGD(TAG, "ignored event=%s state=%s/%s", julia_fsm_event_name(event),
+                           julia_fsm_main_state_name(s_fsm.main_state),
+                           julia_fsm_s2_sub_state_name(s_fsm.s2_sub_state));
+    return applied;
+}
+
+static void runtime_check_deadlines(void)
+{
+    const fsm_event_t events[] = {EVT_STANDBY_TIMEOUT, EVT_SILENT_TIMEOUT,
+        EVT_DISCONNECT_NOTICE_TIMEOUT, EVT_SERVICE_CONNECT_TIMEOUT};
+    for (size_t i = 0; i < sizeof(events) / sizeof(events[0]); ++i) {
+        int64_t deadline = *event_deadline(events[i]);
+        if (deadline != 0 && esp_timer_get_time() >= deadline)
+            (void)runtime_process_event(events[i]);
+    }
+}
+
 static void fsm_task(void *argument)
 {
     (void)argument;
     fsm_runtime_message_t message;
     for (;;) {
+        runtime_check_deadlines();
         /* 有界等待兼作连接状态巡检周期，不能改回 portMAX_DELAY。 */
         if (xQueueReceive(s_event_queue, &message, pdMS_TO_TICKS(1000)) != pdTRUE) {
             service_state_reconcile();
@@ -538,32 +600,10 @@ static void fsm_task(void *argument)
             esp_restart();
             continue;
         }
-        julia_service_state_t previous_service_state =
-            julia_fsm_runtime_get_service_state();
-        bool service_event = service_state_apply_event(message.event);
-        if (service_event) {
-            julia_service_state_t current_service_state =
-                julia_fsm_runtime_get_service_state();
-            if (current_service_state != JULIA_SERVICE_OFFLINE ||
-                previous_service_state == JULIA_SERVICE_OFFLINE) {
-                /* 连接事件只维护正交服务状态；同一离线周期不重复进入 S7.1。 */
-                continue;
-            }
-        }
-        if (!julia_fsm_handle_event(&s_fsm, message.event, NULL)) {
-            if (message.event == EVT_WAKEUP ||
-                message.event == EVT_INTENT_GOODNIGHT ||
-                message.event == EVT_INTENT_DISMISS) {
-                ESP_LOGW(TAG, "关键交互事件被忽略：event=%s state=%s/%s",
-                         julia_fsm_event_name(message.event),
-                         julia_fsm_main_state_name(s_fsm.main_state),
-                         julia_fsm_s2_sub_state_name(s_fsm.s2_sub_state));
-            } else {
-                ESP_LOGD(TAG, "ignored event=%s state=%s/%s",
-                         julia_fsm_event_name(message.event),
-                         julia_fsm_main_state_name(s_fsm.main_state),
-                         julia_fsm_s2_sub_state_name(s_fsm.s2_sub_state));
-            }
+        bool applied = runtime_process_event(message.event);
+        if (message.completed != NULL) {
+            *message.applied = applied;
+            xSemaphoreGive(message.completed);
         }
     }
     vTaskDelete(NULL);
@@ -639,6 +679,8 @@ esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready)
                            s_fsm.s7_sub_state);
     }
 
+    s_service_deadline_us = esp_timer_get_time() +
+        (int64_t)CONFIG_JULIA_SERVICE_INIT_TIMEOUT_SECONDS * 1000000LL;
     if (xTaskCreate(fsm_task, "julia_fsm", FSM_TASK_STACK_SIZE, NULL,
                     FSM_TASK_PRIORITY, &s_task) != pdPASS) {
         if (s_standby_timer != NULL) {
@@ -665,8 +707,7 @@ esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready)
         esp_timer_start_once(
             s_service_init_timer,
             (uint64_t)CONFIG_JULIA_SERVICE_INIT_TIMEOUT_SECONDS * 1000000ULL) != ESP_OK) {
-        ESP_LOGW(TAG, "初始业务连接计时器不可用，立即按离线处理");
-        (void)julia_fsm_runtime_post(EVT_SERVICE_CONNECT_TIMEOUT);
+        ESP_LOGW(TAG, "初始业务连接计时器不可用，owner 将按截止时间巡检");
     }
     ESP_LOGI(TAG, "ready initial=%s/%s/%s queue=%u s1_bl=%d%% "
                   "s3_breathe=%d-%d%% s3_sleep=%ds s5_standby=%ds "
@@ -704,6 +745,27 @@ esp_err_t julia_fsm_runtime_post(fsm_event_t event)
         .event = event,
     };
     return xQueueSend(s_event_queue, &message, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+esp_err_t julia_fsm_runtime_post_sync(fsm_event_t event)
+{
+    if (event <= EVT_NONE || event >= EVT_COUNT) return ESP_ERR_INVALID_ARG;
+    if (s_event_queue == NULL || s_task == NULL || xTaskGetCurrentTaskHandle() == s_task)
+        return ESP_ERR_INVALID_STATE;
+    SemaphoreHandle_t completed = xSemaphoreCreateBinary();
+    if (completed == NULL) return ESP_ERR_NO_MEM;
+    bool applied = false;
+    fsm_runtime_message_t message = {
+        .type = FSM_RUNTIME_MESSAGE_EVENT, .event = event,
+        .completed = completed, .applied = &applied,
+    };
+    if (xQueueSend(s_event_queue, &message, portMAX_DELAY) != pdTRUE) {
+        vSemaphoreDelete(completed);
+        return ESP_ERR_NO_MEM;
+    }
+    (void)xSemaphoreTake(completed, portMAX_DELAY);
+    vSemaphoreDelete(completed);
+    return applied ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
 esp_err_t julia_fsm_runtime_raise_fault(julia_fault_reason_t reason, esp_err_t error)
