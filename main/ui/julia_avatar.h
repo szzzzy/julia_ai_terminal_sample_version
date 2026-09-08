@@ -63,8 +63,8 @@ void julia_avatar_set_status_text(const char *text);
 void julia_avatar_set_offline(bool offline);
 
 /**
- * 设置屏幕顶部的正交电量提示。充电优先显示绿色 CHG，低电量显示红色 LOW，
- * 正常显示 BAT；未检测到有效电池电压时隐藏。百分比是带载电压的近似换算。
+ * 设置状态文字上方的常驻电量提示：正常显示黑色 BAT，低电量显示红色 LOW，
+ * 疑似充电显示绿色 CHG；未检测到有效电池电压时隐藏。百分比是带载电压的近似换算。
  */
 void julia_avatar_set_battery_status(bool present, bool charging, bool low,
                                      uint8_t percent, uint16_t voltage_mv);

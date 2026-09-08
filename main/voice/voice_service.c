@@ -102,7 +102,24 @@ typedef enum {
     VOICE_PLAYBACK_ROLE_WAKE_REPLY,
     VOICE_PLAYBACK_ROLE_DIALOG_REPLY,
     VOICE_PLAYBACK_ROLE_SELF_TEST,
+    VOICE_PLAYBACK_ROLE_DISMISS_REPLY,
+    VOICE_PLAYBACK_ROLE_GOODNIGHT_REPLY,
 } voice_playback_role_t;
+
+static bool playback_role_is_terminal(voice_playback_role_t role)
+{
+    return role == VOICE_PLAYBACK_ROLE_DISMISS_REPLY ||
+           role == VOICE_PLAYBACK_ROLE_GOODNIGHT_REPLY;
+}
+
+extern const uint8_t bye_no_bother_wav_start[]
+    asm("_binary_bye_no_bother_16k_mono_16bit_wav_start");
+extern const uint8_t bye_no_bother_wav_end[]
+    asm("_binary_bye_no_bother_16k_mono_16bit_wav_end");
+extern const uint8_t goodnight_wav_start[]
+    asm("_binary_goodnight_16k_mono_16bit_wav_start");
+extern const uint8_t goodnight_wav_end[]
+    asm("_binary_goodnight_16k_mono_16bit_wav_end");
 
 /* 下列播放、文件和上传进度只由负责语音连接的任务修改，避免跨任务互相覆盖。 */
 static uint32_t s_playback_generation;
@@ -480,6 +497,16 @@ static void voice_service_speaker_done(void)
     s_playback_role = VOICE_PLAYBACK_ROLE_NONE;
     julia_avatar_talking_stop();
 
+    if (playback_role_is_terminal(completed_role)) {
+        /* 播放与 MIC_START 由同一任务收尾；被打断后旧完成结果不能再触发退出。 */
+        if (julia_fsm_runtime_get_state() == JULIA_MAIN_STATE_S4_INTERACTION) {
+            post_fsm_event(completed_role == VOICE_PLAYBACK_ROLE_GOODNIGHT_REPLY
+                               ? EVT_INTENT_GOODNIGHT : EVT_INTENT_DISMISS);
+        }
+        julia_idle_display_set_busy(false);
+        return;
+    }
+
     if (completed_role == VOICE_PLAYBACK_ROLE_WAKE_REPLY) {
         /* 唤醒回应属于 S4 交互建立，不是 S2 正常回答。播放结束后保持 S4，
          * 等服务器确认实际话语开始时再接收 MIC_START。 */
@@ -582,12 +609,23 @@ static void voice_service_poll(void)
 {
     /* 关键确认由 WSS owner 直接发送，不与可丢弃的四槽控制作业竞争。 */
     voice_service_state_ready_poll();
+    if (playback_role_is_terminal(s_playback_role) &&
+        julia_fsm_runtime_get_state() != JULIA_MAIN_STATE_S4_INTERACTION) {
+        bool stopped = voice_playback_stop_generation(s_playback_generation);
+        s_playback_generation = 0;
+        s_playback_role = VOICE_PLAYBACK_ROLE_NONE;
+        if (stopped || !voice_playback_is_active()) julia_avatar_talking_stop();
+        julia_idle_display_set_busy(false);
+    }
     uint32_t generation;
     esp_err_t result;
     if (voice_playback_take_completion(&generation, &result) &&
         generation == s_playback_generation) {
+        bool local_terminal = playback_role_is_terminal(s_playback_role);
         voice_service_speaker_done();
-        if (result != ESP_OK) {
+        if (result != ESP_OK && local_terminal) {
+            ESP_LOGW(TAG, "Terminal prompt playback failed: %s", esp_err_to_name(result));
+        } else if (result != ESP_OK) {
             (void)voice_service_send_error(result == ESP_ERR_NO_MEM ? "ERROR playback_overflow" :
                                           result == ESP_ERR_TIMEOUT ? "ERROR playback_timeout" :
                                                                      "ERROR playback_failed");
@@ -852,19 +890,8 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
             ESP_LOGW(TAG, "Invalid SPKS rate: %.*s", (int)n, buf);
         }
     } else if (len > 5 && memcmp(text, "SPKV ", 5) == 0) {
-        char buf[16];
-        size_t n = len - 5;
-        if (n >= sizeof(buf)) n = sizeof(buf) - 1;
-        memcpy(buf, text + 5, n);
-        buf[n] = '\0';
-        char *end = NULL;
-        long volume = strtol(buf, &end, 10);
-        if (end != buf && volume >= 0 && volume <= 100) {
-            board_audio_speaker_set_volume((uint8_t)volume);
-            ESP_LOGI(TAG, "SPKV: volume=%ld", volume);
-        } else {
-            ESP_LOGW(TAG, "Invalid SPKV volume: %.*s", (int)n, buf);
-        }
+        ESP_LOGI(TAG, "SPKV ignored: fixed speaker volume=%d",
+                 CONFIG_JULIA_SPEAKER_VOLUME_PERCENT);
     } else if (len > 5 && memcmp(text, "MICS ", 5) == 0) {
 #if CONFIG_JULIA_SERVER_WAKE_ENABLE
         ESP_LOGW(TAG, "MICS ignored: server wake mode requires continuous PCM upload");
@@ -1085,6 +1112,10 @@ static void voice_service_apply_terminal_intent(fsm_event_t event, const char *i
                  julia_fsm_main_state_name(state));
         return;
     }
+    if (playback_role_is_terminal(s_playback_role)) return;
+    ESP_LOGI(TAG, "Terminal intent=%s received in %s/%s", intent,
+             julia_fsm_main_state_name(state),
+             julia_fsm_s2_sub_state_name(julia_fsm_runtime_get_s2_sub_state()));
 
     /* 设备已经决定结束交流后，旧的唤醒回应或正常回答都不能继续出声。
      * 所有清理在负责语音连接的同一任务中完成，保证停止顺序一致。 */
@@ -1101,6 +1132,35 @@ static void voice_service_apply_terminal_intent(fsm_event_t event, const char *i
     portEXIT_CRITICAL(&s_mic_state_lock);
 
     julia_idle_display_set_busy(false);
+    if (state == JULIA_MAIN_STATE_S2_DIALOG) {
+        /* MQTT 语义可能晚于 WSS MIC_STOP；等待 S4 呈现提交后再启动声音和嘴型。 */
+        esp_err_t err = julia_fsm_runtime_post_sync(EVT_PREPARE_TERMINAL_REPLY);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Terminal prompt=%s could not enter S4: %s", intent,
+                     esp_err_to_name(err));
+            post_fsm_event(event);
+            return;
+        }
+        state = julia_fsm_runtime_get_state();
+    }
+    if (state == JULIA_MAIN_STATE_S4_INTERACTION) {
+        bool goodnight = event == EVT_INTENT_GOODNIGHT;
+        const uint8_t *wav = goodnight ? goodnight_wav_start : bye_no_bother_wav_start;
+        const uint8_t *wav_end = goodnight ? goodnight_wav_end : bye_no_bother_wav_end;
+        julia_avatar_talking_start();
+        esp_err_t err = voice_playback_start_local_wav(
+            wav, (size_t)(wav_end - wav), false, &s_playback_generation);
+        if (err == ESP_OK) {
+            s_playback_role = goodnight ? VOICE_PLAYBACK_ROLE_GOODNIGHT_REPLY
+                                        : VOICE_PLAYBACK_ROLE_DISMISS_REPLY;
+            julia_idle_display_set_busy(true);
+            ESP_LOGI(TAG, "Terminal prompt=%s playing in S4 generation=%" PRIu32,
+                     intent, s_playback_generation);
+            return;
+        }
+        julia_avatar_talking_stop();
+        ESP_LOGW(TAG, "Terminal prompt=%s start failed: %s", intent, esp_err_to_name(err));
+    }
     post_fsm_event(event);
     ESP_LOGI(TAG, "Terminal intent applied: %s%s", intent,
              was_listening ? ", utterance closed" : "");

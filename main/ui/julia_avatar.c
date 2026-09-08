@@ -57,9 +57,9 @@
 #define STATUS_LABEL_Y              100
 #define STATUS_LABEL_WIDTH          220
 #define OFFLINE_LABEL_Y             120
-#define BATTERY_LABEL_X             135
-#define BATTERY_LABEL_Y              20
-#define BATTERY_LABEL_WIDTH          90
+#define BATTERY_LABEL_X              STATUS_LABEL_X
+#define BATTERY_LABEL_Y              (STATUS_LABEL_Y - 20)
+#define BATTERY_LABEL_WIDTH          STATUS_LABEL_WIDTH
 
 /* 整体移动 360×360 根对象会让每一帧都刷新全屏；当前 QSPI 面板分十条发送且没有
  * 撕裂同步信号，持续全屏更新会出现明显闪烁。因此微动只修改局部眼睛和嘴巴，
@@ -93,6 +93,29 @@ static julia_avatar_dialog_phase_t s_applied_dialog_phase =
 static portMUX_TYPE s_phase_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_boot_sequence_played;
 static char s_status_text[32] = "S0 BOOT";
+
+static void battery_label_apply(bool present, bool charging, bool low,
+                                uint8_t percent)
+{
+    if (s_battery_label == NULL) return;
+    if (!present) {
+        lv_obj_add_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        char text[16];
+        snprintf(text, sizeof(text), charging ? "CHG %u%%" :
+                                             low ? "LOW %u%%" : "BAT %u%%",
+                 percent);
+        lv_label_set_text(s_battery_label, text);
+        lv_obj_set_style_text_color(
+            s_battery_label,
+            charging ? lv_palette_main(LV_PALETTE_GREEN) :
+            low ? lv_palette_main(LV_PALETTE_RED) : lv_color_black(),
+            LV_PART_MAIN);
+        lv_obj_clear_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_move_foreground(s_battery_label);
+    lv_obj_invalidate(s_battery_label);
+}
 
 static void status_label_place(void)
 {
@@ -147,23 +170,7 @@ void julia_avatar_set_battery_status(bool present, bool charging, bool low,
     portEXIT_CRITICAL(&s_phase_lock);
 
     if (s_battery_label == NULL || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
-    if (!present) {
-        lv_obj_add_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        char text[16];
-        snprintf(text, sizeof(text), charging ? "CHG %u%%" :
-                                             low ? "LOW %u%%" : "BAT %u%%",
-                 percent);
-        lv_label_set_text(s_battery_label, text);
-        lv_obj_set_style_text_color(
-            s_battery_label,
-            charging ? lv_palette_main(LV_PALETTE_GREEN) :
-            low ? lv_palette_main(LV_PALETTE_RED) : lv_color_black(),
-            LV_PART_MAIN);
-        lv_obj_clear_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
-    }
-    lv_obj_move_foreground(s_battery_label);
-    lv_obj_invalidate(s_battery_label);
+    battery_label_apply(present, charging, low, percent);
     lvgl_port_unlock();
 }
 
@@ -670,7 +677,7 @@ esp_err_t julia_avatar_init(void)
     s_battery_label = lv_label_create(screen);
     lv_obj_set_pos(s_battery_label, BATTERY_LABEL_X, BATTERY_LABEL_Y);
     lv_obj_set_width(s_battery_label, BATTERY_LABEL_WIDTH);
-    lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_battery_label, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_battery_label, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_clear_flag(s_battery_label, LV_OBJ_FLAG_SCROLLABLE);
@@ -686,24 +693,9 @@ esp_err_t julia_avatar_init(void)
     battery_percent = s_battery_percent;
     battery_voltage_mv = s_battery_voltage_mv;
     portEXIT_CRITICAL(&s_phase_lock);
-    if (battery_present) {
-        char battery_text[16];
-        snprintf(battery_text, sizeof(battery_text),
-                 battery_charging ? "CHG %u%%" :
-                 battery_low ? "LOW %u%%" : "BAT %u%%",
-                 battery_percent);
-        lv_label_set_text(s_battery_label, battery_text);
-        lv_obj_set_style_text_color(
-            s_battery_label,
-            battery_charging ? lv_palette_main(LV_PALETTE_GREEN) :
-            battery_low ? lv_palette_main(LV_PALETTE_RED) : lv_color_black(),
-            LV_PART_MAIN);
-    } else {
-        lv_label_set_text(s_battery_label, "BAT --");
-        lv_obj_add_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
-    }
+    battery_label_apply(battery_present, battery_charging, battery_low,
+                        battery_percent);
     (void)battery_voltage_mv;
-    lv_obj_move_foreground(s_battery_label);
     ESP_LOGI(TAG, "status label ready x=%d y=%d width=%d text=%s",
              lv_obj_get_x(s_status_label), lv_obj_get_y(s_status_label),
              lv_obj_get_width(s_status_label), status_snapshot);

@@ -1,0 +1,352 @@
+Start testing: Sep 07 09:17 中国标准时间
+----------------------------------------------------------
+1/20 Testing: pcm_buffer
+1/20 Test: pcm_buffer
+Command: "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/test_pcm_buffer.exe"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"pcm_buffer" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: FIFO wrap, ordered END, cancellation, overflow, PCM16 alignment, 20000-byte stream
+<end of output>
+Test time =   0.08 sec
+----------------------------------------------------------
+Test Passed.
+"pcm_buffer" end time: Sep 07 09:17 中国标准时间
+"pcm_buffer" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/20 Testing: recovery_backlight
+2/20 Test: recovery_backlight
+Command: "C:/Users/10459/scoop/apps/python313/current/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/recovery" "--case" "backlight"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"recovery_backlight" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: concurrent sleep wins over old fade; legal short periods use nonzero ticks
+<end of output>
+Test time =   0.20 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_backlight" end time: Sep 07 09:17 中国标准时间
+"recovery_backlight" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/20 Testing: recovery_rtc
+3/20 Test: recovery_rtc
+Command: "C:/Users/10459/scoop/apps/python313/current/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/recovery" "--case" "rtc"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"recovery_rtc" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: RTC retains legacy encoding, rejects stopped/invalid clocks and propagates I/O failures
+<end of output>
+Test time =   0.20 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_rtc" end time: Sep 07 09:17 中国标准时间
+"recovery_rtc" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/20 Testing: recovery_display
+4/20 Test: recovery_display
+Command: "C:/Users/10459/scoop/apps/python313/current/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/recovery" "--case" "display"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"recovery_display" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: LCD hardware failures remain pending and are retried
+<end of output>
+Test time =   0.18 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_display" end time: Sep 07 09:17 中国标准时间
+"recovery_display" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/20 Testing: recovery_mqtt
+5/20 Test: recovery_mqtt
+Command: "C:/Users/10459/scoop/apps/python313/current/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/recovery" "--case" "mqtt"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"recovery_mqtt" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: PUBACK binding survives lock contention, expired tracks retry, rejected SUBACK stays offline
+<end of output>
+Test time =   0.20 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_mqtt" end time: Sep 07 09:17 中国标准时间
+"recovery_mqtt" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/20 Testing: recovery_fsm
+6/20 Test: recovery_fsm
+Command: "C:/Users/10459/scoop/apps/python313/current/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/recovery" "--case" "fsm"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"recovery_fsm" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/recovery/fsm_recovery.c:200: warning: implicit declaration of function 'play_local_prompt'
+D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/recovery/fsm_recovery.c:200: error: 'network_disconnected_wav_start' undeclared
+Traceback (most recent call last):
+  File "D:\Espressif\projects\julia-fused-base\tests\host\test_recovery_paths.py", line 591, in <module>
+    globals()[args.case](args)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "D:\Espressif\projects\julia-fused-base\tests\host\test_recovery_paths.py", line 311, in fsm
+        run_case(args, "fsm_recovery", prefix, [("main/fsm/julia_fsm_runtime.c", names)], r'''
+        ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    int main(void){
+    ^^^^^^^^^^^^^^^
+    ...<24 lines>...
+    }
+    ^
+    ''', ["main/fsm/julia_fsm.c"])
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Espressif\projects\julia-fused-base\tests\host\test_recovery_paths.py", line 94, in run_case
+    subprocess.run(command, check=True)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\10459\scoop\apps\python313\current\Lib\subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe', '-ID:\\Espressif\\projects\\julia-fused-base\\tests\\host\\stubs', '-ID:\\Espressif\\projects\\julia-fused-base\\main\\fsm', '-ID:\\Espressif\\projects\\julia-fused-base\\main\\hardware', 'D:\\CodexData\\.codex\\visualizations\\2026\\09\\07\\01a0796b-eee6-7812-a8e8-f7ba8d26ac28\\host-build\\recovery\\fsm_recovery.c', 'D:\\Espressif\\projects\\julia-fused-base\\main\\fsm\\julia_fsm.c', '-o', 'D:\\CodexData\\.codex\\visualizations\\2026\\09\\07\\01a0796b-eee6-7812-a8e8-f7ba8d26ac28\\host-build\\recovery\\fsm_recovery.exe']' returned non-zero exit status 1.
+<end of output>
+Test time =   0.14 sec
+----------------------------------------------------------
+Test Failed.
+"recovery_fsm" end time: Sep 07 09:17 中国标准时间
+"recovery_fsm" time elapsed: 00:00:00
+----------------------------------------------------------
+
+7/20 Testing: recovery_boot
+7/20 Test: recovery_boot
+Command: "C:/Users/10459/scoop/apps/python313/current/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/recovery" "--case" "boot"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"recovery_boot" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: boot never confirms before application health; application/product/confirm failures roll back
+<end of output>
+Test time =   0.19 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_boot" end time: Sep 07 09:17 中国标准时间
+"recovery_boot" time elapsed: 00:00:00
+----------------------------------------------------------
+
+8/20 Testing: recovery_storage
+8/20 Test: recovery_storage
+Command: "C:/Users/10459/scoop/apps/python313/current/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/recovery" "--case" "storage"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"recovery_storage" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: audio replacement erases NOR sectors and resume preserves the committed prefix
+PASS: concurrent activity survives snapshot commit and remains dirty until saved
+PASS: clear executes after prior queued writes; old events cannot reappear after acknowledgement
+<end of output>
+Test time =   0.45 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_storage" end time: Sep 07 09:17 中国标准时间
+"recovery_storage" time elapsed: 00:00:00
+----------------------------------------------------------
+
+9/20 Testing: recovery_fault
+9/20 Test: recovery_fault
+Command: "C:/Users/10459/scoop/apps/python313/current/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/recovery" "--case" "fault"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"recovery_fault" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: healthy uptime and firmware change reset quick-fault chains; uptime does not wrap
+<end of output>
+Test time =   0.19 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_fault" end time: Sep 07 09:17 中国标准时间
+"recovery_fault" time elapsed: 00:00:00
+----------------------------------------------------------
+
+10/20 Testing: recovery_voice
+10/20 Test: recovery_voice
+Command: "C:/Users/10459/scoop/apps/python313/current/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/recovery" "--case" "voice"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"recovery_voice" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: consecutive MIC_STOP/SPKS sees committed THINK; state_ready is retained until owner sends it
+<end of output>
+Test time =   0.20 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_voice" end time: Sep 07 09:17 中国标准时间
+"recovery_voice" time elapsed: 00:00:00
+----------------------------------------------------------
+
+11/20 Testing: voice_playback
+11/20 Test: voice_playback
+Command: "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/test_voice_playback.exe"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"voice_playback" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: short END drains the entire tail without prebuffer delay
+PASS: embedded local PCM bypasses the network buffer and drains fully
+PASS: interrupt/restart suppresses old buffered PCM and stale completion
+PASS: bounded prebuffer wait and recovery after a one-second gap
+PASS: no-input starvation returns an explicit timeout
+PASS: overflow aborts explicitly without silently dropping a middle packet
+PASS: I2S failure terminates and reports the active generation
+PASS: END can stop an asynchronous self-test before tone generation
+<end of output>
+Test time =   0.08 sec
+----------------------------------------------------------
+Test Passed.
+"voice_playback" end time: Sep 07 09:17 中国标准时间
+"voice_playback" time elapsed: 00:00:00
+----------------------------------------------------------
+
+12/20 Testing: julia_fsm
+12/20 Test: julia_fsm
+Command: "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/test_julia_fsm.exe"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"julia_fsm" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.09 sec
+----------------------------------------------------------
+Test Passed.
+"julia_fsm" end time: Sep 07 09:17 中国标准时间
+"julia_fsm" time elapsed: 00:00:00
+----------------------------------------------------------
+
+13/20 Testing: transport_disconnect_fsm
+13/20 Test: transport_disconnect_fsm
+Command: "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/test_transport_disconnect_fsm.exe"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"transport_disconnect_fsm" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.08 sec
+----------------------------------------------------------
+Test Passed.
+"transport_disconnect_fsm" end time: Sep 07 09:17 中国标准时间
+"transport_disconnect_fsm" time elapsed: 00:00:00
+----------------------------------------------------------
+
+14/20 Testing: wss_tx_writer
+14/20 Test: wss_tx_writer
+Command: "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/test_wss_tx_writer.exe"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"wss_tx_writer" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: bounded TLS writes preserve offsets across transient states
+<end of output>
+Test time =   0.07 sec
+----------------------------------------------------------
+Test Passed.
+"wss_tx_writer" end time: Sep 07 09:17 中国标准时间
+"wss_tx_writer" time elapsed: 00:00:00
+----------------------------------------------------------
+
+15/20 Testing: voice_uplink_ring
+15/20 Test: voice_uplink_ring
+Command: "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/test_voice_uplink_ring.exe"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"voice_uplink_ring" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: uplink ring preserves frames and rejects old connection generations
+<end of output>
+Test time =   0.07 sec
+----------------------------------------------------------
+Test Passed.
+"voice_uplink_ring" end time: Sep 07 09:17 中国标准时间
+"voice_uplink_ring" time elapsed: 00:00:00
+----------------------------------------------------------
+
+16/20 Testing: voice_uplink_pump
+16/20 Test: voice_uplink_pump
+Command: "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/test_voice_uplink_pump.exe"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"voice_uplink_pump" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: uplink pump catches up within batch/time budgets without early consume
+<end of output>
+Test time =   0.08 sec
+----------------------------------------------------------
+Test Passed.
+"voice_uplink_pump" end time: Sep 07 09:17 中国标准时间
+"voice_uplink_pump" time elapsed: 00:00:00
+----------------------------------------------------------
+
+17/20 Testing: voice_session_recovery
+17/20 Test: voice_session_recovery
+Command: "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/test_voice_session_recovery.exe"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"voice_session_recovery" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: overflow teardown is owner-only and old PCM is never replayed
+<end of output>
+Test time =   0.09 sec
+----------------------------------------------------------
+Test Passed.
+"voice_session_recovery" end time: Sep 07 09:17 中国标准时间
+"voice_session_recovery" time elapsed: 00:00:00
+----------------------------------------------------------
+
+18/20 Testing: display_ownership
+18/20 Test: display_ownership
+Command: "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/test_display_ownership.exe"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"display_ownership" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: S6 display hardware remains exclusively owned by FSM presentation
+<end of output>
+Test time =   0.07 sec
+----------------------------------------------------------
+Test Passed.
+"display_ownership" end time: Sep 07 09:17 中国标准时间
+"display_ownership" time elapsed: 00:00:00
+----------------------------------------------------------
+
+19/20 Testing: rtc_calendar
+19/20 Test: rtc_calendar
+Command: "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/test_rtc_calendar.exe"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"rtc_calendar" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: RTC calendar, legacy year decoding, stop flag and leap days
+<end of output>
+Test time =   0.07 sec
+----------------------------------------------------------
+Test Passed.
+"rtc_calendar" end time: Sep 07 09:17 中国标准时间
+"rtc_calendar" time elapsed: 00:00:00
+----------------------------------------------------------
+
+20/20 Testing: download_protocol
+20/20 Test: download_protocol
+Command: "D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build/test_download_protocol.exe"
+Directory: D:/CodexData/.codex/visualizations/2026/09/07/01a0796b-eee6-7812-a8e8-f7ba8d26ac28/host-build
+"download_protocol" start time: Sep 07 09:17 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: URL authority, strict Content-Range and bounded response headers
+<end of output>
+Test time =   0.08 sec
+----------------------------------------------------------
+Test Passed.
+"download_protocol" end time: Sep 07 09:17 中国标准时间
+"download_protocol" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 07 09:17 中国标准时间

@@ -59,6 +59,7 @@ typedef enum {
     EVT_MULTI_TURN_DETECTED,
     EVT_INTERRUPT,
     EVT_WAKEUP,                   /**< 本地或服务器已经确认用户说出唤醒词。 */
+    EVT_MOTION_WAKE,              /**< S6 中确认明显搬动，恢复到 S3 等待唤醒词。 */
     EVT_INTENT_GOODNIGHT,         /**< 用户表达晚安，结束交流并进入睡眠。 */
     EVT_INTENT_DISMISS,           /**< 用户明确结束交流，进入静默状态。 */
     EVT_MQTT_DISCONNECTED,        /**< 控制消息连接断开，当前交流无法完整继续。 */
@@ -70,6 +71,7 @@ typedef enum {
     EVT_OTA_AVAILABLE,            /**< 已接受一项可执行的固件升级任务。 */
     EVT_OTA_SUCCEEDED,            /**< 新固件已校验并设为下次启动版本。 */
     EVT_OTA_TASK_FAILED,          /**< 本次升级已放弃，继续运行当前固件并等待唤醒。 */
+    EVT_PREPARE_TERMINAL_REPLY,   /**< 终止语义到达 S2 时，先回 S4 播放本地回应。 */
     EVT_COUNT,
 } fsm_event_t;
 

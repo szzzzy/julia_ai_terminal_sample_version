@@ -82,7 +82,7 @@ PCM1 不包含会话编号、话语编号或采样时间戳。服务器应把连
 | `MIC_START` | 清空待播 PCM、使旧播放代次失效并标记实际话语开始；S4 中不改变主状态 |
 | `MIC_STOP` | 结束当前监听并进入思考；没有活动话语时忽略；不关闭 streaming |
 | `SPKS <rate>` | S4 且等待唤醒回应时作为 WAKE_REPLY，播放完成仍留 S4；S2.2 时作为正常回答并进入 S2.3；其他状态拒绝 |
-| `SPKV <n>` | 设置音量，合法整数范围 0–100；越界值被拒绝，文本入口不做钳位 |
+| `SPKV <n>` | 暂不执行动态调音；收到后记录并忽略，使用固件配置的固定音量 |
 | `SPKE` | 有序结束：先排空待播数据，再停播／闭嘴／回待机；不存在活动播放代次时忽略 |
 | `SPKT` | 独立播放任务生成 440／660／880Hz 三音，可被 MIC_START 或断链取消 |
 | `MICS <bg>` | 仅本地唤醒配置生效；背景值范围 −10000–0，启用门限触发上传；服务器唤醒模式明确忽略 |
@@ -179,9 +179,9 @@ FILE_SEND SD:/sample.wav
 {"type":"intent_result","intent":"dismiss"}
 ```
 
-`type` 必须严格等于 `intent_result`，以后增加语义只扩展 `intent` 值，不改变消息类型。`intent=normal` 表示没有特殊语义，正常流程继续由 `MIC_STOP` 推进；`intent=goodnight` 直接进入 S6，`intent=dismiss` 直接进入 S5，二者都不播放回应。为容忍 MQTT 与 WSS 的跨链路竞态，S2.3 收到终止语义时也会先取消残留播放再迁移。
+`type` 必须严格等于 `intent_result`，以后增加语义只扩展 `intent` 值，不改变消息类型。`intent=normal` 表示没有特殊语义，正常流程继续由 `MIC_STOP` 推进。收到 goodnight／dismiss 时，先在 S4 播放本地“好的，晚安”／“那我不烦你了”并同步嘴型，实际播完后再进入 S6／S5；若语义晚于 MIC_STOP 到达 S2，则先取消旧播放，通过 `EVT_PREPARE_TERMINAL_REPLY` 回到 S4 再播放提示。重复终止指令不重播，MIC_START 可中止提示并取消本次退出。
 
-正常对话不发送 `intent_result`：服务端直接发送 `MIC_STOP`，设备由 S4 或 S2.1 进入 S2.2。识别到 `goodnight` 或 `dismiss` 时，服务器只发送语义结果，不发送 `SPKS`；设备结束监听并直接切换显示，随后到达的幂等 `MIC_STOP` 在 S5/S6 中被忽略。
+正常对话不发送 `intent_result`：服务端直接发送 `MIC_STOP`，设备由 S4 或 S2.1 进入 S2.2。识别到 `goodnight` 或 `dismiss` 时，服务器只发送语义结果，不发送 `SPKS`；设备结束监听，S4 内的回应由固件内嵌音频提供。随后到达的幂等 `MIC_STOP` 因已无活动话语而被忽略，不提前结束提示。
 
 处理器允许纯文本命令末尾带空白和换行，不支持一条消息中的多行命令列表。注册载荷上限为 128 字节，FILE_SEND URI 缓冲区含 NUL 共 128 字节；语义 JSON 必须是单个完整对象。
 

@@ -250,8 +250,8 @@ esp_err_t voice_playback_start(uint32_t rate, bool self_test, uint32_t *generati
     return ESP_OK;
 }
 
-esp_err_t voice_playback_start_local(uint32_t rate, const uint8_t *pcm, size_t bytes,
-                                     uint32_t *generation)
+static esp_err_t start_local(uint32_t rate, const uint8_t *pcm, size_t bytes,
+                              bool only_if_idle, uint32_t *generation)
 {
     if (s_task == NULL) return ESP_ERR_INVALID_STATE;
     if (generation == NULL || pcm == NULL || bytes == 0 || (bytes & 1U) ||
@@ -259,6 +259,12 @@ esp_err_t voice_playback_start_local(uint32_t rate, const uint8_t *pcm, size_t b
         return ESP_ERR_INVALID_ARG;
     }
     lock();
+    /* 网络播放的完成结果仍由语音服务消费，提示不能提前覆盖其收尾通知。 */
+    if (only_if_idle && (s_active ||
+        (s_completion_generation != 0 && s_local_pcm == NULL))) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
     if (++s_generation == 0) ++s_generation;
     *generation = s_generation;
     pcm_buffer_reset(&s_buffer);
@@ -274,6 +280,45 @@ esp_err_t voice_playback_start_local(uint32_t rate, const uint8_t *pcm, size_t b
     unlock();
     xTaskNotifyGive(s_task);
     return ESP_OK;
+}
+
+esp_err_t voice_playback_start_local(uint32_t rate, const uint8_t *pcm, size_t bytes,
+                                     uint32_t *generation)
+{
+    return start_local(rate, pcm, bytes, false, generation);
+}
+
+esp_err_t voice_playback_try_start_local(uint32_t rate, const uint8_t *pcm, size_t bytes,
+                                         uint32_t *generation)
+{
+    return start_local(rate, pcm, bytes, true, generation);
+}
+
+static uint32_t read_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint16_t read_le16(const uint8_t *p)
+{
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+esp_err_t voice_playback_start_local_wav(const uint8_t *wav, size_t bytes,
+                                         bool only_if_idle, uint32_t *generation)
+{
+    /* 资源由构建系统控制；固定头校验避免按错误采样格式驱动扬声器。 */
+    if (wav == NULL || bytes < 44 || memcmp(wav, "RIFF", 4) != 0 ||
+        memcmp(wav + 8, "WAVE", 4) != 0 || memcmp(wav + 36, "data", 4) != 0 ||
+        read_le16(wav + 20) != 1 || read_le16(wav + 22) != 1 ||
+        read_le32(wav + 24) != 16000 || read_le16(wav + 34) != 16) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    size_t pcm_bytes = read_le32(wav + 40);
+    if (pcm_bytes > bytes - 44) pcm_bytes = bytes - 44;
+    pcm_bytes &= ~(size_t)1U;
+    return start_local(16000, wav + 44, pcm_bytes, only_if_idle, generation);
 }
 
 esp_err_t voice_playback_write(const uint8_t *pcm, size_t bytes)
@@ -310,10 +355,14 @@ void voice_playback_finish(void)
     xTaskNotifyGive(s_task);
 }
 
-void voice_playback_stop(void)
+static bool stop_generation(uint32_t generation)
 {
-    if (s_task == NULL) return;
+    if (s_task == NULL) return false;
     lock();
+    if (generation != 0 && generation != s_generation) {
+        unlock();
+        return false;
+    }
     if (++s_generation == 0) ++s_generation;
     s_active = false;
     s_completion_generation = 0;
@@ -323,6 +372,26 @@ void voice_playback_stop(void)
     s_local_offset = 0;
     unlock();
     xTaskNotifyGive(s_task);
+    return true;
+}
+
+void voice_playback_stop(void)
+{
+    (void)stop_generation(0);
+}
+
+bool voice_playback_stop_generation(uint32_t generation)
+{
+    return generation != 0 && stop_generation(generation);
+}
+
+bool voice_playback_generation_is_active(uint32_t generation)
+{
+    if (s_task == NULL || generation == 0) return false;
+    lock();
+    bool active = s_active && s_generation == generation;
+    unlock();
+    return active;
 }
 
 bool voice_playback_is_active(void)

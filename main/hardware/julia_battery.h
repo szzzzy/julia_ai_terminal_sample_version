@@ -25,7 +25,7 @@ typedef void (*julia_battery_update_cb_t)(const julia_battery_status_t *status,
                                           void *ctx);
 
 /**
- * @brief 初始化板载 BAT_ADC（GPIO9 / ADC1_CH8）诊断通道。
+ * @brief 初始化板载 BAT_ADC（GPIO8 / ADC1_CH7）诊断通道。
  *
  * 初始化失败不会影响电源保持或其它外设；调用方可以继续启动，只是没有电池电压日志。
  */

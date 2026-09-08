@@ -38,8 +38,8 @@
 #define SLEEP_THRESHOLD_DELTA_X100 500
 static i2s_chan_handle_t mic_rx, spk_tx;
 static volatile bool playing;
-/* 服务端仍可通过 SPKV 在运行时覆盖上电默认值。 */
-static volatile uint32_t speaker_volume = CONFIG_JULIA_SPEAKER_VOLUME_PERCENT;
+/* 所有播放源使用相同的固定音量，运行时不接受调音。 */
+static const uint32_t speaker_volume = CONFIG_JULIA_SPEAKER_VOLUME_PERCENT;
 static int32_t mic_raw[MIC_SAMPLES];
 static int16_t mic_pcm[MIC_SAMPLES];
 static int16_t sleep_preroll[SLEEP_PREROLL_FRAMES][MIC_SAMPLES];
@@ -359,11 +359,6 @@ esp_err_t board_audio_speaker_stop(void)
     err = board_audio_speaker_stop_locked();
     if (s_spk_lock != NULL) xSemaphoreGive(s_spk_lock);
     return err;
-}
-
-void board_audio_speaker_set_volume(uint8_t percent)
-{
-    speaker_volume = percent > 100 ? 100 : percent;
 }
 
 bool board_audio_speaker_is_playing(void)

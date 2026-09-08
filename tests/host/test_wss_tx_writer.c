@@ -235,6 +235,44 @@ static void test_fatal_and_invalid_progress_stop_immediately(void)
     assert(io.call_count == 1 && stats.bytes_sent == 0);
 }
 
+static bool abort_after_write(void *ctx)
+{
+    return ((fake_io_t *)ctx)->call_count > 0;
+}
+
+static void test_field_backpressure_and_overflow_abort(void)
+{
+    uint8_t data[8] = {0};
+    const int64_t delays[] = {2290000, 2340000};
+    for (unsigned i = 0; i < 2; ++i) {
+        fake_io_t io;
+        init_io(&io, data);
+        io.steps[0] = (fake_step_t){.result = FAKE_WANT_WRITE, .elapsed_us = delays[i]};
+        io.steps[1].result = sizeof(data);
+        io.step_count = 2;
+        wss_tx_writer_ops_t ops = fake_ops(&io);
+        wss_tx_write_stats_t stats;
+        assert(wss_tx_write_all(&ops, data, sizeof(data), 3500000, &stats) == WSS_TX_WRITE_OK);
+        assert(io.call_count == 2 && stats.bytes_sent == sizeof(data));
+        assert(io.call_offsets[0] == io.call_offsets[1]);
+    }
+    fake_io_t io;
+    init_io(&io, data);
+    io.steps[0].result = FAKE_WANT_WRITE;
+    io.step_count = 1;
+    wss_tx_writer_ops_t ops = fake_ops(&io);
+    ops.should_abort = abort_after_write;
+    wss_tx_write_stats_t stats;
+    assert(wss_tx_write_all(&ops, data, sizeof(data), 3500000, &stats) == WSS_TX_WRITE_ABORTED);
+    assert(io.call_count == 1 && stats.bytes_sent == 0);
+    init_io(&io, data);
+    io.steps[0] = (fake_step_t){.result = sizeof(data), .elapsed_us = 5000};
+    io.step_count = 1;
+    ops = fake_ops(&io);
+    assert(wss_tx_write_all(&ops, data, sizeof(data), 4000, &stats) == WSS_TX_WRITE_OK);
+    assert(stats.finished_us == 5000); /* An in-flight write cannot be interrupted. */
+}
+
 int main(void)
 {
     test_single_and_partial_write();
@@ -244,6 +282,7 @@ int main(void)
     test_repeated_transient_times_out();
     test_expired_deadline_does_not_start_another_phase();
     test_fatal_and_invalid_progress_stop_immediately();
+    test_field_backpressure_and_overflow_abort();
     puts("PASS: bounded TLS writes preserve offsets across transient states");
     return 0;
 }

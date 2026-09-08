@@ -118,6 +118,8 @@ int main(void)
                                     JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE));
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S6_SLEEP, JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S4_INTERACTION, JULIA_S2_SUB_STATE_NONE));
+    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S6_SLEEP, JULIA_S2_SUB_STATE_NONE,
+                                    JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE));
     assert(julia_fsm_can_transition_full(
         JULIA_MAIN_STATE_S1_COMPANION, JULIA_S2_SUB_STATE_NONE,
         JULIA_S7_SUB_STATE_NONE, JULIA_MAIN_STATE_S7_FAULT,
@@ -235,7 +237,15 @@ int main(void)
     assert(fsm.main_state == JULIA_MAIN_STATE_S1_COMPANION);
     assert(fsm.s2_sub_state == JULIA_S2_SUB_STATE_NONE);
 
-    /* S3/S5/S6 只由唤醒词进入 S4；S4 等待尚未实现的服务端语义信号。 */
+    /* 唤醒词仍从 S3/S5/S6 进入 S4；运动只把 S6 恢复到 S3。 */
+    julia_fsm_t motion_fsm;
+    enter_standby(&motion_fsm);
+    assert(julia_fsm_handle_event(&motion_fsm, EVT_NIGHT_TIME, NULL));
+    assert(motion_fsm.main_state == JULIA_MAIN_STATE_S6_SLEEP);
+    assert(julia_fsm_handle_event(&motion_fsm, EVT_MOTION_WAKE, NULL));
+    assert(motion_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
+    assert(!julia_fsm_handle_event(&motion_fsm, EVT_MOTION_WAKE, NULL));
+
     julia_fsm_t wake_fsm;
     enter_standby(&wake_fsm);
     assert(wake_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);

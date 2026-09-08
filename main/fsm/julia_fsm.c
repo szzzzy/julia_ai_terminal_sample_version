@@ -51,6 +51,7 @@ static const char *const s_event_names[EVT_COUNT] = {
     [EVT_MULTI_TURN_DETECTED] = "EVT_MULTI_TURN_DETECTED",
     [EVT_INTERRUPT] = "EVT_INTERRUPT",
     [EVT_WAKEUP] = "EVT_WAKEUP",
+    [EVT_MOTION_WAKE] = "EVT_MOTION_WAKE",
     [EVT_INTENT_GOODNIGHT] = "EVT_INTENT_GOODNIGHT",
     [EVT_INTENT_DISMISS] = "EVT_INTENT_DISMISS",
     [EVT_MQTT_DISCONNECTED] = "EVT_MQTT_DISCONNECTED",
@@ -62,6 +63,7 @@ static const char *const s_event_names[EVT_COUNT] = {
     [EVT_OTA_AVAILABLE] = "EVT_OTA_AVAILABLE",
     [EVT_OTA_SUCCEEDED] = "EVT_OTA_SUCCEEDED",
     [EVT_OTA_TASK_FAILED] = "EVT_OTA_TASK_FAILED",
+    [EVT_PREPARE_TERMINAL_REPLY] = "EVT_PREPARE_TERMINAL_REPLY",
 };
 
 static void default_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
@@ -204,9 +206,11 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
         if (from_s2_sub_state == JULIA_S2_SUB_STATE_S2_3_SPEAKING &&
             target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                       JULIA_MAIN_STATE_S1_COMPANION)) return true;
-        /* 用户的“晚安”或“结束交流”可能在回答音频前后到达，因此听音、等待回答
-         * 和播放回答阶段都允许直接结束本轮交流。语音服务会先停止尚未播完的声音。 */
+        /* 终止语义可能晚于 MIC_STOP 到达；先回 S4 播放回应，再完成退出。
+         * 播放不可用时仍允许直接退出。语音服务会先停止尚未播完的声音。 */
         if (target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
+                      JULIA_MAIN_STATE_S4_INTERACTION) ||
+            target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                       JULIA_MAIN_STATE_S5_SILENT) ||
             target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                       JULIA_MAIN_STATE_S6_SLEEP) ||
@@ -248,7 +252,9 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
 
     case JULIA_MAIN_STATE_S6_SLEEP:
         return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
-                         JULIA_MAIN_STATE_S4_INTERACTION);
+                         JULIA_MAIN_STATE_S4_INTERACTION) ||
+               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
+                         JULIA_MAIN_STATE_S3_STANDBY);
 
     case JULIA_MAIN_STATE_S8_OTA:
         return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
@@ -412,11 +418,20 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
         /* 静默态和睡眠态同样只响应唤醒词进入发起交互态。 */
         target_main_state = JULIA_MAIN_STATE_S4_INTERACTION;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
+    } else if (fsm->main_state == JULIA_MAIN_STATE_S6_SLEEP &&
+               event == EVT_MOTION_WAKE) {
+        /* 搬动只恢复可见待机，不等同于用户已经发起一轮语音交流。 */
+        target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION &&
                event == EVT_START_DIALOG) {
         /* 正常话语结束直接进入“想”，不要求服务端额外返回 dialog 意图。 */
         target_main_state = JULIA_MAIN_STATE_S2_DIALOG;
         target_s2_sub_state = JULIA_S2_SUB_STATE_S2_2_THINKING;
+    } else if (fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG &&
+               event == EVT_PREPARE_TERMINAL_REPLY) {
+        target_main_state = JULIA_MAIN_STATE_S4_INTERACTION;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if ((fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
                 fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG) &&
                event == EVT_INTENT_GOODNIGHT) {

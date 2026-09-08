@@ -2,9 +2,9 @@
  * @file julia_motion.c
  * @brief 设备睡眠时观察是否被明显搬动，但不把桌面轻微振动当成用户唤醒。
  *
- * 连续多次出现足够大的加速度变化或转动才记录一次运动；扬声器播放和冷却期间
- * 暂停判断，避免设备自身振动重复触发。运动目前只用于诊断，睡眠状态仍需唤醒词
- * 才能恢复交流。
+ * 连续多次出现足够大的加速度变化或转动后向行为 FSM 投递运动唤醒事件；扬声器
+ * 播放和冷却期间暂停判断，避免设备自身振动重复触发。运动只把 S6 恢复到 S3，
+ * 不直接操作显示，也不冒充唤醒词进入交流。
  */
 #include "julia_motion.h"
 
@@ -92,13 +92,19 @@ static void motion_task(void *argument)
         consecutive = detected ? consecutive + 1U : 0U;
         if (consecutive < CONFIG_JULIA_IMU_MOTION_CONFIRM_FRAMES) continue;
 
-        ESP_LOGI(TAG, "motion observed state=%s accel_delta=%.3fg gyro=%.1fdps; "
-                      "S6 presentation retained",
-                 julia_fsm_main_state_name(state), (double)delta, (double)gyro);
+        esp_err_t post_err = julia_fsm_runtime_post(EVT_MOTION_WAKE);
+        if (post_err == ESP_OK) {
+            ESP_LOGI(TAG, "motion wake posted state=%s accel_delta=%.3fg gyro=%.1fdps",
+                     julia_fsm_main_state_name(state), (double)delta, (double)gyro);
+        } else {
+            ESP_LOGW(TAG, "motion wake post failed: %s", esp_err_to_name(post_err));
+        }
         consecutive = 0;
         baseline_valid = false;
-        now = xTaskGetTickCount();
-        cooldown_until = now + pdMS_TO_TICKS(CONFIG_JULIA_IMU_MOTION_COOLDOWN_MS);
+        if (post_err == ESP_OK) {
+            now = xTaskGetTickCount();
+            cooldown_until = now + pdMS_TO_TICKS(CONFIG_JULIA_IMU_MOTION_COOLDOWN_MS);
+        }
     }
 }
 
@@ -112,7 +118,7 @@ esp_err_t julia_motion_init(void)
         s_task = NULL;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "ready s6_only=1 sample=%dms confirm=%d accel=%.2fg gyro=%.1fdps",
+    ESP_LOGI(TAG, "ready s6_to_s3=1 sample=%dms confirm=%d accel=%.2fg gyro=%.1fdps",
              CONFIG_JULIA_IMU_MOTION_SAMPLE_MS,
              CONFIG_JULIA_IMU_MOTION_CONFIRM_FRAMES,
              (double)MOTION_ACCEL_DELTA_G,

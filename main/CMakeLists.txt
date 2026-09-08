@@ -11,6 +11,9 @@ set(embed_binary_files
     "ui/generated/clips/THINK.bin"
     "ui/generated/clips/SPEAK.bin"
     ${project_dir}/network_disconnected_16k_mono_16bit.wav
+    ${project_dir}/low_battery_16k_mono_16bit.wav
+    ${project_dir}/bye_no_bother_16k_mono_16bit.wav
+    ${project_dir}/goodnight_16k_mono_16bit.wav
 )
 
 if(CONFIG_COMM_DEVICE_AUTH_CERTIFICATE)
@@ -45,6 +48,7 @@ set(srcs
     "storage/sd_card.c"
     "hardware/tca9554.c"
     "hardware/julia_battery.c"
+    "hardware/julia_charge_detector.c"
     "hardware/julia_power.c"
     "hardware/breathing_led.c"
     "hardware/julia_led.c"

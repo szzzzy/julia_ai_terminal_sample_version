@@ -59,9 +59,6 @@ esp_err_t board_audio_speaker_write(const uint8_t *mono_pcm, size_t bytes);
 /** 立即停播并释放 I2S TX，丢弃残留 DMA；正常结束须由播放任务先排空尾音。 */
 esp_err_t board_audio_speaker_stop(void);
 
-/** 音量 0-100（越界钳位）。 */
-void board_audio_speaker_set_volume(uint8_t percent);
-
 /** 返回 playing 标志的瞬时快照，不表示 DMA 已排空或声音已实际播放完成。 */
 bool board_audio_speaker_is_playing(void);
 

@@ -13,6 +13,16 @@ set_property(TARGET test_voice_playback PROPERTY C_STANDARD 99)
 if(NOT WIN32)
     target_link_libraries(test_voice_playback PRIVATE m)
 endif()
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    foreach(recovery_case backlight rtc display mqtt fsm boot storage fault voice)
+        add_test(NAME recovery_${recovery_case}
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_recovery_paths.py"
+                --cc "${CMAKE_C_COMPILER}" --out "${CMAKE_CURRENT_BINARY_DIR}/recovery"
+                --case "${recovery_case}")
+    endforeach()
+endif()
 add_test(NAME voice_playback COMMAND test_voice_playback)
 
 add_executable(test_julia_fsm test_julia_fsm.c ../../main/fsm/julia_fsm.c)
@@ -57,3 +67,30 @@ target_compile_definitions(test_display_ownership PRIVATE
     REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set_property(TARGET test_display_ownership PROPERTY C_STANDARD 99)
 add_test(NAME display_ownership COMMAND test_display_ownership)
+
+add_executable(test_charge_detector test_charge_detector.c
+    ../../main/hardware/julia_charge_detector.c)
+target_include_directories(test_charge_detector PRIVATE ../../main/hardware)
+set_property(TARGET test_charge_detector PROPERTY C_STANDARD 99)
+add_test(NAME charge_detector COMMAND test_charge_detector)
+
+add_executable(test_rtc_calendar test_rtc_calendar.c ../../main/hardware/rtc_calendar.c)
+target_include_directories(test_rtc_calendar PRIVATE stubs ../../main/hardware)
+set_property(TARGET test_rtc_calendar PROPERTY C_STANDARD 99)
+add_test(NAME rtc_calendar COMMAND test_rtc_calendar)
+
+find_path(HTTP_PARSER_DIR http_parser.h
+    HINTS "${IDF_PATH}/components/http_parser" "$ENV{IDF_PATH}/components/http_parser")
+if(HTTP_PARSER_DIR)
+    add_executable(test_download_protocol test_download_protocol.c
+        ../../main/network/download_protocol.c "${HTTP_PARSER_DIR}/http_parser.c")
+    target_include_directories(test_download_protocol PRIVATE ../../main/network "${HTTP_PARSER_DIR}")
+    # TinyCC provides stdint.h; select it instead of http_parser's old MSVC typedef fallback.
+    if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "TinyCC")
+        target_compile_definitions(test_download_protocol PRIVATE __MINGW32__)
+    endif()
+    set_property(TARGET test_download_protocol PROPERTY C_STANDARD 99)
+    add_test(NAME download_protocol COMMAND test_download_protocol)
+else()
+    message(STATUS "Set IDF_PATH to include the download protocol regression test")
+endif()

@@ -25,6 +25,19 @@ esp_err_t voice_playback_start(uint32_t rate, bool self_test, uint32_t *generati
  */
 esp_err_t voice_playback_start_local(uint32_t rate, const uint8_t *pcm, size_t bytes,
                                      uint32_t *generation);
+/** 同本地播放，但只在空闲时启动；忙碌时返回 INVALID_STATE，保留当前声音。 */
+esp_err_t voice_playback_try_start_local(uint32_t rate, const uint8_t *pcm, size_t bytes,
+                                         uint32_t *generation);
+/**
+ * 播放内嵌的 16 kHz 单声道 PCM16 WAV，仅接受固定 44 字节头；资源须一直有效。
+ * only_if_idle 为 true 时不覆盖已有播放或待消费的网络完成通知。
+ */
+esp_err_t voice_playback_start_local_wav(const uint8_t *wav, size_t bytes,
+                                         bool only_if_idle, uint32_t *generation);
+/** 查询指定播放是否仍在进行；不消费语音服务拥有的完成结果。 */
+bool voice_playback_generation_is_active(uint32_t generation);
+/** 仅取消匹配的播放，返回是否匹配；迟到的提示收尾不能停止新一轮回答。 */
+bool voice_playback_stop_generation(uint32_t generation);
 /**
  * 非阻塞复制一块 PCM 到网络缓冲；单块不超过 1200 B。缓冲满会终止整轮播放并
  * 返回 ESP_ERR_NO_MEM，不能在错误后继续追加残缺语音。

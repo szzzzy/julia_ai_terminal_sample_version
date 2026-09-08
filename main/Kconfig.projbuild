@@ -8,8 +8,8 @@ menu "Example Configuration"
         default 7
         help
             GPIO driven high immediately in app_main to keep battery power enabled.
-            The currently tested board uses GPIO7. Some Waveshare schematic revisions
-            label GPIO8 as BAT_Control, so select the pin verified on the actual board.
+            This board uses GPIO7 for BAT_Control; GPIO6 is Key_BAT and GPIO8 is BAT_ADC.
+            Select the power-hold pin verified on the actual board.
 
     choice JULIA_BOOT_CPU_MAX_FREQ
         prompt "CPU ceiling while hardware starts"
@@ -72,7 +72,7 @@ menu "Example Configuration"
         bool "Log battery voltage at startup checkpoints"
         default y
         help
-            Read the onboard GPIO9 BAT_ADC divider. Measurements are diagnostic voltage
+            Read the onboard GPIO8 BAT_ADC divider. Measurements are diagnostic voltage
             snapshots only and cannot directly report battery current or charge state.
 
     config JULIA_BATTERY_SAMPLE_COUNT
@@ -115,19 +115,29 @@ menu "Example Configuration"
         int "Voltage rise used to infer charging (mV)"
         depends on JULIA_BATTERY_DIAGNOSTICS
         range 10 300
-        default 40
+        default 20
 
     config JULIA_BATTERY_CHARGE_EXIT_DROP_MV
         int "Voltage drop used to infer charger removal (mV)"
         depends on JULIA_BATTERY_DIAGNOSTICS
         range 20 500
-        default 80
+        default 20
 
     config JULIA_BATTERY_CHARGE_CONFIRM_SAMPLES
         int "Consecutive samples required for charge-state changes"
         depends on JULIA_BATTERY_DIAGNOSTICS
         range 2 10
-        default 3
+        default 2
+
+    config JULIA_BATTERY_CHARGE_EVIDENCE_TIMEOUT_SECONDS
+        int "Stop showing charging without fresh rise evidence (seconds)"
+        depends on JULIA_BATTERY_DIAGNOSTICS
+        range 20 3600
+        default 60
+        help
+            STAT and USB VBUS are not connected to a readable GPIO. Stop the
+            inferred charging indication when voltage has not continued to rise
+            for this long, so unplugging cannot leave CHG latched indefinitely.
 
     config OTA_PRODUCT_ID
         string "OTA product identifier"
@@ -509,12 +519,12 @@ menu "Example Configuration"
             attenuate and values above 100 amplify with saturation.
 
     config JULIA_SPEAKER_VOLUME_PERCENT
-        int "Default speaker volume (percent)"
+        int "Fixed speaker volume (percent)"
         range 0 100
         default 50
         help
-            Speaker volume applied at startup. The server can still override
-            this value at runtime with a valid SPKV command.
+            Fixed speaker volume shared by server replies and local prompts.
+            Runtime SPKV commands are ignored.
 
     menu "WSS voice stream configuration"
 
@@ -868,12 +878,12 @@ menu "Example Configuration"
             depends on JULIA_NIGHT_SLEEP_ENABLE
 
         config JULIA_IMU_MOTION_ENABLE
-            bool "Enable QMI8658 motion diagnostics in S6"
+            bool "Wake S6 to S3 with QMI8658 motion"
             default y
             help
                 Use adjacent-sample acceleration and gyro magnitude detection
-                while in S6. Confirmed motion is logged but cannot override the
-                S6 presentation or change the FSM state.
+                while in S6. Confirmed motion posts an FSM event that restores
+                S3 standby; the detector never controls display hardware directly.
 
         config JULIA_IMU_MOTION_SAMPLE_MS
             int "IMU motion sample period (ms)"
@@ -896,16 +906,16 @@ menu "Example Configuration"
         config JULIA_IMU_ACCEL_DELTA_MG
             int "Adjacent-sample acceleration threshold (mg sum)"
             range 10 4000
-            default 800
+            default 200
             depends on JULIA_IMU_MOTION_ENABLE
             help
                 Sum of absolute X/Y/Z acceleration changes between adjacent
-                samples, expressed in milli-g. 800 means 0.80 g.
+                samples, expressed in milli-g. 200 means 0.20 g.
 
         config JULIA_IMU_GYRO_THRESHOLD_DPS
             int "Gyroscope magnitude threshold (degrees/s)"
             range 1 2000
-            default 120
+            default 25
             depends on JULIA_IMU_MOTION_ENABLE
 
         config JULIA_TIMEZONE

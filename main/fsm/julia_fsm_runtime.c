@@ -19,6 +19,7 @@
 #include "freertos/task.h"
 #include "julia_avatar.h"
 #include "julia_backlight.h"
+#include "julia_battery.h"
 #include "lvgl_port.h"
 #include "mqtt_comm.h"
 #include "sdkconfig.h"
@@ -82,56 +83,33 @@ static int64_t s_disconnect_deadline_us;
 static int64_t s_service_deadline_us;
 static julia_fsm_state_observer_t s_state_observer;
 static void *s_state_observer_ctx;
+/* 提醒只由 FSM Task 调度，持续低电量期间不反复播放。 */
+static bool s_low_battery_notified;
+static uint32_t s_local_prompt_generation;
 
 /* EMBED_FILES 生成的符号覆盖整个应用生命周期，满足本地播放“不复制源 PCM”的契约。 */
 extern const uint8_t network_disconnected_wav_start[]
     asm("_binary_network_disconnected_16k_mono_16bit_wav_start");
 extern const uint8_t network_disconnected_wav_end[]
     asm("_binary_network_disconnected_16k_mono_16bit_wav_end");
-
-static uint32_t read_le32(const uint8_t *p)
+extern const uint8_t low_battery_wav_start[]
+    asm("_binary_low_battery_16k_mono_16bit_wav_start");
+extern const uint8_t low_battery_wav_end[]
+    asm("_binary_low_battery_16k_mono_16bit_wav_end");
+static bool play_local_prompt(const uint8_t *wav, size_t wav_bytes, const char *name,
+                                bool only_if_idle, uint32_t *generation)
 {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static uint16_t read_le16(const uint8_t *p)
-{
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
-/**
- * 该资源由构建系统控制，只接受固定 44-byte PCM WAV 头；这里不是通用 WAV 解析器。
- * 拒绝格式不符的镜像比按错误采样格式驱动扬声器更安全。
- */
-static bool play_disconnect_prompt(void)
-{
-    const uint8_t *wav = network_disconnected_wav_start;
-    size_t wav_bytes = (size_t)(network_disconnected_wav_end - wav);
-    if (wav_bytes < 44 || memcmp(wav, "RIFF", 4) != 0 ||
-        memcmp(wav + 8, "WAVE", 4) != 0 || memcmp(wav + 36, "data", 4) != 0 ||
-        read_le16(wav + 20) != 1 || read_le16(wav + 22) != 1 ||
-        read_le32(wav + 24) != 16000 || read_le16(wav + 34) != 16) {
-        ESP_LOGW(TAG, "local disconnect prompt has an invalid WAV header");
-        return false;
-    }
-    size_t pcm_bytes = read_le32(wav + 40);
-    if (pcm_bytes > wav_bytes - 44) pcm_bytes = wav_bytes - 44;
-    pcm_bytes &= ~(size_t)1U;
-    if (pcm_bytes == 0) {
-        ESP_LOGW(TAG, "local disconnect prompt has no PCM payload");
-        return false;
-    }
-    uint32_t generation = 0;
-    esp_err_t err = voice_playback_start_local(16000, wav + 44, pcm_bytes,
-                                                &generation);
+    esp_err_t err = voice_playback_start_local_wav(wav, wav_bytes, only_if_idle,
+                                                   generation);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "local disconnect prompt start failed: %s",
-                 esp_err_to_name(err));
+        if (!only_if_idle || err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "local %s prompt start failed: %s", name,
+                     esp_err_to_name(err));
+        }
         return false;
     } else {
-        ESP_LOGI(TAG, "local disconnect prompt generation=%lu bytes=%u",
-                 (unsigned long)generation, (unsigned)pcm_bytes);
+        ESP_LOGI(TAG, "local %s prompt generation=%lu wav_bytes=%u", name,
+                 (unsigned long)*generation, (unsigned)wav_bytes);
     }
     return true;
 }
@@ -433,6 +411,43 @@ static void apply_presentation(julia_main_state_t main_state,
              presentation_name(presentation));
 }
 
+static void local_prompt_poll(void)
+{
+    /* 本地提示收尾不依赖电量采样是否可用，也不消费 WSS 的完成通知。 */
+    if (s_local_prompt_generation != 0) {
+        if (voice_playback_generation_is_active(s_local_prompt_generation)) return;
+        s_local_prompt_generation = 0;
+        if (!voice_playback_is_active()) {
+            julia_avatar_talking_stop();
+            apply_presentation(s_fsm.main_state, s_fsm.s2_sub_state, s_fsm.s7_sub_state);
+        }
+        return;
+    }
+
+    julia_battery_status_t battery;
+    if (julia_battery_get_status(&battery) != ESP_OK || !battery.valid) return;
+    bool low = battery.present && battery.state == JULIA_BATTERY_STATE_LOW;
+    if (!low) s_low_battery_notified = false;
+
+    /* 对话、故障、升级和睡眠期间保留提醒，回到可见的空闲状态再播。 */
+    bool idle = s_fsm.main_state == JULIA_MAIN_STATE_S1_COMPANION ||
+                s_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY ||
+                s_fsm.main_state == JULIA_MAIN_STATE_S5_SILENT;
+    if (!low || s_low_battery_notified || !idle || voice_playback_is_active()) return;
+
+    /* S3 的睡眠立绘隐藏嘴层；播报期间暂时恢复人物，完成后恢复当前状态呈现。 */
+    julia_avatar_set_dozing(false);
+    julia_avatar_talking_start();
+    if (play_local_prompt(low_battery_wav_start,
+            (size_t)(low_battery_wav_end - low_battery_wav_start), "low battery",
+            true, &s_local_prompt_generation)) {
+        s_low_battery_notified = true;
+    } else {
+        julia_avatar_talking_stop();
+        apply_presentation(s_fsm.main_state, s_fsm.s2_sub_state, s_fsm.s7_sub_state);
+    }
+}
+
 static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
                              julia_s2_sub_state_t s2_sub_state, fsm_event_t event)
 {
@@ -481,7 +496,10 @@ static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
         fsm->s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED) {
         /* talking 必须先于首块 PCM 生效，嘴型才表示实际播放而非网络收包。 */
         julia_avatar_talking_start();
-        if (!play_disconnect_prompt()) julia_avatar_talking_stop();
+        uint32_t generation = 0;
+        if (!play_local_prompt(network_disconnected_wav_start,
+                (size_t)(network_disconnected_wav_end - network_disconnected_wav_start),
+                "disconnect", false, &generation)) julia_avatar_talking_stop();
 
         s_disconnect_deadline_us = esp_timer_get_time() + DISCONNECT_NOTICE_US;
         /* 计时器失败时立即执行返回策略，不能让提示态永久占用行为状态机。 */
@@ -502,6 +520,11 @@ static void runtime_on_exit(julia_fsm_t *fsm, julia_main_state_t main_state,
     (void)fsm;
     (void)s2_sub_state;
     (void)event;
+    if (s_local_prompt_generation != 0) {
+        bool stopped = voice_playback_stop_generation(s_local_prompt_generation);
+        s_local_prompt_generation = 0;
+        if (stopped || !voice_playback_is_active()) julia_avatar_talking_stop();
+    }
     if (main_state == JULIA_MAIN_STATE_S3_STANDBY) s_standby_deadline_us = 0;
     if (main_state == JULIA_MAIN_STATE_S5_SILENT) s_silent_deadline_us = 0;
     if (main_state == JULIA_MAIN_STATE_S7_FAULT) s_disconnect_deadline_us = 0;
@@ -567,6 +590,7 @@ static void fsm_task(void *argument)
         /* 有界等待兼作连接状态巡检周期，不能改回 portMAX_DELAY。 */
         if (xQueueReceive(s_event_queue, &message, pdMS_TO_TICKS(1000)) != pdTRUE) {
             service_state_reconcile();
+            local_prompt_poll();
             continue;
         }
         if (message.type == FSM_RUNTIME_MESSAGE_FAULT) {
@@ -605,6 +629,7 @@ static void fsm_task(void *argument)
             *message.applied = applied;
             xSemaphoreGive(message.completed);
         }
+        local_prompt_poll();
     }
     vTaskDelete(NULL);
 }

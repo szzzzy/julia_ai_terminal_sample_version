@@ -1,0 +1,596 @@
+Native OTA 通信协议（ESP32-S3 固件远程升级）
+
+
+
+
+
+本文档定义 JULIA 项目智能终端（Waveshare ESP32-S3-LCD-1.85（ESP32-S3R8））的固件远程升级（OTA）通信协议，规范终端与云端（MQTT Broker、策略服务器、固件服务器）之间的报文格式、交互时序与异常处理约定。协议采用双通道设计：控制面经 MQTT 长连接承载全部元数据报文（版本检查、升级判定、服务端通知、状态上报），数据面经 HTTPS 短连接承载固件二进制下载，保留 Range 请求与断点记录；当前构建的 206 恢复受响应头接口限制，不能承诺已具备可用的断点续传；所有网络连接均由终端主动建立，服务器不主动建立到终端的连接；服务器可通过已建立的 MQTT 长连接主动发布 ota_notify。
+适用工程：JULIA 项目智能终端（Waveshare ESP32-S3-LCD-1.85（ESP32-S3R8））OTA 升级组件
+协议基线：当前设备端实现（ESP-IDF 5.5.4）
+
+
+
+
+变更记录
+日期
+版本
+变更人
+修改描述
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+目录
+1. 网络拓扑3
+1.1 网络拓扑与连接关系3
+1.2 终端地址标识4
+2. 终端到服务器协议6
+2.1 传输层协议6
+2.2 应用层协议6
+2.2.1 MQTT 控制面：报文格式6
+2.2.2 HTTPS 数据面：报文格式16
+2.2.3 交互时序17
+2.2.4 异常与恢复机制19
+2.2.5 数据示例20
+
+1. 网络拓扑
+
+1.1 网络拓扑与连接关系
+
+本协议涉及四个网络角色，拓扑及连接关系如下：
+
+网络拓扑与连接关系
+场景说明：
+终端设备（ESP32-S3R8）：运行本 OTA 升级组件，是协议交互的主动方（发起检查、下载、上报）；
+MQTT Broker：控制面消息中转节点，只负责 Topic 路由与 QoS 语义，不参与任何业务判断；
+策略服务器：接收版本检查请求，比对版本后返回升级判定（update=true/false）与固件清单；
+固件服务器：存储固件二进制，响应 HTTPS 下载请求（支持 Range 断点续传）；
+接入网：终端与云端之间的承载网络（当前实现为 Wi-Fi STA；协议对承载透明，未来可扩展至 4G 蜂窝等接入方式，需在网络接入层适配）。
+场景标注（接入方式不影响协议交互）：
+场景 A（当前实现与测试环境）：终端经家庭/室内 Wi-Fi AP 接入公网；
+场景 B（未来可扩展的接入方式，当前未实现）：无 Wi-Fi 环境经 4G 模组 + 运营商网络接入。当前实际实现与测试均使用 Wi-Fi STA；若切换到 4G，需在网络接入层增加蜂窝模组及相应网络适配。因全部交互均由终端出站发起（MQTT 长连接 + HTTPS 短连接），运营商 NAT 不会阻塞任何报文，OTA 应用层的 MQTT/HTTPS 协议与业务交互逻辑无需因此重新设计。
+连接性质：
+终端 ↔ Broker：MQTT 长连接，常驻保活，承载全部元数据报文；
+终端 ↔ 固件服务器：HTTPS 短连接，仅下载固件时建立，下载完成即关闭；
+策略服务器通过 Broker 与终端间接交互，不直接连接终端；
+部署说明：测试环境中策略服务器与固件服务器由同一台服务器（测试机）承载、Broker 独立部署；生产环境可按角色拆分部署，不影响协议交互。
+
+1.2 终端地址标识
+
+设备在协议中的唯一标识为 device_id（设备标识），格式为 esp- + 12 位小写十六进制字符（如 esp-aabbccddeeff）。
+是什么地址：芯片基础 MAC 地址（6 字节）的十六进制表示，加 esp- 前缀；
+如何获取：调用 esp_efuse_mac_get_default() 从芯片 eFuse 读取基础 MAC（出厂烧写、设备生命周期内不变），逐字节转为小写十六进制拼接而成；
+是否已实现：已实现。代码位于 main/ota/ota_control_plane.c 的 native_ota_get_device_id()，所有报文的身份字段与设备专属 Topic 均基于该标识生成；
+用途：作为 MQTT client_id（保证 Broker 会话唯一）、设备专属响应/通知/状态 Topic 后缀（/device/ota/{response,notify,status}/{device_id}），以及各报文中的身份字段；
+稳定性：基于 eFuse 基础 MAC 而非网络接口地址，不随 Wi-Fi 重连或 IP 变化而改变。
+
+2. 终端到服务器协议
+
+2.1 传输层协议
+
+承载：TCP 提供可靠传输；
+安全：TLS 为 HTTPS 数据面提供加密与服务器身份校验；MQTT 控制面当前实现使用 MQTT/TCP（Broker URI 为 mqtt://，配置项 CONFIG_COMM_MQTT_BROKER_URI），未启用 TLS 加密——mqtts（TLS 加密）可通过配置切换，属于生产环境扩展选项，当前默认配置与测试环境未启用；
+连接关系：MQTT 长连接和 HTTPS 固件下载连接均由终端主动建立，MQTT Broker 与 OTA 服务器分别监听并接受连接；具体 TCP/TLS 建连过程由 ESP-IDF 网络协议栈完成，本协议不展开其内部握手时序。
+实现边界：TCP/TLS 的底层握手、重传等机制由 ESP-IDF 的 TCP/IP 协议栈（lwIP）与 TLS 组件（mbedTLS）负责，本 OTA 模块不自行定义传输层协议，仅通过应用层客户端接口（esp_mqtt_client / esp_http_client）使用。
+
+2.2 应用层协议
+
+
+2.2.1 MQTT 控制面：报文格式
+
+通用规定
+载荷格式：UTF-8 编码的 JSON 对象；
+QoS：1；Retain：0；
+字段名与枚举值区分大小写；未知字段忽略；
+本文中的”长度”均指 MQTT 应用层 payload 的 UTF-8 字节数，不包含 MQTT 固定头、可变头、Topic、Packet Identifier 和设备端字符串结尾 NUL；
+载荷上限：检查请求 511 B、检查响应 1024 B、服务端通知 512 B（分片重组后仍不得超过）、Topic 小于 192 B——服务器须保证响应与通知不超过上限；
+“分片”指 ESP-MQTT 事件循环按原始 offset 分片投递的载荷；设备侧按 current_data_offset 写入固定缓冲重组，完整消息才追加 NUL 并解析（实现见 main/network/mqtt_comm.c）；
+Topic 结构：请求用公共 Topic /device/ota/check；响应/通知/状态用设备专属 Topic <prefix>/{device_id}（如 /device/ota/response/esp-aabbccddeeff）。
+报文（1）：发送 OTA 检查请求（ota_check）
+设备发给服务器的检查请求，功能为检查当前服务器是否存在更新需求：
+{  "type": "ota_check",  "request_id": "8f12a001",  "device_id": "esp-aabbccddeeff",  "product": "julia-ai-device",  "hardware_version": "1.0",  "current_version": "1.0.0"}
+字段
+类型
+必选
+长度/取值
+说明（功能与生成/校验规则）
+type
+string
+是
+固定 ota_check
+标识设备主动发起 OTA 检查，使服务器选择对应解析流程；设备固定生成
+request_id
+string
+是
+8 个小写十六进制字符
+唯一关联本次检查与响应，防止处理过期响应；设备随机生成，服务器须原样回显
+device_id
+string
+是
+< 32 Byte，esp- + 12 位小写十六进制
+唯一标识设备，并用于设备专属响应 Topic；由芯片基础 MAC 生成，如 esp-aabbccddeeff
+product
+string
+是
+1～63 Byte
+标识产品/固件兼容系列，供服务器选择正确固件；来自 CONFIG_OTA_PRODUCT_ID，默认 julia-ai-device
+hardware_version
+string
+是
+1～31 Byte
+标识硬件修订版，供服务器判断固件兼容性；来自 CONFIG_OTA_HARDWARE_VERSION，默认 1.0
+current_version
+string
+是
+1～31 Byte，major.minor.patch
+告知当前运行版本，供服务器决定是否下发更新；来自运行镜像应用描述符，如 1.0.0
+服务器处理要求：
+确认 payload 是合法 JSON 对象，且必填字段存在、类型正确；
+根据 device_id、product、hardware_version 和 current_version 查询适用固件，决定是否下发更新；
+使用请求中的 request_id 和身份字段构造响应，发布到 /device/ota/response/{device_id}。
+报文（2）：服务器返回无固件更新（ota_check_response，update=false）
+{  "type": "ota_check_response",  "request_id": "8f12a001",  "device_id": "esp-aabbccddeeff",  "product": "julia-ai-device",  "hardware_version": "1.0",  "update": false}
+字段
+类型
+必选
+长度/取值
+说明（功能与设备校验规则）
+type
+string
+是
+固定 ota_check_response
+标识服务器返回 OTA 检查结果；设备要求必须等于 ota_check_response，当前代码兼容历史值 ota，但新服务器不得继续使用
+request_id
+string
+是
+必须等于请求中的 8 字符 ID
+把响应与一次具体检查请求关联；设备要求与最近一次检查请求的 request_id 完全一致
+device_id
+string
+是
+< 32 Byte
+标识响应的目标设备，避免其他设备处理该响应；设备要求与自身 ID 完全一致
+product
+string
+是
+1～63 Byte
+标识该响应适用的产品系列；设备要求与本地 CONFIG_OTA_PRODUCT_ID 完全一致
+hardware_version
+string
+是
+1～31 Byte
+标识该响应适用的硬件版本；设备要求与本地 CONFIG_OTA_HARDWARE_VERSION 完全一致
+update
+boolean
+是
+固定 JSON 布尔值 false
+表示服务器确认当前没有需要执行的固件更新；设备要求必须是真正的 JSON 布尔值，不能使用字符串 "false"、数字 0 或 null
+服务器处理要求：
+必须原样回显请求中的 request_id、device_id、product、hardware_version；
+update 必须使用真正的 JSON 布尔值 false，不能使用字符串、数字或 null；
+响应发布到 /device/ota/response/{device_id}，QoS 1、不 retain。
+报文（3）：服务器返回有固件更新（ota_check_response，update=true）
+{  "type": "ota_check_response",  "request_id": "8f12a001",  "device_id": "esp-aabbccddeeff",  "product": "julia-ai-device",  "hardware_version": "1.0",  "update": true,  "job_id": "cloud-job-20260814-001",  "artifact_id": "julia-ai-device-2-001",  "version": "1.1.0",  "force_update": false,  "url": "https://172.20.10.4:8443/native_ota.bin",  "image_size": 1234567,  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",  "security_version": 0,  "expires_at": 1893456000}
+job_id 为可选字段，云端不需要关联发布任务时可以省略。
+公共响应字段：
+字段
+类型
+必选
+长度/取值
+说明（功能与设备校验规则）
+type
+string
+是
+固定 ota_check_response
+标识 OTA 检查响应；设备要求必须为 ota_check_response
+request_id
+string
+是
+必须等于请求中的 8 字符 ID
+关联本次请求与响应；设备要求与最近一次检查请求完全一致
+device_id
+string
+是
+< 32 Byte
+标识目标设备；设备要求与自身 ID 完全一致
+product
+string
+是
+1～63 Byte
+标识目标产品；设备要求与本地产品配置完全一致
+hardware_version
+string
+是
+1～31 Byte
+标识目标硬件版本；设备要求与本地硬件配置完全一致
+update
+boolean
+是
+固定 JSON 布尔值 true
+表示响应包含一项可供设备进一步校验的 OTA 任务；设备要求必须是真正的 JSON 布尔值 true
+job_id
+string
+否
+1～63 Byte
+云端任务关联编号，用于把本次 OTA 与云端发布任务对应；出现时必须是非空字符串，不参与固件内容校验
+固件清单字段：
+字段
+类型
+必选
+长度/取值
+说明（功能与设备校验规则）
+artifact_id
+string
+是
+1～95 Byte
+唯一标识一个固件制品，用于区分不同固件包并关联断点和异常记录；必须是非空字符串，同一 artifact_id 应始终对应相同固件内容
+version
+string
+是
+1～31 Byte，major.minor.patch
+声明目标固件版本，用于版本比较并与镜像内部版本交叉校验；每段必须是非负整数，正常更新时目标版本必须高于当前版本
+force_update
+boolean
+否
+true 或 false，缺省 false
+允许跳过”目标版本必须更高”的限制，用于同版本重装或版本回退；只能是 JSON 布尔值，不会跳过身份、URL、摘要、镜像头和安全版本校验
+url
+string
+是
+1～255 Byte
+指定固件 .bin 的 HTTPS 下载地址；必须以 https:// 开头，URL 主机必须满足设备配置的允许列表
+image_size
+integer
+是
+1～4294967295 Byte
+声明固件原始文件大小，用于检查分区容量、HTTP 长度、Range 范围和实际接收长度；必须为正整数且不得超过目标 OTA 分区容量
+sha256
+string
+是
+恰好 64 个十六进制字符
+声明固件原始 .bin 的 SHA-256 摘要，用于验证下载内容完整性；只允许 0-9、a-f、A-F，设备最终计算值必须完全相同
+security_version
+integer
+是
+0～4294967295
+声明该清单要求的最低固件安全版本；镜像内部 secure_version 必须大于或等于该值
+expires_at
+integer
+是
+非负 Unix 秒时间戳
+限制 OTA 清单有效时间，防止设备执行已经失效的任务；设备时间有效时必须满足 expires_at > current_time
+服务器处理要求：
+清单各字段必须完整且符合上表要求，尤其是 url 必须是有效的 HTTPS 地址、sha256 必须是完整 64 字符摘要；
+服务器应保证 expires_at 给设备留出足够的下载与安装时间窗口；
+响应发布到 /device/ota/response/{device_id}，QoS 1、不 retain。
+校验语义说明：
+有效期（expires_at）：清单是一次性任务描述，超过 expires_at 后设备不再执行该升级，防止执行已经失效或已撤回的任务；设备时间未同步（不可信）时不以此字段拒绝，但字段格式仍必须合法；
+强制更新（force_update）：正常情况要求目标版本高于当前版本；force_update=true 允许同版本重装或版本回退（紧急修复场景），但它不会跳过身份、URL、摘要、镜像头和安全版本校验——强制更新只放宽版本比较，不放松其他安全约束。
+报文（4）：服务端通知（ota_notify）
+在固件侧未进行更新询问时，如服务器端上传了新的可用版本，可主动向固件侧发文：
+{  "type": "ota_notify",  "schema_version": 1,  "job_id": "cloud-job-20260814-001"}
+job_id 为可选字段，云端不需要关联发布任务时可以省略。
+字段
+类型
+必选
+长度/取值
+说明（功能与设备校验规则）
+type
+string
+是
+固定 ota_notify
+标识服务端通知报文；设备要求必须为 ota_notify
+schema_version
+number
+是
+固定 1
+标识通知报文格式版本；设备要求必须为数值 1
+job_id
+string
+否
+0～63 Byte
+云端任务编号；出现时必须是字符串且长度小于 64 Byte
+服务器处理要求：
+发布到设备专属 Topic /device/ota/notify/{device_id}，QoS 1、不 retain，载荷不得超过 512 B；
+通知只是”去查一下”的加速信号，服务器收到随后的 ota_check 后仍需正常返回 ota_check_response；
+同一设备短时间内不应重复发送相同通知（设备侧按配置节流抑制重复唤醒）。
+报文（5）：设备状态上报（ota_status）
+在 OTA 生命周期过程中，设备会向服务器上报当前状态：
+{  "type": "ota_status",  "schema_version": 1,  "event_id": "4f0e8d8a5b9c2a1f6e7d4c3b2a190817",  "device_id": "esp-aabbccddeeff",  "request_id": "8f12a001",  "artifact_id": "julia-ai-device-2-001",  "product": "julia-ai-device",  "hardware_version": "1.0",  "current_version": "1.0.0",  "target_version": "1.1.0",  "state": "downloading",  "bytes_downloaded": 524288,  "image_size": 1048576,  "progress_percent": 50,  "attempt": 1,  "error_code": "NONE",  "uptime_ms": 123456}
+恒有字段：
+字段
+类型
+必选
+长度/取值
+说明（功能与生成规则）
+type
+string
+是
+固定 ota_status
+标识设备状态上报报文
+schema_version
+number
+是
+固定 1
+标识上报报文格式版本
+event_id
+string
+是
+32 个小写十六进制字符（128-bit 随机 ID）
+同一事件的重复发送使用相同值，供云端去重；收到 QoS 1 PUBACK 后才清除
+device_id
+string
+是
+esp- + 12 位小写十六进制
+标识上报设备
+request_id
+string
+是
+请求中的 8 字符 ID
+触发本次 OTA 的检查请求 ID
+artifact_id
+string
+是
+1～95 Byte
+本次固件制品 ID
+product
+string
+是
+1～63 Byte
+与本次清单一致
+hardware_version
+string
+是
+1～31 Byte
+与本次清单一致
+current_version
+string
+是
+major.minor.patch
+升级前运行的固件版本
+target_version
+string
+是
+major.minor.patch
+目标固件版本
+state
+string
+是
+取值见下表
+生命周期状态
+attempt
+number
+是
+从 1 开始
+本固件制品的下载尝试序号
+error_code
+string
+是
+正常为 NONE，失败为下表取值
+失败原因名
+uptime_ms
+number
+是
+非负
+设备启动后的毫秒数（单调计时，不依赖 UTC）
+条件字段：
+字段
+类型
+必选
+出现条件
+说明
+job_id
+string
+否
+本次清单携带 job_id 时
+云端任务编号
+bytes_downloaded
+number
+否
+仅 state=downloading
+已下载字节数
+image_size
+number
+否
+仅 state=downloading
+固件总字节数
+progress_percent
+number
+否
+仅 state=downloading
+下载进度百分比，0～100 的整数
+state（生命周期状态）取值：
+取值
+含义
+accepted
+清单通过校验并已创建 OTA 任务
+downloading
+HTTPS 下载开始或上报下载进度
+verifying
+下载完成，正在检查长度、镜像头、SHA-256 与镜像
+rebooting
+启动分区已设置，设备即将重启
+booted_pending_verify
+新镜像首次启动，等待本地验收
+succeeded
+本地自检通过并确认新镜像
+failed
+任务以明确的失败原因结束
+rolled_back
+自检失败或识别到回滚
+deferred
+电源、业务等提交前条件暂不满足，记录保留待重试
+error_code（错误码）取值：NONE、PRECONDITION_LOW_POWER、NETWORK_TIMEOUT、TLS_VERIFY_FAILED、HTTP_STATUS_INVALID、RANGE_MISMATCH、IMAGE_TOO_LARGE、IMAGE_HEADER_INVALID、HASH_MISMATCH、IMAGE_VALIDATE_FAILED、BOOT_SELF_TEST_FAILED、ROLLBACK_UNAVAILABLE、MANIFEST_INVALID、ARTIFACT_QUARANTINED、BOOT_PARTITION_SET_FAILED、NVS_WRITE_FAILED。
+服务器处理要求：
+订阅 /device/ota/status/{device_id}，按事件唯一标识（event_id）幂等去重（同一事件的重复发送不应重复计数或重复告警）；
+以生命周期状态（state）驱动升级进度展示与告警，错误码（error_code）在失败/回滚/延迟场景给出原因；
+当前只有 MQTT QoS 1 发布确认（PUBACK），没有云端业务级确认。
+
+2.2.2 HTTPS 数据面：报文格式
+
+请求格式
+全量下载（无可复用断点）：普通 HTTPS GET，不携带 Range 请求头；
+断点续传（存在有效断点）：GET 携带 Range 请求头，示例：
+Range: bytes=16384-
+服务器响应契约
+场景
+状态码
+响应头要求
+全量下载
+200 OK
+Content-Length 存在且大于 0 时必须等于清单 image_size；Chunked 响应允许，但最终 body 必须完整
+断点续传
+206 Partial Content
+Content-Length 存在且大于 0 时必须等于 image_size - offset；Content-Range 必须为 bytes <offset>-<image_size-1>/<image_size>；已保存 ETag 时后续响应必须返回相同值
+服务器不支持 Range
+200 OK 或 416
+表示服务器无法按断点续传，设备侧视为无续传能力
+完整性要求
+完整下载结束后，目标固件的累计有效长度必须严格等于清单 image_size；
+实际固件 SHA-256 必须严格等于清单 sha256；
+固件内容必须是未压缩、未转换的原始 .bin 字节。当前 ESP-IDF 5.5.4 构建缺少校验 206 所需的响应头接口，因此只能把 Range 视为待验证实现，不能作为已交付能力。
+
+2.2.3 交互时序
+
+本协议为应用层协议，时序采用计算机网络协议的标准画法（泳道 + 报文交换），描述哪一方主动发起、每个业务报文由谁发布。
+
+OTA 交互时序如下图所示，分为正常交互流程与异常恢复流程。测试环境中策略服务与固件服务由同一台服务器承载，故图中合并为“OTA 服务器”一栏；图中 MQTT PUBLISH 均采用 QoS 1，PUBACK 统一省略。具体异常处理规则见 2.2.4。
+图中采用以下缩写：
+T_resp：/device/ota/response/{device_id}；
+T_notify：/device/ota/notify/{device_id}。
+
+
+交互说明
+控制面就绪： T_resp、T_notify 均收到 SUBACK 后才发起 OTA 检查；断线重连后重新订阅并补查一次。
+检查响应： ota_check 与 ota_check_response 经 Broker 异步转发。update=false 结束本轮检查；update=true 且清单合法时进入下载。等待窗口内非法响应触发短重试，窗口外过期/串台响应直接丢弃。
+固件下载： 无断点使用普通 GET，有断点使用 Range。Range 请求返回 200/416 时清除断点并仅允许一次全量重下。HTTPS 由设备直连 OTA 服务器，不经过 Broker。
+状态与通知： ota_status 可贯穿 OTA 生命周期多次上报；ota_notify 仅触发新的版本检查，不直接触发下载，并执行 5 s 节流。
+通道职责： MQTT 长连接仅承载控制元数据，HTTPS 短连接仅承载固件二进制。设备本地完成分区写入、完整性校验、启动分区切换及重启。
+异常恢复： MQTT 断线、响应超时、HTTPS 中断和掉电恢复见异常时序图，详细策略见 2.2.4。
+
+2.2.4 异常与恢复机制
+
+运行过程中可能出现连接、传输、校验、提交及启动异常。断联类异常由设备侧主动恢复、服务器侧保持无状态；清单与镜像校验类异常不可恢复。各类异常的两端处理与恢复结果如下：
+异常类型
+终端侧处理
+服务端处理
+恢复结果
+接入网络中断
+本地业务继续运行，按网络接入层重连策略恢复连接，取得有效 IP 后重建 MQTT/HTTPS
+通过 keepalive 判定设备离线，等待设备重连
+网络恢复后继续通信
+MQTT 控制面连接中断
+自动重连，恢复后重新订阅双 Topic 并补发一次检查
+恢复后重新接受连接并正常路由
+恢复控制面
+OTA 检查响应超时
+有限短重试，耗尽后转低频恢复检查
+恢复后正常响应新请求
+回到正常检查周期
+HTTPS 数据面传输中断
+保留有效断点并发起 Range；当前构建收到 206 时会以 RANGE_MISMATCH 终止
+恢复后按 Range 继续响应
+当前构建无法完成 206 续传；待响应头接口适配后重新验证
+终端异常掉电
+重启后读取 NVS 恢复记录；206 续传受当前构建限制，已验证镜像仍可恢复提交
+等待设备重新上线，不主动连接
+恢复原 OTA 任务
+状态上报失败
+关键事件保存于 NVS，MQTT 恢复后以原 event_id 补发
+按 event_id 幂等去重
+补发后状态完整
+清单字段或身份非法
+拒绝当前任务
+修正后重新下发
+当前任务不自动恢复
+固件校验失败（SHA-256、镜像头、分区容量、Content-Range 不匹配）
+终止并隔离当前制品
+更换有效制品后重新下发
+当前制品不可继续
+新固件启动失败
+回滚至上一有效固件
+接收 rolled_back 状态
+恢复旧版本
+原则：所有断联都不导致设备切换到未完成或未校验的固件分区；恢复路径由设备侧主动执行，服务器侧保持无状态。
+以下为断联的典型情形与复杂恢复机制，补充说明如下：
+接入网络中断（信号盲区、覆盖边缘等）：设备端本地业务继续运行，镜像验收不依赖网络；按网络接入层重连策略（带上限和随机抖动的指数退避）持续重连，取得有效 IP 后恢复 MQTT/HTTPS 通信。服务端由 Broker 通过 keepalive 超时判定设备离线，等待设备重连；设备重新上线后按正常协议继续交互，服务器无需特殊处理。
+终端异常掉电：设备端重启后读取 NVS 恢复记录，下载阶段会按有效断点发起 Range 恢复，但当前构建的 206 路径会因缺少响应头读取接口而失败；已完成校验但尚未提交时恢复提交流程（见下文已验证镜像的掉电恢复）；服务端不主动建立到终端的连接，设备重新上线并发起检查后按正常协议处理。
+Range 断点恢复：下载中断或掉电时，部分镜像保留在目标 OTA 分区，恢复元数据按固定数据量间隔写入 NVS；后续清单与恢复记录一致时，设备发送 Range: bytes=<offset>- 从断点续传。当前 ESP-IDF 5.5.4 构建无法读取校验 206 所需的响应头，会以 RANGE_MISMATCH 终止；完成接口适配并通过 OTA-06 前，不得把该路径标为可用。断点失效或服务器不支持 Range 时回退一次全量下载；响应范围不匹配时终止传输、不提交固件，并隔离当前制品。
+已验证镜像的掉电恢复：固件校验完成后先进入已验证待提交状态（READY_TO_COMMIT），再切换启动分区。设置启动分区失败或在此之前掉电时，已验证镜像与记录被保留，下一次收到同一清单时重新计算目标分区 SHA-256 并检查提交条件，通过后再次设置启动分区，无需重新下载；提交条件暂不满足（电源、资源、业务状态）时保留待提交记录并上报 deferred，条件满足后恢复提交。
+新固件启动失败回滚：新固件首次启动处于待验收状态（PENDING_VERIFY），本地健康检查或固件确认失败时立即回滚（不重复验收）；确认前异常重启由 bootloader 处理未确认镜像，恢复上一有效固件，并最终上报 rolled_back；无有效旧固件可回滚时进入安全模式，等待人工处理。
+
+2.2.5 数据示例
+
+以下示例用于说明 OTA 通信过程中典型报文的实际格式。各字段含义、类型、长度及校验规则以 2.2.1 和 2.2.2 的协议定义为准，示例中的标识符、版本号、地址及时间戳仅作格式说明。
+上报示例（设备 → 服务器）——版本检查请求：
+{  "type": "ota_check",  "request_id": "6d1d56da",  "device_id": "esp-288485919a00",  "product": "julia-ai-device",  "hardware_version": "1.0",  "current_version": "1.0.0"}
+
+下发示例（服务器 → 设备）——无更新响应：
+{  "type": "ota_check_response",  "request_id":"0edd3fb0",  "device_id": "esp-288485919a00",  "product": "julia-ai-device",  "hardware_version": "1.0",  "update": false}
+
+下发示例（服务器 → 设备）——有更新响应（固件清单）：
+{  "type": "ota_check_response",  "request_id": "6d1d56da",  "device_id": "esp-288485919a00",  "product": "julia-ai-device",  "hardware_version": "1.0",  "update": true,  "artifact_id": "t08-9868e0c1",  "version": "1.0.1",  "url": "https://172.20.10.4:60691/ota/image.bin",  "image_size": 1042048,  "sha256": "ab72d2c9fcbef90f3fd7d7fd497d0d3ec19b54207bc806db1c9b4708387fd336",  "security_version": 0,  "expires_at": 1786733126}
+服务端通知仅用于触发设备重新进行版本检查；设备收到合法升级响应并进入 OTA 流程后，通过 ota_status 上报执行状态。
+下发示例（服务器 → 设备）——服务端通知：
+{  "type": "ota_notify",  "schema_version": 1,  "job_id": "notify-test"}
+上报示例（设备 → 服务器）——状态上报（下载中）：
+{  "type": "ota_status",  "schema_version": 1,  "event_id": "4f0e8d8a5b9c2a1f6e7d4c3b2a190817",  "device_id": "esp-288485919a00",  "request_id": "6d1d56da",  "artifact_id": "t08-9868e0c1",  "product": "julia-ai-device",  "hardware_version": "1.0",  "current_version": "1.0.0",  "target_version": "1.0.1",  "state": "downloading",  "attempt": 1,  "error_code": "NONE",  "uptime_ms": 27050,  "bytes_downloaded": 524288,  "image_size": 1042048,  "progress_percent": 50}
+上报示例（设备 → 服务器）——状态上报（升级成功）：
+{  "type": "ota_status",  "schema_version": 1,  "event_id": "4f0e8d8a5b9c2a1f6e7d4c3b2a190817",  "device_id": "esp-288485919a00",  "request_id": "6d1d56da",  "artifact_id": "t08-9868e0c1",  "product": "julia-ai-device",  "hardware_version": "1.0",  "current_version": "1.0.0",  "target_version": "1.0.1",  "state": "succeeded",  "attempt": 1,  "error_code": "NONE",  "uptime_ms": 87}
+其中 bytes_downloaded、image_size 和 progress_percent 为下载阶段的条件字段，仅在 state=downloading 时出现。其他生命周期状态及字段要求见前述 ota_status 报文定义。
+
+数据面示例（设备↔ OTA 服务器）——HTTPS 下载与断点续传：
+GET /ota/image.bin HTTP/1.1Host: 172.20.10.4:60691Range: bytes=131072-
+HTTP/1.1 206 Partial ContentContent-Length: 910976Content-Range: bytes 131072-1042047/1042048ETag: "ab72d2c9fcbef90f3fd7d7fd497d0d3ec19b54207bc806db1c9b4708387fd336"
+无有效断点时，设备不携带 Range 请求头，服务器正常返回 200 OK 及完整固件数据；服务器忽略 Range（返回 200）时，设备清除断点并回退从零全量下载（完整下载 1042048 字节成功）。断点续传时的状态码、响应头及回退规则见 2.2.2。

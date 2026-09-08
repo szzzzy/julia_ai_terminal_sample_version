@@ -1,0 +1,16 @@
+{
+  "source_links_validated": 238,
+  "report_sections": 14,
+  "baseline_files_checked": 1642,
+  "changed_since_inventory": [],
+  "host_ctest": {
+    "total": 20,
+    "passed": 19,
+    "failed": [
+      "recovery_fsm"
+    ],
+    "failure_stage": "generated C compilation"
+  },
+  "firmware_rebuilt": false,
+  "flashed": false
+}

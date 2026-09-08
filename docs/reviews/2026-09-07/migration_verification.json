@@ -1,0 +1,15 @@
+{
+  "migrated_documents": 8,
+  "markdown_files": 5,
+  "local_links_checked": 751,
+  "baseline_files_checked": 1642,
+  "files_changed_since_original_audit": [
+    "README.md",
+    "docs/UI_L0L1_PORT.md",
+    "docs/VALIDATION.md",
+    "main/README.md",
+    "main/ui/julia_avatar.c",
+    "main/ui/julia_avatar.h"
+  ],
+  "note": "Original audit snapshot retained. This migration edits only docs/reviews; changes to other files are not attributed to this migration."
+}

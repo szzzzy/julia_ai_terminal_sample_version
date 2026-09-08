@@ -1,4 +1,4 @@
-# 音频主机回归测试
+# 固件主机回归测试
 
 这组测试直接编译设备使用的 `pcm_buffer.c` 和 `voice_playback.c`。播放测试只替换 RTOS 同步／任务、I2S 和时间接口，用确定性调度在写入中注入取消、断流和错误。
 
@@ -19,7 +19,9 @@ tests/host/
 └─ stubs/                 仅供测试的 ESP 错误码、时间、内存与 RTOS 接口
 ```
 
-九个测试程序分别注册为独立 CTest 目标。stub 不实现真实 FreeRTOS 调度、PSRAM硬件和 I2S DMA，禁止加入固件的全局头文件搜索路径。
+原有九个测试程序保持独立目标。另有 RTC 日历、HTTP 协议测试，以及九组恢复路径测试；配置 Python 和 ESP-IDF 路径后共 20 个 CTest 目标。stub 不实现真实 FreeRTOS 调度、PSRAM硬件和 I2S DMA，禁止加入固件的全局头文件搜索路径。
+
+`test_recovery_paths.py` 提取当前固件函数并替换外设/RTOS边界，验证背光并发、RTC编码兼容与读写失败、LCD失败重试、MQTT确认、FSM提交、OTA启动验收、存储写入、故障计数和连续语音命令。这些是检查修复后期望行为的正向回归，不是原审查中用于证明错误的反例探针。
 
 ## 执行方法
 
@@ -30,6 +32,8 @@ cmake -S tests/host -B build-host
 cmake --build build-host
 ctest --test-dir build-host --output-on-failure
 ```
+
+完整新增覆盖还需传入 `-DIDF_PATH=<ESP-IDF根目录>` 和 `-DPython3_EXECUTABLE=<Python路径>`。HTTP 测试使用 SDK 自带的 `http_parser.c`，不下载依赖；恢复路径测试使用 Python 标准库与同一原生 C 编译器。
 
 可用 GCC、Clang 或 TinyCC；Windows 使用 Ninja 时可显式指定 `-G Ninja`、`-DCMAKE_C_COMPILER=<编译器路径>` 和 `-DCMAKE_MAKE_PROGRAM=<ninja路径>`。编译工具只用于主机测试，不替代固件的 Xtensa 工具链。
 
@@ -45,11 +49,12 @@ ctest --test-dir build-host --output-on-failure
 - 预缓冲等待有界、1 秒无输入后仍可继续、15 秒空缓冲无输入时明确超时。
 - 溢出终止、I2S 错误终止、异步自检结束。
 - TLS 单次／部分写入，WANT_READ、WANT_WRITE、EAGAIN 的同区间重试，
-  绝对截止时间以及永久错误退出。
+  后续重试截止时间、不可中断的单次写入，以及永久错误/溢出请求退出。新增场景包含 2.29～2.34 秒背压在 3.5 秒预算内恢复。
 - 上行ring的FIFO、回绕、满缓冲、消费确认、会话停止，以及旧 connection
   generation 数据不得进入新连接。
 - 上行pump的正常／追赶批次、8ms运行预算、恢复统计和发送失败不提前消费。
 - ring overflow 后 producer 只关闭入口，owner 才能清理；新连接只发送新代次PCM。
-- S6 面板／背光只由 FSM 呈现控制；idle、motion、night 和 WSS 断链不能旁路点亮。
+- S6 面板／背光只由 FSM 呈现控制；motion只能投递 `EVT_MOTION_WAKE`，不得与idle、night或WSS断链路径旁路点亮。
+- 充电趋势使用未低通电压进入CHG，验证20mV压降退出、60秒无上升证据超时和电池消失复位。
 
 模拟写入不是物理扬声器输出；测试不能证明 DMA 排空时间、音质、多核最坏调度延迟或开机速度。这些项目仍按 [设备验收](../../docs/VALIDATION.md) 上板执行。

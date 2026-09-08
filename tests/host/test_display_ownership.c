@@ -40,6 +40,9 @@ int main(void)
 
     char *motion = read_source("main/context/julia_motion.c");
     assert_not_present(motion, "julia_idle_display_note_activity");
+    assert_not_present(motion, "julia_backlight_");
+    assert_not_present(motion, "lvgl_port_set_display_off");
+    assert(strstr(motion, "julia_fsm_runtime_post(EVT_MOTION_WAKE)") != NULL);
     free(motion);
 
     char *night = read_source("main/context/julia_night_schedule.c");
