@@ -597,6 +597,25 @@ menu "Example Configuration"
                 reconnects. Keep this shorter than the PING interval so probes
                 never pile up.
 
+        config JULIA_DIALOG_LISTEN_TIMEOUT_SECONDS
+            int "S4/S2.1 listening timeout (seconds)"
+            range 10 300
+            default 60
+            help
+                Maximum time waiting for an utterance to finish in S4 or S2.1.
+                If MIC_STOP never arrives, close the stale voice session and
+                return to standby through normal disconnect recovery.
+
+        config JULIA_DIALOG_REPLY_TIMEOUT_SECONDS
+            int "S2.2 dialog reply timeout (seconds)"
+            range 5 120
+            default 30
+            help
+                Maximum wait in THINKING for an accepted SPKS reply. WebSocket
+                heartbeats do not extend this deadline. On expiry, close the
+                old voice session and use normal disconnect recovery to return
+                to standby and reconnect, preventing late replies crossing turns.
+
         config WSS_CLOSE_WAIT_MS
             int "WSS close handshake wait (ms)"
             range 100 5000

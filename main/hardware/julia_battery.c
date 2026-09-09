@@ -82,7 +82,7 @@ typedef struct {
  * UI 提示和低电量趋势，不作为容量计量或保护阈值。 */
 static const battery_curve_point_t s_curve[] = {
     {3000, 0}, {3300, 2}, {3500, 7}, {3600, 15}, {3700, 30},
-    {3800, 50}, {3900, 65}, {4000, 80}, {4100, 90}, {4200, 100},
+    {3800, 50}, {3900, 65}, {4000, 100},
 };
 
 static uint8_t percent_for_voltage(uint16_t mv)

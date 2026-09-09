@@ -55,6 +55,9 @@ static void post_fsm_event(fsm_event_t event)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "FSM event %s rejected: %s", julia_fsm_event_name(event),
                  esp_err_to_name(err));
+        /* These callers run on the WSS owner. Do not leave a consumed MIC_STOP
+         * or playback completion with no committed transition or retry path. */
+        if (event != EVT_WSS_DISCONNECTED) wss_transport_fail_session();
     }
 }
 
@@ -96,6 +99,9 @@ static julia_main_state_t s_interaction_origin = JULIA_MAIN_STATE_S1_COMPANION;
 static bool s_s4_ready_pending;
 static bool s_s4_ready_committed;
 static bool s_wake_reply_expected;
+/* FSM observer writes under s_mic_state_lock; WSS owner enforces the deadline. */
+static int64_t s_reply_deadline_us;
+static int64_t s_listen_deadline_us;
 
 typedef enum {
     VOICE_PLAYBACK_ROLE_NONE = 0,
@@ -605,8 +611,32 @@ static void voice_service_state_ready_poll(void)
     }
 }
 
+static bool voice_service_reply_timeout_poll(void)
+{
+    portENTER_CRITICAL(&s_mic_state_lock);
+    int64_t deadline = s_reply_deadline_us;
+    bool expired = deadline != 0 && esp_timer_get_time() >= deadline;
+    bool listen_expired = s_listen_deadline_us != 0 &&
+                          esp_timer_get_time() >= s_listen_deadline_us;
+    if (expired) s_reply_deadline_us = 0;
+    if (listen_expired) s_listen_deadline_us = 0;
+    portEXIT_CRITICAL(&s_mic_state_lock);
+    if (!expired && !listen_expired) return false;
+
+    ESP_LOGW(TAG, "%s timeout after %d s; ending stale voice session",
+             expired ? "S2.2 reply" : "S4/S2.1 listening",
+             expired ? CONFIG_JULIA_DIALOG_REPLY_TIMEOUT_SECONDS
+                     : CONFIG_JULIA_DIALOG_LISTEN_TIMEOUT_SECONDS);
+    /* The protocol has no reply/turn ID. Reconnect rather than allow a late
+     * SPKS from this turn to be accepted as the next turn's response.
+     * Normal session teardown clears busy/listening/playback and exits S2. */
+    wss_transport_fail_session();
+    return true;
+}
+
 static void voice_service_poll(void)
 {
+    if (voice_service_reply_timeout_poll()) return;
     /* 关键确认由 WSS owner 直接发送，不与可丢弃的四槽控制作业竞争。 */
     voice_service_state_ready_poll();
     if (playback_role_is_terminal(s_playback_role) &&
@@ -664,7 +694,10 @@ static void voice_service_apply_mic_start(void)
     /* 打断保留原有立即停播语义，不把面板呈现的等待增加到扬声器停止延迟。 */
     if (interrupted_speaker) voice_playback_stop();
     /* 准入失败不能留下 busy/采音副作用；计时或 OTA 可能已使上述快照过期。 */
-    if (event != EVT_NONE && julia_fsm_runtime_post_sync(event) != ESP_OK) return;
+    if (event != EVT_NONE && julia_fsm_runtime_post_sync(event) != ESP_OK) {
+        wss_transport_fail_session();
+        return;
+    }
     voice_service_disarm_companion_timer();
     julia_idle_display_note_activity();
     voice_service_cancel_file();
@@ -771,7 +804,8 @@ static bool voice_service_handle_wake_json(const uint8_t *text, size_t len)
         cJSON_Delete(root);
         return true;
     }
-    if (state != JULIA_MAIN_STATE_S3_STANDBY &&
+    if (state != JULIA_MAIN_STATE_S1_COMPANION &&
+        state != JULIA_MAIN_STATE_S3_STANDBY &&
         state != JULIA_MAIN_STATE_S5_SILENT &&
         state != JULIA_MAIN_STATE_S6_SLEEP) {
         ESP_LOGW(TAG, "Ignoring wake_detected in state=%s",
@@ -988,6 +1022,12 @@ static void voice_service_on_queue_item(void *item, size_t item_size)
 /** 新语音连接从空的麦克风缓冲开始，断线前未发出的声音绝不在重连后补发。 */
 static void voice_service_on_session_start(void)
 {
+    /* A new socket starts in the server's wake-required mode. This is independent
+     * of MQTT availability and must complete before accepting new voice commands. */
+    if (julia_fsm_runtime_post_sync(EVT_VOICE_SESSION_RESET) != ESP_OK) {
+        wss_transport_fail_session();
+        return;
+    }
     uint32_t generation = voice_service_next_uplink_generation();
     if (!s_uplink_ring_ready ||
         !voice_uplink_ring_start_generation(&s_uplink_ring, generation)) {
@@ -1038,6 +1078,8 @@ static void voice_service_on_session_end(wss_transport_end_reason_t reason)
     s_s4_ready_committed = false;
     s_file_pending = false;
     s_wake_reply_expected = false;
+    s_reply_deadline_us = 0;
+    s_listen_deadline_us = 0;
     s_interaction_id[0] = '\0';
     board_audio_enable_wss_mic(false);
     portEXIT_CRITICAL(&s_mic_state_lock);
@@ -1090,8 +1132,22 @@ static void voice_service_on_fsm_state(julia_main_state_t main_state,
                                        julia_s2_sub_state_t s2_sub_state,
                                        fsm_event_t event, void *ctx)
 {
-    (void)s2_sub_state;
     (void)ctx;
+    portENTER_CRITICAL(&s_mic_state_lock);
+    s_reply_deadline_us =
+        main_state == JULIA_MAIN_STATE_S2_DIALOG &&
+        s2_sub_state == JULIA_S2_SUB_STATE_S2_2_THINKING
+            ? esp_timer_get_time() +
+                (int64_t)CONFIG_JULIA_DIALOG_REPLY_TIMEOUT_SECONDS * 1000000LL
+            : 0;
+    s_listen_deadline_us =
+        main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
+        (main_state == JULIA_MAIN_STATE_S2_DIALOG &&
+         s2_sub_state == JULIA_S2_SUB_STATE_S2_1_LISTENING)
+            ? esp_timer_get_time() +
+                (int64_t)CONFIG_JULIA_DIALOG_LISTEN_TIMEOUT_SECONDS * 1000000LL
+            : 0;
+    portEXIT_CRITICAL(&s_mic_state_lock);
     if (main_state != JULIA_MAIN_STATE_S4_INTERACTION || event != EVT_WAKEUP) return;
 
     portENTER_CRITICAL(&s_mic_state_lock);

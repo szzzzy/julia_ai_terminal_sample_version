@@ -16,7 +16,7 @@ endif()
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
-    foreach(recovery_case backlight rtc display mqtt fsm boot storage fault voice)
+    foreach(recovery_case backlight rtc display mqtt fsm offline_ui boot storage fault voice)
         add_test(NAME recovery_${recovery_case}
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_recovery_paths.py"
                 --cc "${CMAKE_C_COMPILER}" --out "${CMAKE_CURRENT_BINARY_DIR}/recovery"

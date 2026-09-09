@@ -40,7 +40,7 @@ WSS 使用 `server_certs/ca_cert.pem` 验证证书链；当前传输实现设置
 
 ### 3.1 唤醒模式
 
-`CONFIG_JULIA_SERVER_WAKE_ENABLE=y` 为默认模式：WSS 会话建立后立即打开持续上传，界面保持当前行为状态。服务器命中唤醒词后先通过同一 WSS 连接发送 `wake_detected` JSON；设备提交 S3/S5/S6→S4 后回 `state_ready`，服务器收到回执后才能发送唤醒回应。实际用户话语开始再发送 `MIC_START`。
+`CONFIG_JULIA_SERVER_WAKE_ENABLE=y` 为默认模式：新 WSS 会话先将旧 S1/S2/S4 校正到 S3，再打开持续上传，不继承旧会话的免唤醒资格；S3/S5/S6、故障和 OTA 状态不受此重置影响。服务器命中唤醒词后先通过同一 WSS 连接发送 `wake_detected` JSON；设备提交 S1/S3/S5/S6→S4 后回 `state_ready`，服务器收到回执后才能发送唤醒回应。允许 S1 接受唤醒确认，是为了兼容云端已经结束免唤醒窗口、设备仍显示陪伴的情况。实际用户话语开始再发送 `MIC_START`。
 
 关闭该开关时，设备编译本地 WakeNet，模型名称为 `wn9_nihaoxiaozhi_tts`、显示唤醒词为“你好小智”。本地命中后请求打开上传；该动作不是向服务器发送一条 `MIC_START` 文本。模型是否已正确烧入 `model` 分区必须单独验证。两种模式是编译选择，没有自动断网切换。
 
@@ -78,7 +78,7 @@ PCM1 不包含会话编号、话语编号或采样时间戳。服务器应把连
 
 | 命令 | 设备行为 |
 | --- | --- |
-| `{"type":"wake_detected","interaction_id":"wake_<ms>"}` | S3/S5/S6 投递 `EVT_WAKEUP`；FSM 提交 S4 后设备回 `state_ready` |
+| `{"type":"wake_detected","interaction_id":"wake_<ms>"}` | S1/S3/S5/S6 投递 `EVT_WAKEUP`；FSM 提交 S4 后设备回 `state_ready` |
 | `MIC_START` | 清空待播 PCM、使旧播放代次失效并标记实际话语开始；S4 中不改变主状态 |
 | `MIC_STOP` | 结束当前监听并进入思考；没有活动话语时忽略；不关闭 streaming |
 | `SPKS <rate>` | S4 且等待唤醒回应时作为 WAKE_REPLY，播放完成仍留 S4；S2.2 时作为正常回答并进入 S2.3；其他状态拒绝 |
@@ -182,6 +182,12 @@ FILE_SEND SD:/sample.wav
 `type` 必须严格等于 `intent_result`，以后增加语义只扩展 `intent` 值，不改变消息类型。`intent=normal` 表示没有特殊语义，正常流程继续由 `MIC_STOP` 推进。收到 goodnight／dismiss 时，先在 S4 播放本地“好的，晚安”／“那我不烦你了”并同步嘴型，实际播完后再进入 S6／S5；若语义晚于 MIC_STOP 到达 S2，则先取消旧播放，通过 `EVT_PREPARE_TERMINAL_REPLY` 回到 S4 再播放提示。重复终止指令不重播，MIC_START 可中止提示并取消本次退出。
 
 正常对话不发送 `intent_result`：服务端直接发送 `MIC_STOP`，设备由 S4 或 S2.1 进入 S2.2。识别到 `goodnight` 或 `dismiss` 时，服务器只发送语义结果，不发送 `SPKS`；设备结束监听，S4 内的回应由固件内嵌音频提供。随后到达的幂等 `MIC_STOP` 因已无活动话语而被忽略，不提前结束提示。
+
+S2.2 等待回答受 `CONFIG_JULIA_DIALOG_REPLY_TIMEOUT_SECONDS` 限制，默认 30 秒（可配置 5～120 秒），从进入 S2.2 开始计时，接受 `SPKS` 并进入 S2.3 或离开 S2.2 时取消。S4/S2.1 等待用户话语结束受 `CONFIG_JULIA_DIALOG_LISTEN_TIMEOUT_SECONDS` 限制，默认 60 秒（可配置 10～300 秒），从进入对应状态开始计时。心跳和无关消息不会延长等待。超时后结束旧 WSS 会话，清理监听、播放和 busy 状态，首次离线按 S7.1 提示流程回到 S3 并后台重连；提示持续约 3 秒。若已经处于 OFFLINE，则直接清除旧 S1/S2/S4 并回到 S3，不重复提示。当前回答协议没有轮次 ID，因此不在旧连接上直接开启下一轮，以免迟到的回答串入新对话。
+
+S1 的陪伴期限由 FSM 在进入 S1 时独立记录（当前为 600 秒），到期自行处理 `EVT_USER_LEAVE`；队列丢失空闲通知不影响最终退出，提前或上一轮残留的超时通知不会结束新窗口。屏幕状态字幕按周期与最新提交状态对账，避免一次 LVGL 锁超时造成旧 S1/S2 字样残留。
+
+当前协议没有云端免唤醒窗口结束通知。若云端在同一 WSS 连接内静默切换到等待唤醒，设备无法立即知道云端状态；本地仍按自己的 S1 期限退出，但收到新的 `wake_detected` 时会完成 S4 同步。需要即时同步窗口结束时，双方还须约定并实现明确的状态通知，不能仅靠 TCP/WSS 心跳推断。
 
 处理器允许纯文本命令末尾带空白和换行，不支持一条消息中的多行命令列表。注册载荷上限为 128 字节，FILE_SEND URI 缓冲区含 NUL 共 128 字节；语义 JSON 必须是单个完整对象。
 

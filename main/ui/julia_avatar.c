@@ -125,22 +125,46 @@ static void status_label_place(void)
     lv_obj_move_foreground(s_status_label);
 }
 
+/* Caller holds the LVGL lock. Retry the latest committed caption after contention. */
+static void status_label_sync(void)
+{
+    if (s_status_label == NULL) return;
+    char snapshot[sizeof(s_status_text)];
+    portENTER_CRITICAL(&s_phase_lock);
+    memcpy(snapshot, s_status_text, sizeof(snapshot));
+    portEXIT_CRITICAL(&s_phase_lock);
+    if (strcmp(lv_label_get_text(s_status_label), snapshot) == 0) return;
+    lv_label_set_text(s_status_label, snapshot);
+    status_label_place();
+    lv_obj_invalidate(s_status_label);
+}
+
 void julia_avatar_set_status_text(const char *text)
 {
     if (text == NULL || text[0] == '\0') return;
-    char snapshot[sizeof(s_status_text)];
     portENTER_CRITICAL(&s_phase_lock);
     strncpy(s_status_text, text, sizeof(s_status_text) - 1U);
     s_status_text[sizeof(s_status_text) - 1U] = '\0';
-    memcpy(snapshot, s_status_text, sizeof(snapshot));
     portEXIT_CRITICAL(&s_phase_lock);
 
     if (s_status_label == NULL || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
-    lv_label_set_text(s_status_label, snapshot);
-    /* 每次更新都重新应用固定坐标，防止布局或后续 UI 操作覆盖调试字幕位置。 */
-    status_label_place();
-    lv_obj_invalidate(s_status_label);
+    status_label_sync();
     lvgl_port_unlock();
+}
+
+/* Caller holds the LVGL lock. Read the latest value after acquiring that lock
+ * so an older caller cannot overwrite a newer connection state. */
+static void offline_label_sync(void)
+{
+    if (s_offline_label == NULL) return;
+    portENTER_CRITICAL(&s_phase_lock);
+    bool offline = s_offline;
+    portEXIT_CRITICAL(&s_phase_lock);
+    if (lv_obj_has_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN) == !offline) return;
+    if (offline) lv_obj_clear_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_offline_label);
+    lv_obj_invalidate(s_offline_label);
 }
 
 void julia_avatar_set_offline(bool offline)
@@ -150,10 +174,7 @@ void julia_avatar_set_offline(bool offline)
     portEXIT_CRITICAL(&s_phase_lock);
 
     if (s_offline_label == NULL || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
-    if (offline) lv_obj_clear_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(s_offline_label);
-    lv_obj_invalidate(s_offline_label);
+    offline_label_sync();
     lvgl_port_unlock();
 }
 
@@ -594,6 +615,8 @@ static void avatar_task(void *argument)
         }
 
         if (lvgl_port_lock(pdMS_TO_TICKS(20))) {
+            status_label_sync();
+            offline_label_sync();
             update_micro_motion(now_ms);
             /* S6→S4 的底图切换和 SPKS 可能并发；每个节拍重新校正显隐，避免
              * talking_start 的一次性 LVGL 锁失败让整段唤醒回应都没有嘴型。 */

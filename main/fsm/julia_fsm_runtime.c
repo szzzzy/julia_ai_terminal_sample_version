@@ -78,6 +78,7 @@ static esp_timer_handle_t s_disconnect_timer;
 static esp_timer_handle_t s_service_init_timer;
 /* owner 持有截止时间；timer 事件只是及时唤醒，满队列不能丢掉状态退出条件。 */
 static int64_t s_standby_deadline_us;
+static int64_t s_companion_deadline_us;
 static int64_t s_silent_deadline_us;
 static int64_t s_disconnect_deadline_us;
 static int64_t s_service_deadline_us;
@@ -179,7 +180,7 @@ static bool service_state_apply_event(fsm_event_t event)
         else s_online_links &= (uint8_t)~bit;
         if ((s_online_links & SERVICE_LINK_ALL) == SERVICE_LINK_ALL) {
             s_committed_service_state = JULIA_SERVICE_ONLINE;
-        } else if (!connected || previous_state == JULIA_SERVICE_OFFLINE) {
+        } else if (previous_state != JULIA_SERVICE_CONNECTING) {
             s_committed_service_state = JULIA_SERVICE_OFFLINE;
         } else {
             s_committed_service_state = JULIA_SERVICE_CONNECTING;
@@ -209,27 +210,29 @@ static bool service_state_apply_event(fsm_event_t event)
  * 连接回调是快速、非阻塞的事件生产者，队列满时允许投递失败。周期快照保证一次
  * 丢失的恢复事件不会让 offline 永久残留，也保证丢失的断开事件最终能够补发。
  */
+static bool runtime_process_event(fsm_event_t event);
+
 static void service_state_reconcile(void)
 {
     portENTER_CRITICAL(&s_state_lock);
     uint8_t online_links = s_online_links;
-    julia_service_state_t state = s_committed_service_state;
     portEXIT_CRITICAL(&s_state_lock);
     bool mqtt_ready = mqtt_comm_is_ready();
     bool wss_ready = wss_transport_is_ready();
+    /* Clear stale links before adding recovered links, including while CONNECTING
+     * or OFFLINE. Otherwise interleaved reconnects can falsely report ONLINE.
+     * We already own the FSM here: do not enqueue into a possibly full queue. */
+    if ((online_links & SERVICE_LINK_MQTT) != 0 && !mqtt_ready) {
+        (void)runtime_process_event(EVT_MQTT_DISCONNECTED);
+    }
+    if ((online_links & SERVICE_LINK_WSS) != 0 && !wss_ready) {
+        (void)runtime_process_event(EVT_WSS_DISCONNECTED);
+    }
     if ((online_links & SERVICE_LINK_MQTT) == 0 && mqtt_ready) {
         (void)service_state_apply_event(EVT_MQTT_CONNECTED);
     }
     if ((online_links & SERVICE_LINK_WSS) == 0 && wss_ready) {
         (void)service_state_apply_event(EVT_WSS_CONNECTED);
-    }
-    if (state == JULIA_SERVICE_ONLINE) {
-        if ((online_links & SERVICE_LINK_MQTT) != 0 && !mqtt_ready) {
-            (void)julia_fsm_runtime_post(EVT_MQTT_DISCONNECTED);
-        }
-        if ((online_links & SERVICE_LINK_WSS) != 0 && !wss_ready) {
-            (void)julia_fsm_runtime_post(EVT_WSS_DISCONNECTED);
-        }
     }
 }
 
@@ -468,6 +471,10 @@ static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
     julia_avatar_set_status_text(
         state_status_text(main_state, s2_sub_state, fsm->s7_sub_state));
     apply_presentation(main_state, s2_sub_state, fsm->s7_sub_state);
+    if (main_state == JULIA_MAIN_STATE_S1_COMPANION) {
+        s_companion_deadline_us = esp_timer_get_time() +
+            (int64_t)CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS * 1000000LL;
+    }
     if (main_state == JULIA_MAIN_STATE_S3_STANDBY) {
         s_standby_deadline_us = esp_timer_get_time() +
             (int64_t)CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS * 1000000LL;
@@ -525,6 +532,7 @@ static void runtime_on_exit(julia_fsm_t *fsm, julia_main_state_t main_state,
         s_local_prompt_generation = 0;
         if (stopped || !voice_playback_is_active()) julia_avatar_talking_stop();
     }
+    if (main_state == JULIA_MAIN_STATE_S1_COMPANION) s_companion_deadline_us = 0;
     if (main_state == JULIA_MAIN_STATE_S3_STANDBY) s_standby_deadline_us = 0;
     if (main_state == JULIA_MAIN_STATE_S5_SILENT) s_silent_deadline_us = 0;
     if (main_state == JULIA_MAIN_STATE_S7_FAULT) s_disconnect_deadline_us = 0;
@@ -544,6 +552,7 @@ static void runtime_on_exit(julia_fsm_t *fsm, julia_main_state_t main_state,
 static int64_t *event_deadline(fsm_event_t event)
 {
     switch (event) {
+    case EVT_USER_LEAVE: return &s_companion_deadline_us;
     case EVT_STANDBY_TIMEOUT: return &s_standby_deadline_us;
     case EVT_SILENT_TIMEOUT: return &s_silent_deadline_us;
     case EVT_DISCONNECT_NOTICE_TIMEOUT: return &s_disconnect_deadline_us;
@@ -554,6 +563,10 @@ static int64_t *event_deadline(fsm_event_t event)
 
 static bool runtime_process_event(fsm_event_t event)
 {
+    if (event == EVT_VOICE_SESSION_RESET &&
+        s_fsm.main_state != JULIA_MAIN_STATE_S1_COMPANION &&
+        s_fsm.main_state != JULIA_MAIN_STATE_S2_DIALOG &&
+        s_fsm.main_state != JULIA_MAIN_STATE_S4_INTERACTION) return true;
     int64_t *deadline = event_deadline(event);
     if (deadline != NULL) {
         if (*deadline == 0 || esp_timer_get_time() < *deadline) return false;
@@ -561,6 +574,10 @@ static bool runtime_process_event(fsm_event_t event)
     }
     julia_service_state_t previous = julia_fsm_runtime_get_service_state();
     bool service_event = service_state_apply_event(event);
+    /* Suppress repeated notices, never suppress invalidation of a voice session.
+     * MQTT may have been offline throughout an otherwise working voice dialog. */
+    if (event == EVT_WSS_DISCONNECTED && previous == JULIA_SERVICE_OFFLINE)
+        return runtime_process_event(EVT_VOICE_SESSION_RESET);
     if (service_event && (julia_fsm_runtime_get_service_state() != JULIA_SERVICE_OFFLINE ||
                           previous == JULIA_SERVICE_OFFLINE)) return true;
     bool applied = julia_fsm_handle_event(&s_fsm, event, NULL);
@@ -572,7 +589,7 @@ static bool runtime_process_event(fsm_event_t event)
 
 static void runtime_check_deadlines(void)
 {
-    const fsm_event_t events[] = {EVT_STANDBY_TIMEOUT, EVT_SILENT_TIMEOUT,
+    const fsm_event_t events[] = {EVT_USER_LEAVE, EVT_STANDBY_TIMEOUT, EVT_SILENT_TIMEOUT,
         EVT_DISCONNECT_NOTICE_TIMEOUT, EVT_SERVICE_CONNECT_TIMEOUT};
     for (size_t i = 0; i < sizeof(events) / sizeof(events[0]); ++i) {
         int64_t deadline = *event_deadline(events[i]);
@@ -586,10 +603,11 @@ static void fsm_task(void *argument)
     (void)argument;
     fsm_runtime_message_t message;
     for (;;) {
+        /* Reconcile even under continuous event traffic, before initial timeout. */
+        service_state_reconcile();
         runtime_check_deadlines();
         /* 有界等待兼作连接状态巡检周期，不能改回 portMAX_DELAY。 */
         if (xQueueReceive(s_event_queue, &message, pdMS_TO_TICKS(1000)) != pdTRUE) {
-            service_state_reconcile();
             local_prompt_poll();
             continue;
         }
@@ -777,7 +795,10 @@ esp_err_t julia_fsm_runtime_post_sync(fsm_event_t event)
     if (event <= EVT_NONE || event >= EVT_COUNT) return ESP_ERR_INVALID_ARG;
     if (s_event_queue == NULL || s_task == NULL || xTaskGetCurrentTaskHandle() == s_task)
         return ESP_ERR_INVALID_STATE;
-    SemaphoreHandle_t completed = xSemaphoreCreateBinary();
+    /* The caller waits until the FSM releases this storage. No heap allocation:
+     * even a failed OTA task creation must still be able to leave S8. */
+    StaticSemaphore_t completed_storage;
+    SemaphoreHandle_t completed = xSemaphoreCreateBinaryStatic(&completed_storage);
     if (completed == NULL) return ESP_ERR_NO_MEM;
     bool applied = false;
     fsm_runtime_message_t message = {

@@ -39,6 +39,7 @@ static const char *const s_s7_sub_state_names[JULIA_S7_SUB_STATE_COUNT] = {
 };
 
 static const char *const s_event_names[EVT_COUNT] = {
+    [EVT_VOICE_SESSION_RESET] = "EVT_VOICE_SESSION_RESET",
     [EVT_NONE] = "EVT_NONE",
     [EVT_USER_LEAVE] = "EVT_USER_LEAVE",
     [EVT_USER_CALL] = "EVT_USER_CALL",
@@ -193,7 +194,9 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
                          JULIA_MAIN_STATE_S8_OTA);
 
     case JULIA_MAIN_STATE_S1_COMPANION:
-        return (to_main_state == JULIA_MAIN_STATE_S2_DIALOG &&
+        return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
+                         JULIA_MAIN_STATE_S4_INTERACTION) ||
+               (to_main_state == JULIA_MAIN_STATE_S2_DIALOG &&
                 to_s2_sub_state == JULIA_S2_SUB_STATE_S2_1_LISTENING) ||
                target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S3_STANDBY) ||
@@ -369,7 +372,13 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
     julia_s2_sub_state_t target_s2_sub_state = JULIA_S2_SUB_STATE_COUNT;
     julia_s7_sub_state_t target_s7_sub_state = JULIA_S7_SUB_STATE_NONE;
 
-    if ((fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
+    if (event == EVT_VOICE_SESSION_RESET &&
+        (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
+         fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG ||
+         fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION)) {
+        target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
+    } else if ((fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
          fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG ||
          fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY ||
          fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
@@ -399,7 +408,8 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
                event == EVT_OTA_AVAILABLE) {
         target_main_state = JULIA_MAIN_STATE_S8_OTA;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
-    } else if (fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY &&
+    } else if ((fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY ||
+                fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION) &&
                event == EVT_WAKEUP) {
         /* 只有已经确认的唤醒词才能让待机设备开始一轮交流。 */
         target_main_state = JULIA_MAIN_STATE_S4_INTERACTION;

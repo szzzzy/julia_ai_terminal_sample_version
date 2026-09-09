@@ -260,6 +260,7 @@ def fsm(args):
     prefix = r'''
 #include "julia_fsm_runtime.h"
 #define CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS 300
+#define CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS 600
 #define CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS 1800
 #define SERVICE_LINK_MQTT 1
 #define SERVICE_LINK_WSS 2
@@ -277,17 +278,22 @@ static uint8_t s_online_links=3;
 static void *s_event_queue=(void*)1,*s_task=(void*)2,*current_task=(void*)1;
 static void *s_standby_timer=(void*)1,*s_silent_timer=(void*)1,*s_disconnect_timer=(void*)1,*s_service_init_timer=(void*)1;
 static int64_t s_standby_deadline_us,s_silent_deadline_us,s_disconnect_deadline_us,s_service_deadline_us,now;
+static int64_t s_companion_deadline_us;
 static julia_fsm_state_observer_t s_state_observer;
 static void *s_state_observer_ctx;
 static fsm_runtime_message_t queued;
 static bool pending;
+static bool mqtt_ready=true,wss_ready=true;
+static bool mqtt_comm_is_ready(void){return mqtt_ready;}
+static bool wss_transport_is_ready(void){return wss_ready;}
 static bool runtime_process_event(fsm_event_t event);
 static int64_t esp_timer_get_time(void){return now;}
 static int esp_timer_start_once(void *t,uint64_t us){return ESP_OK;}
 static int esp_timer_stop(void *t){return ESP_OK;}
 static void *xTaskGetCurrentTaskHandle(void){return current_task;}
-static void *xSemaphoreCreateBinary(void){return calloc(1,sizeof(int));}
-static void vSemaphoreDelete(void *s){assert(*(int*)s);free(s);}
+typedef int StaticSemaphore_t;
+static void *xSemaphoreCreateBinaryStatic(StaticSemaphore_t *s){*s=0;return s;}
+static void vSemaphoreDelete(void *s){assert(*(int*)s);}
 static int xQueueSend(void *q,const void *m,unsigned t){assert(!pending);queued=*(const fsm_runtime_message_t*)m;pending=true;return 1;}
 static void xSemaphoreGive(void *s){*(int*)s=1;}
 static int xSemaphoreTake(void *s,unsigned t){
@@ -301,11 +307,15 @@ static void julia_avatar_set_status_text(const char *s){}
 static void julia_avatar_set_offline(bool o){}
 static void julia_avatar_talking_start(void){}
 static void julia_avatar_talking_stop(void){}
-static bool play_disconnect_prompt(void){return false;}
+static const uint8_t network_disconnected_wav_start[1],network_disconnected_wav_end[1];
+static uint32_t s_local_prompt_generation;
+static bool voice_playback_stop_generation(uint32_t generation){return false;}
+static bool voice_playback_is_active(void){return false;}
+static bool play_local_prompt(const uint8_t *wav,size_t bytes,const char *name,bool idle,uint32_t *generation){return false;}
 esp_err_t julia_fsm_runtime_post(fsm_event_t event){return ESP_ERR_NO_MEM;}
 '''
     names = ["julia_fsm_runtime_get_service_state", "julia_fsm_runtime_get_state",
-             "julia_fsm_runtime_get_s2_sub_state", "service_state_apply_event", "runtime_on_enter",
+             "julia_fsm_runtime_get_s2_sub_state", "service_state_apply_event", "service_state_reconcile", "runtime_on_enter",
              "runtime_on_exit", "event_deadline", "runtime_process_event", "runtime_check_deadlines",
              "disconnect_timer_callback", "julia_fsm_runtime_post_sync"]
     run_case(args, "fsm_recovery", prefix, [("main/fsm/julia_fsm_runtime.c", names)], r'''
@@ -333,9 +343,98 @@ int main(void){
     now=s_disconnect_deadline_us;disconnect_timer_callback(NULL); /* Queue is full. */
     runtime_check_deadlines();assert(s_fsm.main_state==JULIA_MAIN_STATE_S3_STANDBY);
     assert(!runtime_process_event(EVT_STANDBY_TIMEOUT)); /* Stale timeout cannot exit new S3. */
+    /* Startup failures respect the initial connection deadline. */
+    s_committed_service_state=JULIA_SERVICE_CONNECTING;s_online_links=0;
+    s_service_deadline_us=now+30000000;
+    runtime_process_event(EVT_MQTT_DISCONNECTED);
+    assert(s_committed_service_state==JULIA_SERVICE_CONNECTING);
+    runtime_process_event(EVT_MQTT_CONNECTED);
+    mqtt_ready=false;wss_ready=true;service_state_reconcile();
+    assert(s_online_links==SERVICE_LINK_WSS);
+    assert(s_committed_service_state==JULIA_SERVICE_CONNECTING);
+    now=s_service_deadline_us;runtime_check_deadlines();
+    assert(s_committed_service_state==JULIA_SERVICE_OFFLINE);
+    /* Opposite links recover/fail together: never combine stale ready bits. */
+    mqtt_ready=true;wss_ready=false;service_state_reconcile();
+    assert(s_online_links==SERVICE_LINK_MQTT);
+    assert(s_committed_service_state==JULIA_SERVICE_OFFLINE);
+    wss_ready=true;service_state_reconcile();
+    assert(s_committed_service_state==JULIA_SERVICE_ONLINE);
+    /* MQTT already offline must not suppress invalidation of a later WSS session. */
+    now=s_disconnect_deadline_us;runtime_check_deadlines();
+    runtime_process_event(EVT_WAKEUP);runtime_process_event(EVT_START_DIALOG);
+    runtime_process_event(EVT_MULTI_TURN_DETECTED);runtime_process_event(EVT_SILENCE_TIMEOUT);
+    assert(s_fsm.main_state==JULIA_MAIN_STATE_S1_COMPANION);
+    s_committed_service_state=JULIA_SERVICE_OFFLINE;s_online_links=SERVICE_LINK_WSS;
+    runtime_process_event(EVT_WSS_DISCONNECTED);
+    assert(s_fsm.main_state==JULIA_MAIN_STATE_S3_STANDBY);
+    /* New socket independently resets stale companion/dialog state. */
+    runtime_process_event(EVT_WAKEUP);runtime_process_event(EVT_START_DIALOG);
+    runtime_process_event(EVT_VOICE_SESSION_RESET);
+    assert(s_fsm.main_state==JULIA_MAIN_STATE_S3_STANDBY);
+    runtime_process_event(EVT_WAKEUP);runtime_process_event(EVT_START_DIALOG);
+    runtime_process_event(EVT_MULTI_TURN_DETECTED);runtime_process_event(EVT_SILENCE_TIMEOUT);
+    int64_t companion_deadline=s_companion_deadline_us;
+    assert(companion_deadline==now+600000000);
+    assert(!runtime_process_event(EVT_USER_LEAVE)); /* Early/stale producer event. */
+    assert(s_fsm.main_state==JULIA_MAIN_STATE_S1_COMPANION);
+    now=companion_deadline;runtime_check_deadlines(); /* No queued timeout available. */
+    assert(s_fsm.main_state==JULIA_MAIN_STATE_S3_STANDBY);
+    /* Sleep and OTA must not be woken/aborted by session establishment. */
+    runtime_process_event(EVT_NIGHT_TIME);runtime_process_event(EVT_VOICE_SESSION_RESET);
+    assert(s_fsm.main_state==JULIA_MAIN_STATE_S6_SLEEP);
+    runtime_process_event(EVT_MOTION_WAKE);runtime_process_event(EVT_OTA_AVAILABLE);
+    runtime_process_event(EVT_VOICE_SESSION_RESET);
+    assert(s_fsm.main_state==JULIA_MAIN_STATE_S8_OTA);
+    runtime_process_event(EVT_OTA_TASK_FAILED);
+    /* Missing disconnect callback is applied even when posting always fails. */
+    mqtt_ready=false;service_state_reconcile();
+    assert(s_committed_service_state==JULIA_SERVICE_OFFLINE);
+    assert(s_online_links==SERVICE_LINK_WSS);
+    /* Missing recovery callbacks must clear a persistent offline state. */
+    mqtt_ready=true;service_state_reconcile();
+    assert(s_committed_service_state==JULIA_SERVICE_ONLINE);
     puts("PASS: FSM acknowledgements, OTA admission/exit, approved night edges and dropped timer recovery");return 0;
 }
 ''', ["main/fsm/julia_fsm.c"])
+
+
+def offline_ui(args):
+    run_case(args, "offline_ui", r'''
+#define LV_OBJ_FLAG_HIDDEN 1
+static void *s_offline_label=(void*)1;
+static void *s_status_label=(void*)2;
+static char s_status_text[32]="S1 COMPANION",caption[32]="S1 COMPANION";
+static const char *lv_label_get_text(void *obj){return caption;}
+static void lv_label_set_text(void *obj,const char *text){strcpy(caption,text);}
+static void status_label_place(void){}
+static bool s_offline,hidden=true,lock_ok=true;
+static unsigned invalidations;
+static bool lvgl_port_lock(unsigned ticks){return lock_ok;}
+static void lvgl_port_unlock(void){}
+static bool lv_obj_has_flag(void *obj,int flag){return hidden;}
+static void lv_obj_clear_flag(void *obj,int flag){hidden=false;}
+static void lv_obj_add_flag(void *obj,int flag){hidden=true;}
+static void lv_obj_move_foreground(void *obj){}
+static void lv_obj_invalidate(void *obj){invalidations++;}
+''', [("main/ui/julia_avatar.c", ["offline_label_sync", "julia_avatar_set_offline",
+    "status_label_sync", "julia_avatar_set_status_text"])], r'''
+int main(void){
+    julia_avatar_set_offline(true);assert(!hidden);
+    lock_ok=false;julia_avatar_set_offline(false);
+    assert(hidden==false && s_offline==false);
+    lock_ok=true;offline_label_sync();assert(hidden);
+    unsigned count=invalidations;offline_label_sync();assert(invalidations==count);
+    lock_ok=false;julia_avatar_set_offline(true);assert(hidden);
+    lock_ok=true;offline_label_sync();assert(!hidden);
+    lock_ok=false;julia_avatar_set_status_text("S3 STANDBY");
+    assert(strcmp(caption,"S1 COMPANION")==0);
+    lock_ok=true;status_label_sync();assert(strcmp(caption,"S3 STANDBY")==0);
+    lock_ok=false;julia_avatar_set_offline(false);julia_avatar_set_offline(true);
+    lock_ok=true;offline_label_sync();assert(!hidden);
+    puts("PASS: offline label retries failed UI locks and applies latest state");return 0;
+}
+''')
 
 
 def boot(args):
@@ -521,6 +620,9 @@ def voice(args):
     prefix = r'''
 #include "julia_fsm.h"
 #define CONFIG_JULIA_SERVER_WAKE_ENABLE 1
+#define CONFIG_JULIA_DIALOG_REPLY_TIMEOUT_SECONDS 30
+#define CONFIG_JULIA_DIALOG_LISTEN_TIMEOUT_SECONDS 60
+#define CONFIG_JULIA_SPEAKER_VOLUME_PERCENT 50
 #define VOICE_SERVICE_URI_MAX_LEN 256
 #define VOICE_INTERACTION_ID_MAX_LEN 64
 typedef enum{VOICE_PLAYBACK_ROLE_NONE,VOICE_PLAYBACK_ROLE_WAKE_REPLY,VOICE_PLAYBACK_ROLE_DIALOG_REPLY,VOICE_PLAYBACK_ROLE_SELF_TEST} voice_playback_role_t;
@@ -532,6 +634,12 @@ static julia_main_state_t s_interaction_origin;
 static uint32_t s_playback_generation;
 static voice_playback_role_t s_playback_role;
 static unsigned starts,sends,async_posts;
+static int64_t now,s_reply_deadline_us,s_listen_deadline_us;
+static unsigned session_failures;
+static int64_t esp_timer_get_time(void){return now;}
+static void wss_transport_fail_session(void){session_failures++;}
+static void voice_service_on_fsm_state(julia_main_state_t m,julia_s2_sub_state_t s,fsm_event_t e,void *ctx);
+static void voice_test_enter(julia_fsm_t *f,julia_main_state_t m,julia_s2_sub_state_t s,fsm_event_t e){voice_service_on_fsm_state(m,s,e,NULL);}
 static julia_main_state_t julia_fsm_runtime_get_state(void){return fsm.main_state;}
 static julia_s2_sub_state_t julia_fsm_runtime_get_s2_sub_state(void){return fsm.s2_sub_state;}
 static esp_err_t julia_fsm_runtime_post(fsm_event_t e){async_posts++;return ESP_OK;}
@@ -549,7 +657,14 @@ static bool voice_playback_is_active(void){return playing;}
 static void voice_playback_stop(void){playing=false;}
 static void voice_playback_finish(void){playing=false;}
 static esp_err_t voice_playback_start(uint32_t r,bool t,uint32_t *g){if(r!=16000&&r!=24000)return ESP_FAIL;*g=++starts;playing=true;return ESP_OK;}
-static bool voice_service_handle_wake_json(const uint8_t *t,size_t n){return false;}
+/* JSON parsing is the boundary stub; admission and handshake use firmware code. */
+typedef struct {const char *valuestring;} cJSON;
+static cJSON json_root={0},json_type={"wake_detected"},json_id={"test-id"};
+static cJSON *cJSON_ParseWithLength(const char *t,size_t n){return &json_root;}
+static bool cJSON_IsObject(const cJSON *j){return j==&json_root;}
+static bool cJSON_IsString(const cJSON *j){return j && j->valuestring;}
+static const cJSON *cJSON_GetObjectItemCaseSensitive(const cJSON *j,const char *key){return strcmp(key,"type")==0?&json_type:&json_id;}
+static void cJSON_Delete(cJSON *j){}
 static esp_err_t voice_service_send_error(const char *s){return ESP_OK;}
 static esp_err_t voice_service_push_file(const char *s,bool queued){return ESP_OK;}
 static esp_err_t wss_transport_send_now(uint8_t op,const uint8_t *s,size_t n){
@@ -559,12 +674,17 @@ static esp_err_t wss_transport_send_now(uint8_t op,const uint8_t *s,size_t n){
 '''
     run_case(args, "voice_recovery", prefix, [("main/voice/voice_service.c", [
         "post_fsm_event", "voice_service_apply_mic_start", "voice_service_apply_mic_stop",
-        "voice_service_on_server_text", "voice_service_on_fsm_state", "voice_service_state_ready_poll"])], r'''
+        "interaction_id_is_valid", "voice_service_handle_wake_json",
+        "voice_service_on_server_text", "voice_service_on_fsm_state", "voice_service_state_ready_poll",
+        "voice_service_reply_timeout_poll"])], r'''
 int main(void){
-    julia_fsm_init(&fsm);julia_fsm_transition_to(&fsm,JULIA_MAIN_STATE_S3_STANDBY,JULIA_S2_SUB_STATE_NONE,EVT_NONE);
+    julia_fsm_init(&fsm);fsm.on_enter=voice_test_enter;
+    julia_fsm_transition_to(&fsm,JULIA_MAIN_STATE_S3_STANDBY,JULIA_S2_SUB_STATE_NONE,EVT_NONE);
     julia_fsm_handle_event(&fsm,EVT_WAKEUP,NULL);
     voice_service_apply_mic_start();voice_service_apply_mic_stop();
+    assert(s_reply_deadline_us==30000000);
     voice_service_on_server_text((const uint8_t*)"SPKS 16000",10);
+    assert(s_reply_deadline_us==0);
     assert(starts==1 && fsm.s2_sub_state==JULIA_S2_SUB_STATE_S2_3_SPEAKING && async_posts==0);
     fsm.main_state=JULIA_MAIN_STATE_S8_OTA;s_dialog_listening=false;busy=false;
     voice_service_apply_mic_start();assert(!s_dialog_listening && !busy);
@@ -575,7 +695,43 @@ int main(void){
     fail_send=true;voice_service_state_ready_poll();assert(s_s4_ready_pending && sends==1);
     fail_send=false;voice_service_state_ready_poll();assert(!s_s4_ready_pending && sends==2);
     voice_service_state_ready_poll();assert(sends==2);
-    puts("PASS: consecutive MIC_STOP/SPKS sees committed THINK; state_ready is retained until owner sends it");return 0;
+    /* A healthy socket without an answer must not keep THINKING forever. */
+    now=1000000;
+    voice_service_on_fsm_state(JULIA_MAIN_STATE_S2_DIALOG,JULIA_S2_SUB_STATE_S2_2_THINKING,EVT_START_DIALOG,NULL);
+    int64_t deadline=s_reply_deadline_us;assert(deadline==31000000);
+    now=deadline-1;assert(!voice_service_reply_timeout_poll());
+    assert(s_reply_deadline_us==deadline); /* Poll/heartbeat cannot extend it. */
+    now=deadline;assert(voice_service_reply_timeout_poll());
+    assert(session_failures==1 && s_reply_deadline_us==0);
+    assert(!voice_service_reply_timeout_poll());assert(session_failures==1);
+    /* Accepted reply cancels the deadline; a later turn gets a fresh one. */
+    voice_service_on_fsm_state(JULIA_MAIN_STATE_S2_DIALOG,JULIA_S2_SUB_STATE_S2_2_THINKING,EVT_START_DIALOG,NULL);
+    deadline=s_reply_deadline_us;
+    voice_service_on_fsm_state(JULIA_MAIN_STATE_S2_DIALOG,JULIA_S2_SUB_STATE_S2_3_SPEAKING,EVT_MULTI_TURN_DETECTED,NULL);
+    now=deadline+1;assert(!voice_service_reply_timeout_poll());
+    voice_service_on_fsm_state(JULIA_MAIN_STATE_S2_DIALOG,JULIA_S2_SUB_STATE_S2_2_THINKING,EVT_START_DIALOG,NULL);
+    assert(s_reply_deadline_us==now+30000000);
+    voice_service_on_fsm_state(JULIA_MAIN_STATE_S3_STANDBY,JULIA_S2_SUB_STATE_NONE,EVT_NONE,NULL);
+    now+=30000000;assert(!voice_service_reply_timeout_poll());
+    voice_service_on_fsm_state(JULIA_MAIN_STATE_S4_INTERACTION,JULIA_S2_SUB_STATE_NONE,EVT_WAKEUP,NULL);
+    deadline=s_listen_deadline_us;assert(deadline==now+60000000);
+    now=deadline-1;assert(!voice_service_reply_timeout_poll());
+    now=deadline;assert(voice_service_reply_timeout_poll());
+    assert(!voice_service_reply_timeout_poll());
+    voice_service_on_fsm_state(JULIA_MAIN_STATE_S2_DIALOG,JULIA_S2_SUB_STATE_S2_1_LISTENING,EVT_USER_CALL,NULL);
+    deadline=s_listen_deadline_us;
+    voice_service_on_fsm_state(JULIA_MAIN_STATE_S2_DIALOG,JULIA_S2_SUB_STATE_S2_2_THINKING,EVT_START_DIALOG,NULL);
+    assert(s_listen_deadline_us==0 && s_reply_deadline_us==now+30000000);
+    /* Cloud wake-required mode can recover a locally stale S1 and receive S4 ACK. */
+    fsm.main_state=JULIA_MAIN_STATE_S1_COMPANION;fsm.s2_sub_state=JULIA_S2_SUB_STATE_NONE;
+    assert(voice_service_handle_wake_json((const uint8_t*)"{}",2));
+    assert(fsm.main_state==JULIA_MAIN_STATE_S4_INTERACTION);
+    assert(s_s4_ready_pending && s_s4_ready_committed && s_wake_reply_expected);
+    unsigned before=sends;voice_service_state_ready_poll();assert(sends==before+1);
+    /* A duplicate wake while S4 is listening must not rearm the handshake. */
+    assert(voice_service_handle_wake_json((const uint8_t*)"{}",2));
+    assert(!s_s4_ready_pending);
+    puts("PASS: ordered MIC_STOP/SPKS, retained state_ready, bounded reply wait and deadline cancellation");return 0;
 }
 ''', ["main/fsm/julia_fsm.c"])
 
@@ -584,7 +740,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cc", required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--case", choices=("backlight", "rtc", "display", "mqtt", "fsm", "boot", "storage", "fault", "voice"), required=True)
+    parser.add_argument("--case", choices=("backlight", "rtc", "display", "mqtt", "fsm", "offline_ui", "boot", "storage", "fault", "voice"), required=True)
     args = parser.parse_args()
     args.root = Path(__file__).resolve().parents[2]
     args.out.mkdir(parents=True, exist_ok=True)
