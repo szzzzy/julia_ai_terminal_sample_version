@@ -30,6 +30,7 @@
 #include "julia_avatar.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -73,10 +74,20 @@
  * to the eyes and mouth until panel-synchronised full-frame rendering exists. */
 #define AVATAR_ENABLE_FULL_FRAME_MOTION 0
 
+#define STATUS_LABEL_X               60
+#define STATUS_LABEL_Y              100
+#define STATUS_LABEL_WIDTH          220
+#define OFFLINE_LABEL_Y             120
+#define BATTERY_LABEL_X              STATUS_LABEL_X
+#define BATTERY_LABEL_Y              (STATUS_LABEL_Y - 20)
+#define BATTERY_LABEL_WIDTH          STATUS_LABEL_WIDTH
+
 static const char *TAG = "julia_avatar";
 static lv_obj_t *s_motion_root;
 static lv_obj_t *s_base;
 static lv_obj_t *s_status_label;
+static lv_obj_t *s_offline_label;
+static lv_obj_t *s_battery_label;
 static volatile bool s_ready;
 static bool s_talking;
 static uint32_t s_smoothed_rms;
@@ -86,6 +97,12 @@ static uint32_t s_last_pcm_ms;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static julia_avatar_dialog_phase_t s_dialog_phase = JULIA_AVATAR_DIALOG_IDLE;
 static bool s_dozing;
+static bool s_offline;
+static bool s_battery_present;
+static bool s_battery_charging;
+static bool s_battery_low;
+static uint8_t s_battery_percent;
+static uint16_t s_battery_voltage_mv;
 /* Last phase successfully assigned to the LVGL base image.  It is separate
  * from the requested state so a lock timeout can be retried safely. */
 static julia_avatar_dialog_phase_t s_applied_dialog_phase =
@@ -94,20 +111,101 @@ static portMUX_TYPE s_phase_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_boot_sequence_played;
 static char s_status_text[32] = "S0 BOOT";
 
+static void battery_label_apply(bool present, bool charging, bool low,
+                                uint8_t percent)
+{
+    if (s_battery_label == NULL) return;
+    if (!present) {
+        lv_obj_add_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        char text[16];
+        snprintf(text, sizeof(text), charging ? "CHG %u%%" :
+                                             low ? "LOW %u%%" : "BAT %u%%",
+                 percent);
+        lv_label_set_text(s_battery_label, text);
+        lv_obj_set_style_text_color(
+            s_battery_label,
+            charging ? lv_palette_main(LV_PALETTE_GREEN) :
+            low ? lv_palette_main(LV_PALETTE_RED) : lv_color_black(),
+            LV_PART_MAIN);
+        lv_obj_clear_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_move_foreground(s_battery_label);
+    lv_obj_invalidate(s_battery_label);
+}
+
+static void status_label_place(void)
+{
+    if (s_status_label == NULL) return;
+    lv_obj_set_pos(s_status_label, STATUS_LABEL_X, STATUS_LABEL_Y);
+    lv_obj_set_width(s_status_label, STATUS_LABEL_WIDTH);
+    lv_obj_move_foreground(s_status_label);
+}
+
+static void status_label_sync(void)
+{
+    if (s_status_label == NULL) return;
+    char snapshot[sizeof(s_status_text)];
+    portENTER_CRITICAL(&s_phase_lock);
+    memcpy(snapshot, s_status_text, sizeof(snapshot));
+    portEXIT_CRITICAL(&s_phase_lock);
+    if (strcmp(lv_label_get_text(s_status_label), snapshot) == 0) return;
+    lv_label_set_text(s_status_label, snapshot);
+    status_label_place();
+    lv_obj_invalidate(s_status_label);
+}
+
 void julia_avatar_set_status_text(const char *text)
 {
     if (text == NULL || text[0] == '\0') return;
-    char snapshot[sizeof(s_status_text)];
     portENTER_CRITICAL(&s_phase_lock);
     strncpy(s_status_text, text, sizeof(s_status_text) - 1U);
     s_status_text[sizeof(s_status_text) - 1U] = '\0';
-    memcpy(snapshot, s_status_text, sizeof(snapshot));
     portEXIT_CRITICAL(&s_phase_lock);
 
     if (s_status_label == NULL || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
-    lv_label_set_text(s_status_label, snapshot);
-    lv_obj_move_foreground(s_status_label);
-    lv_obj_invalidate(s_status_label);
+    status_label_sync();
+    lvgl_port_unlock();
+}
+
+static void offline_label_sync(void)
+{
+    if (s_offline_label == NULL) return;
+    portENTER_CRITICAL(&s_phase_lock);
+    bool offline = s_offline;
+    portEXIT_CRITICAL(&s_phase_lock);
+    if (lv_obj_has_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN) == !offline) return;
+    if (offline) lv_obj_clear_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_offline_label);
+    lv_obj_invalidate(s_offline_label);
+}
+
+void julia_avatar_set_offline(bool offline)
+{
+    portENTER_CRITICAL(&s_phase_lock);
+    s_offline = offline;
+    portEXIT_CRITICAL(&s_phase_lock);
+
+    if (s_offline_label == NULL || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
+    offline_label_sync();
+    lvgl_port_unlock();
+}
+
+void julia_avatar_set_battery_status(bool present, bool charging, bool low,
+                                     uint8_t percent, uint16_t voltage_mv)
+{
+    if (percent > 100U) percent = 100U;
+    portENTER_CRITICAL(&s_phase_lock);
+    s_battery_present = present;
+    s_battery_charging = charging;
+    s_battery_low = low;
+    s_battery_percent = percent;
+    s_battery_voltage_mv = voltage_mv;
+    portEXIT_CRITICAL(&s_phase_lock);
+
+    if (s_battery_label == NULL || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
+    battery_label_apply(present, charging, low, percent);
     lvgl_port_unlock();
 }
 
@@ -515,6 +613,8 @@ static void avatar_task(void *argument)
         }
 
         if (lvgl_port_lock(pdMS_TO_TICKS(20))) {
+            status_label_sync();
+            offline_label_sync();
             update_micro_motion(now_ms);
             if (target != displayed_level) {
                 avatar_mouth_set_shape((avatar_mouth_shape_t)target, s_smoothed_rms);
@@ -579,6 +679,41 @@ esp_err_t julia_avatar_init(void)
     portEXIT_CRITICAL(&s_phase_lock);
     lv_label_set_text(s_status_label, status_snapshot);
     lv_obj_move_foreground(s_status_label);
+    status_label_place();
+    s_offline_label = lv_label_create(screen);
+    lv_label_set_text(s_offline_label, "offline");
+    lv_obj_set_pos(s_offline_label, STATUS_LABEL_X, OFFLINE_LABEL_Y);
+    lv_obj_set_width(s_offline_label, STATUS_LABEL_WIDTH);
+    lv_obj_set_style_text_color(s_offline_label, lv_palette_main(LV_PALETTE_RED),
+                                LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_offline_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_offline_label, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_clear_flag(s_offline_label, LV_OBJ_FLAG_SCROLLABLE);
+    if (!s_offline) lv_obj_add_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_offline_label);
+
+    s_battery_label = lv_label_create(screen);
+    lv_obj_set_pos(s_battery_label, BATTERY_LABEL_X, BATTERY_LABEL_Y);
+    lv_obj_set_width(s_battery_label, BATTERY_LABEL_WIDTH);
+    lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_battery_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_battery_label, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_clear_flag(s_battery_label, LV_OBJ_FLAG_SCROLLABLE);
+    bool battery_present;
+    bool battery_charging;
+    bool battery_low;
+    uint8_t battery_percent;
+    uint16_t battery_voltage_mv;
+    portENTER_CRITICAL(&s_phase_lock);
+    battery_present = s_battery_present;
+    battery_charging = s_battery_charging;
+    battery_low = s_battery_low;
+    battery_percent = s_battery_percent;
+    battery_voltage_mv = s_battery_voltage_mv;
+    portEXIT_CRITICAL(&s_phase_lock);
+    battery_label_apply(battery_present, battery_charging, battery_low,
+                        battery_percent);
+    (void)battery_voltage_mv;
     lv_obj_invalidate(screen);
     lvgl_port_unlock();
 
