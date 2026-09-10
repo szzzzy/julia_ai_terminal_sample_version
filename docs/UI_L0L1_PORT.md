@@ -112,7 +112,7 @@ ETA6098 的 STAT 未接入可读GPIO，CHARGING只能由电压趋势推测。USB
 
 ### 活动时间
 
-`julia_idle_display.c` 按 `CONFIG_JULIA_DISPLAY_ACTIVITY_POLL_MS` 检查活动时间。非 busy 且连续达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 600 秒）无交互时投递 `EVT_USER_LEAVE`，由 S1 陪伴进入 S3 待机。闲置任务不直接操作立绘；FSM 运行时在进入 S3 后统一应用闭眼和背光呼吸。听音／思考／说话期间 busy 为真，普通闲置逻辑不降档。
+`julia_idle_display.c` 按 `CONFIG_JULIA_DISPLAY_ACTIVITY_POLL_MS` 检查活动时间。非 busy 且连续达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 300 秒）无交互时投递 `EVT_USER_LEAVE`，由 S1 陪伴进入 S3 待机；FSM 自身也保存 S1 截止时间，保证通知丢失时仍能到期退出。闲置任务不直接操作立绘；FSM 运行时在进入 S3 后统一应用闭眼和背光呼吸。听音／思考／说话期间 busy 为真，普通闲置逻辑不降档。
 
 进入 S3 后由 FSM 运行时启动独立的一次性计时器；连续驻留达到 `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS`（默认 300 秒）仍未唤醒时投递 `EVT_STANDBY_TIMEOUT`，由 S3 进入 S6。默认 23:00～07:00 的 RTC 夜间事件仍独立生效，可在驻留计时到期前先进入 S6。
 

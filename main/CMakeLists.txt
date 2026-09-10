@@ -14,6 +14,10 @@ set(embed_binary_files
     ${project_dir}/low_battery_16k_mono_16bit.wav
     ${project_dir}/bye_no_bother_16k_mono_16bit.wav
     ${project_dir}/goodnight_16k_mono_16bit.wav
+    ${project_dir}/upgrade_start_16k_mono_16bit.wav
+    ${project_dir}/upgrade_success_16k_mono_16bit.wav
+    ${project_dir}/upgrade_failed_16k_mono_16bit.wav
+    ${project_dir}/restart_after_issue_16k_mono_16bit.wav
 )
 
 if(CONFIG_COMM_DEVICE_AUTH_CERTIFICATE)
@@ -39,6 +43,7 @@ set(srcs
     "voice/voice_uplink_ring.c"
     "voice/voice_uplink_pump.c"
     "voice/voice_service.c"
+    "voice/voice_state_sync.c"
     "voice/voice_playback.c"
     "voice/pcm_buffer.c"
     "voice/voice_uri.c"

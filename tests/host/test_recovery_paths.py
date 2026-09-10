@@ -260,19 +260,22 @@ def fsm(args):
     prefix = r'''
 #include "julia_fsm_runtime.h"
 #define CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS 300
-#define CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS 600
+#define CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS 300
 #define CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS 1800
 #define SERVICE_LINK_MQTT 1
 #define SERVICE_LINK_WSS 2
 #define SERVICE_LINK_ALL 3
 #define DISCONNECT_NOTICE_US 3000000ULL
 typedef struct {int type;fsm_event_t event;julia_fault_reason_t fault_reason;esp_err_t error;
-    SemaphoreHandle_t completed;bool *applied;} fsm_runtime_message_t;
+    SemaphoreHandle_t completed;bool *applied;bool check_revision;uint32_t expected_revision;} fsm_runtime_message_t;
 #define FSM_RUNTIME_MESSAGE_EVENT 0
 static julia_fsm_t s_fsm;
 static julia_main_state_t s_committed_main_state;
 static julia_s2_sub_state_t s_committed_s2_sub_state;
 static julia_s7_sub_state_t s_committed_s7_sub_state;
+static uint32_t s_committed_revision;
+static int64_t s_committed_enter_us;
+static fsm_event_t s_committed_reason;
 static julia_service_state_t s_committed_service_state=JULIA_SERVICE_ONLINE;
 static uint8_t s_online_links=3;
 static void *s_event_queue=(void*)1,*s_task=(void*)2,*current_task=(void*)1;
@@ -283,10 +286,14 @@ static julia_fsm_state_observer_t s_state_observer;
 static void *s_state_observer_ctx;
 static fsm_runtime_message_t queued;
 static bool pending;
+static bool wake_before_dispatch;
 static bool mqtt_ready=true,wss_ready=true;
+static bool cloud_ready=true;
+static bool voice_state_sync_is_ready(void){return cloud_ready;}
 static bool mqtt_comm_is_ready(void){return mqtt_ready;}
 static bool wss_transport_is_ready(void){return wss_ready;}
 static bool runtime_process_event(fsm_event_t event);
+static bool runtime_process_message_event(const fsm_runtime_message_t *message);
 static int64_t esp_timer_get_time(void){return now;}
 static int esp_timer_start_once(void *t,uint64_t us){return ESP_OK;}
 static int esp_timer_stop(void *t){return ESP_OK;}
@@ -298,7 +305,8 @@ static int xQueueSend(void *q,const void *m,unsigned t){assert(!pending);queued=
 static void xSemaphoreGive(void *s){*(int*)s=1;}
 static int xSemaphoreTake(void *s,unsigned t){
     assert(pending);pending=false;current_task=s_task;
-    *queued.applied=runtime_process_event(queued.event);xSemaphoreGive(queued.completed);
+    if(wake_before_dispatch){wake_before_dispatch=false;assert(runtime_process_event(EVT_WAKEUP));}
+    *queued.applied=runtime_process_message_event(&queued);xSemaphoreGive(queued.completed);
     current_task=(void*)1;return *(int*)s;
 }
 static void apply_presentation(julia_main_state_t m,julia_s2_sub_state_t s,julia_s7_sub_state_t f){}
@@ -309,6 +317,15 @@ static void julia_avatar_talking_start(void){}
 static void julia_avatar_talking_stop(void){}
 static const uint8_t network_disconnected_wav_start[1],network_disconnected_wav_end[1];
 static uint32_t s_local_prompt_generation;
+static int64_t s_ota_prompt_deadline_us;
+static const uint8_t upgrade_start_wav_start[1],upgrade_start_wav_end[1];
+static const uint8_t upgrade_success_wav_start[1],upgrade_success_wav_end[1];
+static const uint8_t upgrade_failed_wav_start[1],upgrade_failed_wav_end[1];
+static const uint8_t *ota_played;
+static bool ota_play_fail;
+static void play_ota_prompt(const uint8_t *start,const uint8_t *end,const char *name){
+    ota_played=start;s_local_prompt_generation=ota_play_fail?0:42;
+}
 static bool voice_playback_stop_generation(uint32_t generation){return false;}
 static bool voice_playback_is_active(void){return false;}
 static bool play_local_prompt(const uint8_t *wav,size_t bytes,const char *name,bool idle,uint32_t *generation){return false;}
@@ -317,9 +334,32 @@ esp_err_t julia_fsm_runtime_post(fsm_event_t event){return ESP_ERR_NO_MEM;}
     names = ["julia_fsm_runtime_get_service_state", "julia_fsm_runtime_get_state",
              "julia_fsm_runtime_get_s2_sub_state", "service_state_apply_event", "service_state_reconcile", "runtime_on_enter",
              "runtime_on_exit", "event_deadline", "runtime_process_event", "runtime_check_deadlines",
-             "disconnect_timer_callback", "julia_fsm_runtime_post_sync"]
+             "disconnect_timer_callback", "runtime_process_message_event", "runtime_post_sync_checked",
+             "julia_fsm_runtime_post_sync", "julia_fsm_runtime_require_wake", "julia_fsm_runtime_get_snapshot",
+             "ota_terminal_poll"]
     run_case(args, "fsm_recovery", prefix, [("main/fsm/julia_fsm_runtime.c", names)], r'''
 int main(void){
+    s_fsm.main_state=JULIA_MAIN_STATE_S8_OTA;
+    fsm_runtime_message_t terminal={.type=FSM_RUNTIME_MESSAGE_EVENT,.event=EVT_OTA_SUCCEEDED};
+    bool started=false;
+    s_local_prompt_generation=41; /* Start notice is still playing. */
+    assert(!ota_terminal_poll(&terminal,&started) && !started && !ota_played);
+    s_local_prompt_generation=0;
+    assert(!ota_terminal_poll(&terminal,&started) && started && ota_played==upgrade_success_wav_start);
+    assert(!ota_terminal_poll(&terminal,&started)); /* Never release reboot during PCM. */
+    assert(s_fsm.main_state==JULIA_MAIN_STATE_S8_OTA);
+    s_local_prompt_generation=0;
+    assert(ota_terminal_poll(&terminal,&started));
+    started=false;terminal.event=EVT_OTA_TASK_FAILED;
+    assert(!ota_terminal_poll(&terminal,&started) && ota_played==upgrade_failed_wav_start);
+    assert(s_fsm.main_state==JULIA_MAIN_STATE_S8_OTA);
+    s_local_prompt_generation=0;
+    assert(ota_terminal_poll(&terminal,&started));
+    started=false;ota_play_fail=true;
+    assert(!ota_terminal_poll(&terminal,&started));
+    assert(ota_terminal_poll(&terminal,&started)); /* Audio failure cannot trap S8. */
+    started=false;s_fsm.main_state=JULIA_MAIN_STATE_S3_STANDBY;
+    assert(ota_terminal_poll(&terminal,&started) && !started);
     julia_fsm_init(&s_fsm);s_fsm.on_enter=runtime_on_enter;s_fsm.on_exit=runtime_on_exit;
     assert(julia_fsm_transition_to(&s_fsm,JULIA_MAIN_STATE_S3_STANDBY,JULIA_S2_SUB_STATE_NONE,EVT_NONE));
     assert(julia_fsm_runtime_post_sync(EVT_WAKEUP)==ESP_OK);
@@ -365,6 +405,22 @@ int main(void){
     runtime_process_event(EVT_WAKEUP);runtime_process_event(EVT_START_DIALOG);
     runtime_process_event(EVT_MULTI_TURN_DETECTED);runtime_process_event(EVT_SILENCE_TIMEOUT);
     assert(s_fsm.main_state==JULIA_MAIN_STATE_S1_COMPANION);
+    julia_fsm_snapshot_t cloud_snapshot;julia_fsm_runtime_get_snapshot(&cloud_snapshot);
+    assert(cloud_snapshot.companion_remaining_ms==300000);
+    assert(julia_fsm_runtime_require_wake(cloud_snapshot.revision-1)==ESP_ERR_INVALID_STATE);
+    assert(s_fsm.main_state==JULIA_MAIN_STATE_S1_COMPANION);
+    wake_before_dispatch=true;
+    assert(julia_fsm_runtime_require_wake(cloud_snapshot.revision)==ESP_ERR_INVALID_STATE);
+    assert(s_fsm.main_state==JULIA_MAIN_STATE_S4_INTERACTION);
+    runtime_process_event(EVT_START_DIALOG);runtime_process_event(EVT_MULTI_TURN_DETECTED);
+    runtime_process_event(EVT_SILENCE_TIMEOUT);
+    julia_fsm_runtime_get_snapshot(&cloud_snapshot);
+    assert(julia_fsm_runtime_require_wake(cloud_snapshot.revision)==ESP_OK);
+    assert(s_fsm.main_state==JULIA_MAIN_STATE_S3_STANDBY);
+    runtime_process_event(EVT_WAKEUP);
+    assert(julia_fsm_runtime_require_wake(s_committed_revision)==ESP_ERR_INVALID_STATE);
+    runtime_process_event(EVT_START_DIALOG);runtime_process_event(EVT_MULTI_TURN_DETECTED);
+    runtime_process_event(EVT_SILENCE_TIMEOUT);
     s_committed_service_state=JULIA_SERVICE_OFFLINE;s_online_links=SERVICE_LINK_WSS;
     runtime_process_event(EVT_WSS_DISCONNECTED);
     assert(s_fsm.main_state==JULIA_MAIN_STATE_S3_STANDBY);
@@ -375,7 +431,7 @@ int main(void){
     runtime_process_event(EVT_WAKEUP);runtime_process_event(EVT_START_DIALOG);
     runtime_process_event(EVT_MULTI_TURN_DETECTED);runtime_process_event(EVT_SILENCE_TIMEOUT);
     int64_t companion_deadline=s_companion_deadline_us;
-    assert(companion_deadline==now+600000000);
+    assert(companion_deadline==now+300000000);
     assert(!runtime_process_event(EVT_USER_LEAVE)); /* Early/stale producer event. */
     assert(s_fsm.main_state==JULIA_MAIN_STATE_S1_COMPANION);
     now=companion_deadline;runtime_check_deadlines(); /* No queued timeout available. */
@@ -397,6 +453,70 @@ int main(void){
     puts("PASS: FSM acknowledgements, OTA admission/exit, approved night edges and dropped timer recovery");return 0;
 }
 ''', ["main/fsm/julia_fsm.c"])
+
+
+def wifi_profiles(args):
+    run_case(args, "wifi_profiles", r'''
+#define CONFIG_NETWORK_WIFI_BACKUP_SSID "backup-test"
+#define CONFIG_NETWORK_WIFI_BACKUP_PASSWORD "test-password"
+#define CONFIG_NETWORK_WIFI_THIRD_SSID "third-test"
+#define CONFIG_NETWORK_WIFI_THIRD_PASSWORD "third-password"
+#define WIFI_IF_STA 0
+#define WIFI_EVENT_STA_START 1
+#define WIFI_EVENT_STA_DISCONNECTED 2
+typedef const char *esp_event_base_t;
+typedef struct {int reason;} wifi_event_sta_disconnected_t;
+typedef struct {struct {uint8_t ssid[32],password[64];bool bssid_set;unsigned channel,pmf;} sta;} wifi_config_t;
+static wifi_config_t s_primary_wifi_config,applied;
+static unsigned s_wifi_profile;
+static bool s_rotate_wifi_profile,s_backup_wifi_available=true,s_ip_ready,s_connect_attempt_pending;
+static bool s_third_wifi_available;
+static uint32_t s_retry_attempt;
+static int64_t s_next_retry_us,now;
+static void *s_network_task=(void*)1;
+static int esp_wifi_set_config(int interface,const wifi_config_t *config){applied=*config;return ESP_OK;}
+static int64_t esp_timer_get_time(void){return now;}
+static void xTaskNotifyGive(void *task){}
+static uint32_t network_schedule_retry_locked(void){s_retry_attempt++;s_next_retry_us=now+1000000;return 1000;}
+''', [("main/network/network_lifecycle.c", ["network_apply_wifi_profile", "network_wifi_event_handler"])], r'''
+int main(void){
+    strcpy((char*)s_primary_wifi_config.sta.ssid,"primary-test");
+    strcpy((char*)s_primary_wifi_config.sta.password,"primary-password");
+    s_primary_wifi_config.sta.pmf=123;s_primary_wifi_config.sta.bssid_set=true;s_primary_wifi_config.sta.channel=6;
+    network_wifi_event_handler(NULL,NULL,WIFI_EVENT_STA_START,NULL);
+    assert(network_apply_wifi_profile()==ESP_OK);
+    assert(strcmp((char*)applied.sta.ssid,"primary-test")==0);
+    network_wifi_event_handler(NULL,NULL,WIFI_EVENT_STA_DISCONNECTED,NULL);
+    assert(network_apply_wifi_profile()==ESP_OK);
+    assert(strcmp((char*)applied.sta.ssid,"backup-test")==0);
+    assert(strcmp((char*)applied.sta.password,"test-password")==0);
+    assert(applied.sta.pmf==123 && !applied.sta.bssid_set && applied.sta.channel==0);
+    s_ip_ready=true; /* Connected backup remains preferred after the first drop. */
+    network_wifi_event_handler(NULL,NULL,WIFI_EVENT_STA_DISCONNECTED,NULL);
+    network_apply_wifi_profile();assert(s_wifi_profile==1);
+    network_wifi_event_handler(NULL,NULL,WIFI_EVENT_STA_DISCONNECTED,NULL);
+    network_apply_wifi_profile();assert(s_wifi_profile==0);
+    assert(strcmp((char*)applied.sta.password,"primary-password")==0);
+    s_rotate_wifi_profile=true; /* Watchdog plus delayed callback rotate only once. */
+    network_wifi_event_handler(NULL,NULL,WIFI_EVENT_STA_DISCONNECTED,NULL);
+    network_apply_wifi_profile();assert(s_wifi_profile==1);
+    network_apply_wifi_profile();assert(s_wifi_profile==1);
+    s_wifi_profile=0;s_backup_wifi_available=false;s_rotate_wifi_profile=true;
+    network_apply_wifi_profile();assert(s_wifi_profile==0);
+    s_backup_wifi_available=true;s_third_wifi_available=true;s_rotate_wifi_profile=true;
+    network_apply_wifi_profile();assert(s_wifi_profile==1);
+    s_rotate_wifi_profile=true;network_apply_wifi_profile();assert(s_wifi_profile==2);
+    assert(strcmp((char*)applied.sta.ssid,"third-test")==0);
+    assert(strcmp((char*)applied.sta.password,"third-password")==0);
+    s_ip_ready=true;network_wifi_event_handler(NULL,NULL,WIFI_EVENT_STA_DISCONNECTED,NULL);
+    network_apply_wifi_profile();assert(s_wifi_profile==2);
+    network_wifi_event_handler(NULL,NULL,WIFI_EVENT_STA_DISCONNECTED,NULL);
+    network_apply_wifi_profile();assert(s_wifi_profile==0);
+    s_backup_wifi_available=false;s_rotate_wifi_profile=true;
+    network_apply_wifi_profile();assert(s_wifi_profile==2); /* Skip empty backup. */
+    puts("PASS: primary/backup rotation, successful-network retry and credential isolation");return 0;
+}
+''')
 
 
 def offline_ui(args):
@@ -620,12 +740,13 @@ def voice(args):
     prefix = r'''
 #include "julia_fsm.h"
 #define CONFIG_JULIA_SERVER_WAKE_ENABLE 1
+#define CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE 1
 #define CONFIG_JULIA_DIALOG_REPLY_TIMEOUT_SECONDS 30
 #define CONFIG_JULIA_DIALOG_LISTEN_TIMEOUT_SECONDS 60
 #define CONFIG_JULIA_SPEAKER_VOLUME_PERCENT 50
 #define VOICE_SERVICE_URI_MAX_LEN 256
 #define VOICE_INTERACTION_ID_MAX_LEN 64
-typedef enum{VOICE_PLAYBACK_ROLE_NONE,VOICE_PLAYBACK_ROLE_WAKE_REPLY,VOICE_PLAYBACK_ROLE_DIALOG_REPLY,VOICE_PLAYBACK_ROLE_SELF_TEST} voice_playback_role_t;
+typedef enum{VOICE_PLAYBACK_ROLE_NONE,VOICE_PLAYBACK_ROLE_WAKE_REPLY,VOICE_PLAYBACK_ROLE_DIALOG_REPLY,VOICE_PLAYBACK_ROLE_SELF_TEST,VOICE_PLAYBACK_ROLE_DISMISS_REPLY,VOICE_PLAYBACK_ROLE_GOODNIGHT_REPLY} voice_playback_role_t;
 static julia_fsm_t fsm;
 static bool busy,playing,s_mic_streaming,s_dialog_listening,s_wake_reply_expected;
 static bool s_s4_ready_pending,s_s4_ready_committed,fail_send;
@@ -634,6 +755,9 @@ static julia_main_state_t s_interaction_origin;
 static uint32_t s_playback_generation;
 static voice_playback_role_t s_playback_role;
 static unsigned starts,sends,async_posts;
+static bool cloud_ready=true;
+static bool voice_state_sync_is_ready(void){return cloud_ready;}
+static bool voice_state_sync_handle_text(const uint8_t *t,size_t n){return false;}
 static int64_t now,s_reply_deadline_us,s_listen_deadline_us;
 static unsigned session_failures;
 static int64_t esp_timer_get_time(void){return now;}
@@ -673,7 +797,8 @@ static esp_err_t wss_transport_send_now(uint8_t op,const uint8_t *s,size_t n){
 }
 '''
     run_case(args, "voice_recovery", prefix, [("main/voice/voice_service.c", [
-        "post_fsm_event", "voice_service_apply_mic_start", "voice_service_apply_mic_stop",
+        "post_fsm_event", "playback_role_is_terminal", "voice_service_speaker_done",
+        "voice_service_apply_mic_start", "voice_service_apply_mic_stop",
         "interaction_id_is_valid", "voice_service_handle_wake_json",
         "voice_service_on_server_text", "voice_service_on_fsm_state", "voice_service_state_ready_poll",
         "voice_service_reply_timeout_poll"])], r'''
@@ -683,6 +808,10 @@ int main(void){
     julia_fsm_handle_event(&fsm,EVT_WAKEUP,NULL);
     voice_service_apply_mic_start();voice_service_apply_mic_stop();
     assert(s_reply_deadline_us==30000000);
+    cloud_ready=false;
+    voice_service_on_server_text((const uint8_t*)"SPKS 16000",10);
+    assert(starts==0 && fsm.s2_sub_state==JULIA_S2_SUB_STATE_S2_2_THINKING);
+    cloud_ready=true;
     voice_service_on_server_text((const uint8_t*)"SPKS 16000",10);
     assert(s_reply_deadline_us==0);
     assert(starts==1 && fsm.s2_sub_state==JULIA_S2_SUB_STATE_S2_3_SPEAKING && async_posts==0);
@@ -731,6 +860,28 @@ int main(void){
     /* A duplicate wake while S4 is listening must not rearm the handshake. */
     assert(voice_service_handle_wake_json((const uint8_t*)"{}",2));
     assert(!s_s4_ready_pending);
+    /* Reproduce COM9: dismiss prompt starts in S4, then cloud emits MIC_START.
+     * The pending S5 transition must survive the echo/queued utterance. */
+    s_playback_role=VOICE_PLAYBACK_ROLE_DISMISS_REPLY;s_playback_generation=99;
+    s_dialog_listening=false;playing=true;busy=true;
+    voice_service_apply_mic_start();
+    assert(playing && !s_dialog_listening && s_playback_generation==99);
+    voice_service_apply_mic_stop();assert(fsm.main_state==JULIA_MAIN_STATE_S4_INTERACTION);
+    voice_service_speaker_done();assert(fsm.main_state==JULIA_MAIN_STATE_S5_SILENT && !busy);
+    voice_service_apply_mic_start();assert(fsm.main_state==JULIA_MAIN_STATE_S5_SILENT && !s_dialog_listening);
+    assert(voice_service_handle_wake_json((const uint8_t*)"{}",2));
+    assert(fsm.main_state==JULIA_MAIN_STATE_S4_INTERACTION && s_s4_ready_pending);
+    s_playback_role=VOICE_PLAYBACK_ROLE_GOODNIGHT_REPLY;s_playback_generation=100;
+    s_dialog_listening=false;playing=true;
+    voice_service_apply_mic_start();assert(s_playback_generation==100 && playing);
+    voice_service_speaker_done();assert(fsm.main_state==JULIA_MAIN_STATE_S6_SLEEP);
+    voice_service_apply_mic_start();assert(fsm.main_state==JULIA_MAIN_STATE_S6_SLEEP);
+    assert(voice_service_handle_wake_json((const uint8_t*)"{}",2));
+    voice_service_apply_mic_start();voice_service_apply_mic_stop();
+    voice_service_on_server_text((const uint8_t*)"SPKS 16000",10);
+    assert(fsm.s2_sub_state==JULIA_S2_SUB_STATE_S2_3_SPEAKING);
+    voice_service_apply_mic_start();
+    assert(fsm.s2_sub_state==JULIA_S2_SUB_STATE_S2_1_LISTENING && s_dialog_listening && !playing);
     puts("PASS: ordered MIC_STOP/SPKS, retained state_ready, bounded reply wait and deadline cancellation");return 0;
 }
 ''', ["main/fsm/julia_fsm.c"])
@@ -740,7 +891,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cc", required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--case", choices=("backlight", "rtc", "display", "mqtt", "fsm", "offline_ui", "boot", "storage", "fault", "voice"), required=True)
+    parser.add_argument("--case", choices=("backlight", "rtc", "display", "mqtt", "fsm", "wifi_profiles", "offline_ui", "boot", "storage", "fault", "voice"), required=True)
     args = parser.parse_args()
     args.root = Path(__file__).resolve().parents[2]
     args.out.mkdir(parents=True, exist_ok=True)

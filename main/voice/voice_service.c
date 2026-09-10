@@ -35,6 +35,7 @@
 #include "voice_uplink_pump.h"
 #include "voice_uplink_ring.h"
 #include "voice_playback.h"
+#include "voice_state_sync.h"
 #include "wss_transport.h"
 #include "sdkconfig.h"
 
@@ -130,6 +131,7 @@ extern const uint8_t goodnight_wav_end[]
 /* 下列播放、文件和上传进度只由负责语音连接的任务修改，避免跨任务互相覆盖。 */
 static uint32_t s_playback_generation;
 static voice_playback_role_t s_playback_role;
+static bool s_session_activated;
 static FILE *s_file;
 static bool s_file_pending;
 static bool s_file_active;
@@ -257,7 +259,7 @@ static void voice_service_disarm_companion_timer(void)
     }
 }
 
-/** 本地唤醒模式下，十分钟无交互会关闭陪伴 PCM 上传；显示策略同时进入 S3。 */
+/** 本地唤醒模式下，达到配置的无交互期限后关闭陪伴 PCM 上传，同时进入 S3。 */
 static void voice_service_companion_timeout(void *arg)
 {
     (void)arg;
@@ -636,6 +638,19 @@ static bool voice_service_reply_timeout_poll(void)
 
 static void voice_service_poll(void)
 {
+    voice_state_sync_poll();
+    if (!voice_state_sync_is_ready()) return;
+    if (!s_session_activated) {
+        s_session_activated = true;
+#if CONFIG_JULIA_SERVER_WAKE_ENABLE
+        portENTER_CRITICAL(&s_mic_state_lock);
+        s_mic_streaming = true;
+        board_audio_mic_wake();
+        board_audio_enable_wss_mic(true);
+        portEXIT_CRITICAL(&s_mic_state_lock);
+#endif
+        ESP_LOGI(TAG, "cloud session synchronized; voice traffic enabled");
+    }
     if (voice_service_reply_timeout_poll()) return;
     /* 关键确认由 WSS owner 直接发送，不与可丢弃的四槽控制作业竞争。 */
     voice_service_state_ready_poll();
@@ -677,12 +692,26 @@ static void voice_service_played_pcm(const int16_t *pcm, size_t samples, void *c
 /** “开始说话”确认用户已经进入本轮表达；必要时同时开始上传麦克风。 */
 static void voice_service_apply_mic_start(void)
 {
+    /* Terminal intent is already committed. A VAD echo or queued MIC_START
+     * must not erase the pending S5/S6 transition while its local prompt plays. */
+    if (playback_role_is_terminal(s_playback_role)) {
+        ESP_LOGI(TAG, "MIC_START ignored: terminal reply must finish before another interaction");
+        return;
+    }
     julia_main_state_t state = julia_fsm_runtime_get_state();
     if (state == JULIA_MAIN_STATE_S0_BOOT || state == JULIA_MAIN_STATE_S7_FAULT ||
         state == JULIA_MAIN_STATE_S8_OTA) {
         ESP_LOGW(TAG, "MIC_START ignored in non-interactive state=%s", julia_fsm_main_state_name(state));
         return;
     }
+#if CONFIG_JULIA_SERVER_WAKE_ENABLE && CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE
+    if (state == JULIA_MAIN_STATE_S3_STANDBY || state == JULIA_MAIN_STATE_S5_SILENT ||
+        state == JULIA_MAIN_STATE_S6_SLEEP) {
+        ESP_LOGI(TAG, "MIC_START ignored in %s: waiting for wake_detected",
+                 julia_fsm_main_state_name(state));
+        return;
+    }
+#endif
     julia_s2_sub_state_t s2_sub_state = julia_fsm_runtime_get_s2_sub_state();
     fsm_event_t event = EVT_NONE;
     if (state == JULIA_MAIN_STATE_S3_STANDBY || state == JULIA_MAIN_STATE_S5_SILENT ||
@@ -844,6 +873,11 @@ static bool voice_service_handle_wake_json(const uint8_t *text, size_t len)
  */
 static void voice_service_on_server_text(const uint8_t *text, size_t len)
 {
+    if (voice_state_sync_handle_text(text, len)) return;
+    if (!voice_state_sync_is_ready()) {
+        ESP_LOGW(TAG, "Ignoring business command before session_sync_ack");
+        return;
+    }
     ESP_LOGI(TAG, "Server cmd: %.*s", (int)len, (const char *)text);
     if (voice_service_handle_wake_json(text, len)) return;
     if (len > strlen("FILE_SEND ") && strncmp((const char *)text, "FILE_SEND ", 10) == 0) {
@@ -960,6 +994,8 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
  */
 static void voice_service_on_binary(const uint8_t *data, size_t len)
 {
+    if (!voice_state_sync_is_ready()) return;
+    if (playback_role_is_terminal(s_playback_role)) return;
     if (data == NULL || len == 0U || (len & 1U) != 0U) {
         return;
     }
@@ -983,6 +1019,7 @@ static void voice_service_on_binary(const uint8_t *data, size_t len)
  */
 static void voice_service_on_queue_item(void *item, size_t item_size)
 {
+    if (!voice_state_sync_is_ready()) return;
     if (item == NULL || item_size != sizeof(voice_job_t)) {
         ESP_LOGW(TAG, "Malformed queued voice job");
         return;
@@ -1022,6 +1059,7 @@ static void voice_service_on_queue_item(void *item, size_t item_size)
 /** 新语音连接从空的麦克风缓冲开始，断线前未发出的声音绝不在重连后补发。 */
 static void voice_service_on_session_start(void)
 {
+    s_session_activated = false;
     /* A new socket starts in the server's wake-required mode. This is independent
      * of MQTT availability and must complete before accepting new voice commands. */
     if (julia_fsm_runtime_post_sync(EVT_VOICE_SESSION_RESET) != ESP_OK) {
@@ -1038,24 +1076,26 @@ static void voice_service_on_session_start(void)
     voice_uplink_pump_start_generation(&s_uplink_pump, generation);
 #if CONFIG_JULIA_SERVER_WAKE_ENABLE
     portENTER_CRITICAL(&s_mic_state_lock);
-    s_mic_streaming = true;
+    s_mic_streaming = false;
     s_dialog_listening = false;
     s_s4_ready_pending = false;
     s_s4_ready_committed = false;
     s_interaction_id[0] = '\0';
-    board_audio_mic_wake();
-    board_audio_enable_wss_mic(true);
+    board_audio_enable_wss_mic(false);
     portEXIT_CRITICAL(&s_mic_state_lock);
 
     /* 后台唤醒监听只属于传输层；服务端发送 wake_detected 前，
      * 保持当前主状态与呈现不变。 */
     ESP_LOGI(TAG, "WSS session ready: generation=%" PRIu32
-                  " IDLE PCM upload enabled for server wake detection",
+                  " waiting for cloud state synchronization",
              generation);
 #else
     ESP_LOGI(TAG, "WSS session ready: generation=%" PRIu32, generation);
 #endif
+    voice_state_sync_start();
+#if !CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE
     post_fsm_event(EVT_WSS_CONNECTED);
+#endif
 }
 
 /**
@@ -1064,6 +1104,8 @@ static void voice_service_on_session_start(void)
  */
 static void voice_service_on_session_end(wss_transport_end_reason_t reason)
 {
+    voice_state_sync_end();
+    s_session_activated = false;
     voice_service_disarm_companion_timer();
     size_t discarded_frames = 0;
     if (s_uplink_ring_ready) {
@@ -1084,10 +1126,11 @@ static void voice_service_on_session_end(wss_transport_end_reason_t reason)
     board_audio_enable_wss_mic(false);
     portEXIT_CRITICAL(&s_mic_state_lock);
     voice_service_close_file();
-    voice_playback_stop();
+    /* A transport disconnect must not cancel the FSM-owned OTA notice. */
+    bool stopped = voice_playback_stop_generation(s_playback_generation);
     s_playback_generation = 0;
     s_playback_role = VOICE_PLAYBACK_ROLE_NONE;
-    julia_avatar_talking_stop();
+    if (stopped || !voice_playback_is_active()) julia_avatar_talking_stop();
     ESP_LOGI(TAG, "WSS uplink generation=%" PRIu32
                   " ended reason=%s; discarded MIC ring frames=%u",
              s_uplink_generation, wss_transport_end_reason_name(reason),
@@ -1101,6 +1144,7 @@ static void voice_service_on_session_end(wss_transport_end_reason_t reason)
  * 不表示 WSS 已发送或业务状态已经生效。 */
 static esp_err_t voice_service_enqueue(voice_job_type_t type, const uint8_t *data, size_t len)
 {
+    if (!voice_state_sync_is_ready()) return ESP_ERR_INVALID_STATE;
     if (len > WSS_TRANSPORT_MAX_PAYLOAD) {
         return ESP_ERR_INVALID_SIZE;
     }
@@ -1396,6 +1440,7 @@ esp_err_t voice_service_send_file(const char *uri)
 
 esp_err_t voice_service_send_chunk(const uint8_t *buf, size_t len)
 {
+    if (!voice_state_sync_is_ready()) return ESP_ERR_INVALID_STATE;
     if (buf == NULL || len == 0U) {
         return ESP_ERR_INVALID_ARG;
     }

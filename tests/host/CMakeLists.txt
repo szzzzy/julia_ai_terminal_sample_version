@@ -1,6 +1,21 @@
 cmake_minimum_required(VERSION 3.16)
 project(julia_host_tests C)
 enable_testing()
+find_path(CJSON_DIR cJSON.h
+    HINTS "${IDF_PATH}/components/json/cJSON" "$ENV{IDF_PATH}/components/json/cJSON")
+if(CJSON_DIR)
+    add_executable(test_voice_state_sync test_voice_state_sync.c
+        ../../main/voice/voice_state_sync.c ../../main/fsm/julia_fsm.c "${CJSON_DIR}/cJSON.c")
+    target_include_directories(test_voice_state_sync PRIVATE state_sync_stubs stubs
+        ../../main/voice ../../main/fsm "${CJSON_DIR}")
+    set_property(TARGET test_voice_state_sync PROPERTY C_STANDARD 99)
+    if(NOT WIN32)
+        target_link_libraries(test_voice_state_sync PRIVATE m)
+    endif()
+    add_test(NAME voice_state_sync COMMAND test_voice_state_sync)
+else()
+    message(STATUS "Set IDF_PATH to include the cloud state sync regression test")
+endif()
 add_executable(test_pcm_buffer test_pcm_buffer.c ../../main/voice/pcm_buffer.c)
 target_include_directories(test_pcm_buffer PRIVATE ../../main/voice)
 set_property(TARGET test_pcm_buffer PROPERTY C_STANDARD 99)
@@ -16,7 +31,13 @@ endif()
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
-    foreach(recovery_case backlight rtc display mqtt fsm offline_ui boot storage fault voice)
+    add_test(NAME fault_restart_prompt
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_fault_restart_prompt.py"
+            --cc "${CMAKE_C_COMPILER}" --out "${CMAKE_CURRENT_BINARY_DIR}/fault-prompt")
+    add_test(NAME ota_tls_memory
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ota_tls_memory.py"
+            --cc "${CMAKE_C_COMPILER}" --out "${CMAKE_CURRENT_BINARY_DIR}/ota-memory")
+    foreach(recovery_case backlight rtc display mqtt fsm wifi_profiles offline_ui boot storage fault voice)
         add_test(NAME recovery_${recovery_case}
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_recovery_paths.py"
                 --cc "${CMAKE_C_COMPILER}" --out "${CMAKE_CURRENT_BINARY_DIR}/recovery"

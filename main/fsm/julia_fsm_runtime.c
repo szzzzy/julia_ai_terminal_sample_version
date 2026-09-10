@@ -24,6 +24,7 @@
 #include "mqtt_comm.h"
 #include "sdkconfig.h"
 #include "voice_playback.h"
+#include "voice_state_sync.h"
 #include "wss_transport.h"
 
 #define FSM_EVENT_QUEUE_DEPTH 16
@@ -47,6 +48,8 @@ typedef struct {
     esp_err_t error;
     SemaphoreHandle_t completed;
     bool *applied;
+    bool check_revision;
+    uint32_t expected_revision;
 } fsm_runtime_message_t;
 
 typedef enum {
@@ -71,6 +74,9 @@ static julia_main_state_t s_committed_main_state = JULIA_MAIN_STATE_S0_BOOT;
 static julia_s2_sub_state_t s_committed_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
 static julia_s7_sub_state_t s_committed_s7_sub_state = JULIA_S7_SUB_STATE_NONE;
 static julia_service_state_t s_committed_service_state = JULIA_SERVICE_CONNECTING;
+static uint32_t s_committed_revision;
+static int64_t s_committed_enter_us;
+static fsm_event_t s_committed_reason;
 static uint8_t s_online_links;
 static esp_timer_handle_t s_standby_timer;
 static esp_timer_handle_t s_silent_timer;
@@ -87,6 +93,7 @@ static void *s_state_observer_ctx;
 /* 提醒只由 FSM Task 调度，持续低电量期间不反复播放。 */
 static bool s_low_battery_notified;
 static uint32_t s_local_prompt_generation;
+static int64_t s_ota_prompt_deadline_us;
 
 /* EMBED_FILES 生成的符号覆盖整个应用生命周期，满足本地播放“不复制源 PCM”的契约。 */
 extern const uint8_t network_disconnected_wav_start[]
@@ -97,6 +104,22 @@ extern const uint8_t low_battery_wav_start[]
     asm("_binary_low_battery_16k_mono_16bit_wav_start");
 extern const uint8_t low_battery_wav_end[]
     asm("_binary_low_battery_16k_mono_16bit_wav_end");
+extern const uint8_t upgrade_start_wav_start[]
+    asm("_binary_upgrade_start_16k_mono_16bit_wav_start");
+extern const uint8_t upgrade_start_wav_end[]
+    asm("_binary_upgrade_start_16k_mono_16bit_wav_end");
+extern const uint8_t upgrade_success_wav_start[]
+    asm("_binary_upgrade_success_16k_mono_16bit_wav_start");
+extern const uint8_t upgrade_success_wav_end[]
+    asm("_binary_upgrade_success_16k_mono_16bit_wav_end");
+extern const uint8_t upgrade_failed_wav_start[]
+    asm("_binary_upgrade_failed_16k_mono_16bit_wav_start");
+extern const uint8_t upgrade_failed_wav_end[]
+    asm("_binary_upgrade_failed_16k_mono_16bit_wav_end");
+extern const uint8_t restart_after_issue_wav_start[]
+    asm("_binary_restart_after_issue_16k_mono_16bit_wav_start");
+extern const uint8_t restart_after_issue_wav_end[]
+    asm("_binary_restart_after_issue_16k_mono_16bit_wav_end");
 static bool play_local_prompt(const uint8_t *wav, size_t wav_bytes, const char *name,
                                 bool only_if_idle, uint32_t *generation)
 {
@@ -218,7 +241,7 @@ static void service_state_reconcile(void)
     uint8_t online_links = s_online_links;
     portEXIT_CRITICAL(&s_state_lock);
     bool mqtt_ready = mqtt_comm_is_ready();
-    bool wss_ready = wss_transport_is_ready();
+    bool wss_ready = wss_transport_is_ready() && voice_state_sync_is_ready();
     /* Clear stale links before adding recovered links, including while CONNECTING
      * or OFFLINE. Otherwise interleaved reconnects can falsely report ONLINE.
      * We already own the FSM here: do not enqueue into a possibly full queue. */
@@ -414,11 +437,33 @@ static void apply_presentation(julia_main_state_t main_state,
              presentation_name(presentation));
 }
 
+static void play_ota_prompt(const uint8_t *start, const uint8_t *end, const char *name)
+{
+    /* Match the S4 farewell/goodnight portrait, without changing S8 identity. */
+    julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_LISTENING);
+    julia_avatar_set_dozing(false);
+    julia_avatar_talking_start();
+    if (!play_local_prompt(start, (size_t)(end - start), name, false,
+                           &s_local_prompt_generation)) {
+        s_local_prompt_generation = 0;
+        julia_avatar_talking_stop();
+    }
+    /* PCM16 mono 16 kHz duration plus two seconds for output drain. */
+    s_ota_prompt_deadline_us = esp_timer_get_time() +
+        (int64_t)(end - start) * 1000000LL / 32000 + 2000000LL;
+}
+
 static void local_prompt_poll(void)
 {
     /* 本地提示收尾不依赖电量采样是否可用，也不消费 WSS 的完成通知。 */
     if (s_local_prompt_generation != 0) {
-        if (voice_playback_generation_is_active(s_local_prompt_generation)) return;
+        if (voice_playback_generation_is_active(s_local_prompt_generation)) {
+            if (s_ota_prompt_deadline_us == 0 ||
+                esp_timer_get_time() < s_ota_prompt_deadline_us) return;
+            ESP_LOGW(TAG, "OTA prompt timed out; releasing terminal transition");
+            (void)voice_playback_stop_generation(s_local_prompt_generation);
+        }
+        s_ota_prompt_deadline_us = 0;
         s_local_prompt_generation = 0;
         if (!voice_playback_is_active()) {
             julia_avatar_talking_stop();
@@ -459,6 +504,9 @@ static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
     s_committed_main_state = main_state;
     s_committed_s2_sub_state = s2_sub_state;
     s_committed_s7_sub_state = fsm->s7_sub_state;
+    if (++s_committed_revision == 0) ++s_committed_revision;
+    s_committed_enter_us = esp_timer_get_time();
+    s_committed_reason = event;
     portEXIT_CRITICAL(&s_state_lock);
     /* 先让新状态正式生效，再通知语音服务回报服务器，避免服务器过早发送回答。 */
     if (s_state_observer != NULL) {
@@ -471,8 +519,11 @@ static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
     julia_avatar_set_status_text(
         state_status_text(main_state, s2_sub_state, fsm->s7_sub_state));
     apply_presentation(main_state, s2_sub_state, fsm->s7_sub_state);
+    if (main_state == JULIA_MAIN_STATE_S8_OTA) {
+        play_ota_prompt(upgrade_start_wav_start, upgrade_start_wav_end, "OTA start");
+    }
     if (main_state == JULIA_MAIN_STATE_S1_COMPANION) {
-        s_companion_deadline_us = esp_timer_get_time() +
+        s_companion_deadline_us = s_committed_enter_us +
             (int64_t)CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS * 1000000LL;
     }
     if (main_state == JULIA_MAIN_STATE_S3_STANDBY) {
@@ -527,6 +578,7 @@ static void runtime_on_exit(julia_fsm_t *fsm, julia_main_state_t main_state,
     (void)fsm;
     (void)s2_sub_state;
     (void)event;
+    s_ota_prompt_deadline_us = 0;
     if (s_local_prompt_generation != 0) {
         bool stopped = voice_playback_stop_generation(s_local_prompt_generation);
         s_local_prompt_generation = 0;
@@ -563,6 +615,10 @@ static int64_t *event_deadline(fsm_event_t event)
 
 static bool runtime_process_event(fsm_event_t event)
 {
+    if (event == EVT_REQUIRE_WAKE &&
+        (s_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY ||
+         s_fsm.main_state == JULIA_MAIN_STATE_S5_SILENT ||
+         s_fsm.main_state == JULIA_MAIN_STATE_S6_SLEEP)) return true;
     if (event == EVT_VOICE_SESSION_RESET &&
         s_fsm.main_state != JULIA_MAIN_STATE_S1_COMPANION &&
         s_fsm.main_state != JULIA_MAIN_STATE_S2_DIALOG &&
@@ -598,17 +654,87 @@ static void runtime_check_deadlines(void)
     }
 }
 
+static bool runtime_process_message_event(const fsm_runtime_message_t *message)
+{
+    if (message->check_revision && message->expected_revision != s_committed_revision)
+        return false;
+    return runtime_process_event(message->event);
+}
+
+/* Called after local_prompt_poll; never consumes the voice service completion. */
+static bool ota_terminal_poll(const fsm_runtime_message_t *terminal, bool *started)
+{
+    if (s_local_prompt_generation != 0) return false;
+    if (*started || s_fsm.main_state != JULIA_MAIN_STATE_S8_OTA) return true;
+    bool success = terminal->type == FSM_RUNTIME_MESSAGE_EVENT &&
+                   terminal->event == EVT_OTA_SUCCEEDED;
+    play_ota_prompt(success ? upgrade_success_wav_start : upgrade_failed_wav_start,
+                    success ? upgrade_success_wav_end : upgrade_failed_wav_end,
+                    success ? "OTA success" : "OTA failed");
+    *started = true;
+    return false;
+}
+
+/* Only called after S7.2 is committed and an automatic restart is allowed.
+ * Fault handling already owns the restart wait; a broken audio task must not
+ * hold recovery indefinitely. Do not consume the voice service completion. */
+static void play_fault_restart_prompt(void)
+{
+    const size_t bytes = (size_t)(restart_after_issue_wav_end - restart_after_issue_wav_start);
+    julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_LISTENING);
+    julia_avatar_set_dozing(false);
+    julia_avatar_talking_start();
+    uint32_t generation = 0;
+    if (play_local_prompt(restart_after_issue_wav_start, bytes, "fault restart",
+                          false, &generation)) {
+        const int64_t deadline = esp_timer_get_time() +
+            (int64_t)bytes * 1000000LL / 32000 + 2000000LL;
+        while (voice_playback_generation_is_active(generation)) {
+            if (esp_timer_get_time() >= deadline) {
+                ESP_LOGW(TAG, "Fault restart prompt timed out; continuing recovery");
+                (void)voice_playback_stop_generation(generation);
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
+    if (!voice_playback_is_active()) julia_avatar_talking_stop();
+}
+
 static void fsm_task(void *argument)
 {
     (void)argument;
     fsm_runtime_message_t message;
+    fsm_runtime_message_t ota_terminal = {0};
+    bool ota_terminal_pending = false;
+    bool ota_result_started = false;
     for (;;) {
         /* Reconcile even under continuous event traffic, before initial timeout. */
         service_state_reconcile();
         runtime_check_deadlines();
+        local_prompt_poll();
+        /* Keep servicing the queue during both prompts. Retain the synchronous
+         * terminal acknowledgement until audio drains, so OTA cannot reboot early.
+         * A fast download/failure must also wait for the start prompt first. */
+        bool terminal_ready = false;
+        if (ota_terminal_pending && ota_terminal_poll(&ota_terminal, &ota_result_started)) {
+            message = ota_terminal;
+            ota_terminal_pending = false;
+            terminal_ready = true;
+        }
         /* 有界等待兼作连接状态巡检周期，不能改回 portMAX_DELAY。 */
-        if (xQueueReceive(s_event_queue, &message, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        if (!terminal_ready && xQueueReceive(s_event_queue, &message,
+                pdMS_TO_TICKS(s_local_prompt_generation != 0 || ota_terminal_pending ? 20 : 1000)) != pdTRUE) {
             local_prompt_poll();
+            continue;
+        }
+        if (!terminal_ready && !ota_terminal_pending &&
+            s_fsm.main_state == JULIA_MAIN_STATE_S8_OTA &&
+            (message.type == FSM_RUNTIME_MESSAGE_FAULT ||
+             message.event == EVT_OTA_SUCCEEDED || message.event == EVT_OTA_TASK_FAILED)) {
+            ota_terminal = message;
+            ota_terminal_pending = true;
+            ota_result_started = false;
             continue;
         }
         if (message.type == FSM_RUNTIME_MESSAGE_FAULT) {
@@ -628,6 +754,7 @@ static void fsm_task(void *argument)
                 ESP_LOGE(TAG, "同类故障连续超过自动复位上限，保持 S7.2 等待售后处理");
                 continue;
             }
+            play_fault_restart_prompt();
             vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_FAULT_RESET_DELAY_MS));
             esp_restart();
             continue;
@@ -642,7 +769,7 @@ static void fsm_task(void *argument)
             esp_restart();
             continue;
         }
-        bool applied = runtime_process_event(message.event);
+        bool applied = runtime_process_message_event(&message);
         if (message.completed != NULL) {
             *message.applied = applied;
             xSemaphoreGive(message.completed);
@@ -790,7 +917,8 @@ esp_err_t julia_fsm_runtime_post(fsm_event_t event)
     return xQueueSend(s_event_queue, &message, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
-esp_err_t julia_fsm_runtime_post_sync(fsm_event_t event)
+static esp_err_t runtime_post_sync_checked(fsm_event_t event, bool check_revision,
+                                         uint32_t expected_revision)
 {
     if (event <= EVT_NONE || event >= EVT_COUNT) return ESP_ERR_INVALID_ARG;
     if (s_event_queue == NULL || s_task == NULL || xTaskGetCurrentTaskHandle() == s_task)
@@ -804,6 +932,7 @@ esp_err_t julia_fsm_runtime_post_sync(fsm_event_t event)
     fsm_runtime_message_t message = {
         .type = FSM_RUNTIME_MESSAGE_EVENT, .event = event,
         .completed = completed, .applied = &applied,
+        .check_revision = check_revision, .expected_revision = expected_revision,
     };
     if (xQueueSend(s_event_queue, &message, portMAX_DELAY) != pdTRUE) {
         vSemaphoreDelete(completed);
@@ -812,6 +941,16 @@ esp_err_t julia_fsm_runtime_post_sync(fsm_event_t event)
     (void)xSemaphoreTake(completed, portMAX_DELAY);
     vSemaphoreDelete(completed);
     return applied ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t julia_fsm_runtime_post_sync(fsm_event_t event)
+{
+    return runtime_post_sync_checked(event, false, 0);
+}
+
+esp_err_t julia_fsm_runtime_require_wake(uint32_t expected_revision)
+{
+    return runtime_post_sync_checked(EVT_REQUIRE_WAKE, true, expected_revision);
 }
 
 esp_err_t julia_fsm_runtime_raise_fault(julia_fault_reason_t reason, esp_err_t error)
@@ -853,6 +992,24 @@ julia_s7_sub_state_t julia_fsm_runtime_get_s7_sub_state(void)
     state = s_committed_s7_sub_state;
     portEXIT_CRITICAL(&s_state_lock);
     return state;
+}
+
+void julia_fsm_runtime_get_snapshot(julia_fsm_snapshot_t *snapshot)
+{
+    if (snapshot == NULL) return;
+    portENTER_CRITICAL(&s_state_lock);
+    *snapshot = (julia_fsm_snapshot_t){
+        .main_state = s_committed_main_state,
+        .s2_sub_state = s_committed_s2_sub_state,
+        .s7_sub_state = s_committed_s7_sub_state,
+        .reason = s_committed_reason,
+        .revision = s_committed_revision,
+    };
+    int64_t remaining = s_committed_enter_us +
+        (int64_t)CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS * 1000000LL - esp_timer_get_time();
+    if (snapshot->main_state == JULIA_MAIN_STATE_S1_COMPANION && remaining > 0)
+        snapshot->companion_remaining_ms = (uint32_t)((remaining + 999) / 1000);
+    portEXIT_CRITICAL(&s_state_lock);
 }
 
 julia_service_state_t julia_fsm_runtime_get_service_state(void)

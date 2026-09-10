@@ -91,6 +91,8 @@ typedef enum {
     NATIVE_OTA_FAILURE_BOOT_PARTITION_SET_FAILED, /**< 设置下次启动分区失败。 */
     NATIVE_OTA_FAILURE_NVS_WRITE_FAILED, /**< 断点记录写入或提交 NVS 失败。 */
     NATIVE_OTA_FAILURE_STORAGE_UNAVAILABLE, /**< 目标数据/OTA 分区缺失或不可用。 */
+    /* Append only: existing values are persisted in NVS. */
+    NATIVE_OTA_FAILURE_OUT_OF_MEMORY, /**< TLS/HTTP memory allocation failed. */
 } native_ota_failure_reason_t;
 
 /**

@@ -308,6 +308,33 @@ menu "Example Configuration"
             Delay before MQTT automatic reconnect attempts. The ESP-IDF client keeps
             reconnect enabled; this value controls its retry interval.
 
+    config NETWORK_WIFI_BACKUP_SSID
+        string "Backup Wi-Fi SSID"
+        default ""
+        help
+            Optional second network. Keep the primary network at boot, then
+            alternate profiles after failed connection attempts. Stay on the
+            current network while connected.
+
+    config NETWORK_WIFI_BACKUP_PASSWORD
+        string "Backup Wi-Fi password"
+        default ""
+        help
+            Password for the backup network. Never emitted in runtime logs.
+
+    config NETWORK_WIFI_THIRD_SSID
+        string "Third Wi-Fi SSID"
+        default ""
+        help
+            Optional third network, tried after the backup network. Empty
+            profiles are skipped. A connected profile remains selected.
+
+    config NETWORK_WIFI_THIRD_PASSWORD
+        string "Third Wi-Fi password"
+        default ""
+        help
+            Password for the third network. Never emitted in runtime logs.
+
     config NETWORK_WIFI_RETRY_BASE_MS
         int "Wi-Fi reconnect initial delay (ms)"
         range 250 60000
@@ -597,6 +624,16 @@ menu "Example Configuration"
                 reconnects. Keep this shorter than the PING interval so probes
                 never pile up.
 
+        config JULIA_CLOUD_STATE_SYNC_ENABLE
+            bool "Require cloud state synchronization protocol v2"
+            default y
+            help
+                Require session_sync_ack before any voice traffic. Publish
+                device_state snapshots with acknowledgements and accept
+                revision-checked require_wake requests on the same WSS socket.
+                Deploy the matching cloud protocol before using this firmware.
+                Disable only to connect to a legacy server without protocol v2.
+
         config JULIA_DIALOG_LISTEN_TIMEOUT_SECONDS
             int "S4/S2.1 listening timeout (seconds)"
             range 10 300
@@ -763,7 +800,7 @@ menu "Example Configuration"
         config JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS
             int "Seconds before far standby"
             range 10 86400
-            default 600
+            default 300
             help
                 Continuous idle time before the companion display closes its eyes,
                 begins backlight breathing, and enters S3. In server wake mode

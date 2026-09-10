@@ -1,0 +1,2 @@
+#pragma once
+#define CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE 1

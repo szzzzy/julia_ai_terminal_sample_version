@@ -31,6 +31,8 @@
 
 #include "esp_app_desc.h"
 #include "esp_http_client.h"
+#include "esp_heap_caps.h"
+#include "mbedtls/ssl.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -52,6 +54,16 @@
 #define OTA_IMAGE_HEADER_SIZE OTA_STABILITY_IMAGE_HEADER_SIZE
 
 static const char *TAG = "ota_engine";
+
+static void ota_log_memory(const char *stage)
+{
+    const uint32_t internal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    const uint32_t external = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    ESP_LOGI(TAG, "OTA memory %s: internal_free=%zu internal_largest=%zu "
+             "psram_free=%zu psram_largest=%zu", stage,
+             heap_caps_get_free_size(internal), heap_caps_get_largest_free_block(internal),
+             heap_caps_get_free_size(external), heap_caps_get_largest_free_block(external));
+}
 
 /** 连续空读的上限；每次空读间隔 10 ms，达到后视为网络无响应。 */
 #define OTA_MAX_EMPTY_READS 600U
@@ -101,6 +113,13 @@ static native_ota_failure_reason_t ota_http_open_failure_reason(
     int tls_flags = 0;
     esp_err_t tls_err = esp_http_client_get_and_clear_last_tls_error(
         client, &tls_code, &tls_flags);
+    /* ESP-TLS stores the positive magnitude for mbedtls_ssl_setup failures. */
+    if (tls_code == MBEDTLS_ERR_SSL_ALLOC_FAILED ||
+        tls_code == -MBEDTLS_ERR_SSL_ALLOC_FAILED || tls_err == ESP_ERR_NO_MEM) {
+        ESP_LOGE(TAG, "HTTPS allocation failed: esp_err=0x%x tls=0x%x",
+                 (unsigned)tls_err, (unsigned)tls_code);
+        return NATIVE_OTA_FAILURE_OUT_OF_MEMORY;
+    }
     if (tls_flags != 0 || tls_err == ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED ||
         tls_err == ESP_ERR_MBEDTLS_X509_CRT_PARSE_FAILED) {
         ESP_LOGE(TAG, "HTTPS TLS verification/handshake failed: esp_err=0x%x tls=0x%x flags=0x%x",
@@ -490,6 +509,7 @@ static void ota_engine_task(void *pvParameter)
      */
     /* err 保存最近一次底层操作结果，仅用于日志和失败报告；失败原因单独决定恢复策略。 */
     esp_err_t err = ESP_OK;
+    esp_err_t operation_err = ESP_OK;
     /* 只有 esp_ota_begin()/esp_ota_resume() 成功后才置为 active，cleanup 据此决定 abort。 */
     esp_ota_handle_t update_handle = 0;
     bool ota_handle_active = false;
@@ -687,9 +707,11 @@ static void ota_engine_task(void *pvParameter)
         config.skip_cert_common_name_check = true;
 #endif
 
+        ota_log_memory("before HTTPS init");
         client = esp_http_client_init(&config);
         if (client == NULL) {
-            failure_reason = NATIVE_OTA_FAILURE_NETWORK_TIMEOUT;
+            err = ESP_ERR_NO_MEM;
+            failure_reason = NATIVE_OTA_FAILURE_OUT_OF_MEMORY;
             goto cleanup;
         }
         if (resume) {
@@ -708,6 +730,7 @@ static void ota_engine_task(void *pvParameter)
         err = esp_http_client_open(client, 0);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
+            ota_log_memory("HTTPS open failed");
             failure_reason = ota_http_open_failure_reason(client);
             goto cleanup;
         }
@@ -1047,6 +1070,8 @@ static void ota_engine_task(void *pvParameter)
     reboot = true;
 
 cleanup:
+    /* Keep the originating error even if saving retry diagnostics succeeds. */
+    operation_err = err;
     /*
      * 统一释放顺序：先关闭 HTTP，再在句柄仍处于活动状态时 abort OTA，最后处理 NVS
      * 记录和任务占用标志。ota_handle_active 在 esp_ota_end() 后清零，避免对已结束句柄
@@ -1096,7 +1121,7 @@ cleanup:
     }
     if (failure_reason != NATIVE_OTA_FAILURE_NONE) {
         ESP_LOGE(TAG, "OTA task finished with reason=%s (%s)",
-                 native_ota_failure_reason_name(failure_reason), esp_err_to_name(err));
+                 native_ota_failure_reason_name(failure_reason), esp_err_to_name(operation_err));
     }
     if (reboot) {
         esp_err_t fsm_err = julia_fsm_runtime_post_sync(EVT_OTA_SUCCEEDED);

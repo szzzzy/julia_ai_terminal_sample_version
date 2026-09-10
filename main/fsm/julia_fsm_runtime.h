@@ -25,6 +25,18 @@ typedef enum {
     JULIA_SERVICE_OFFLINE,        /**< 已确认不可用；全部链路恢复前保持锁存。 */
 } julia_service_state_t;
 
+/** Atomic committed behavior snapshot for cloud synchronization. */
+typedef struct {
+    julia_main_state_t main_state;
+    julia_s2_sub_state_t s2_sub_state;
+    julia_s7_sub_state_t s7_sub_state;
+    fsm_event_t reason;
+    uint32_t revision;
+    uint32_t companion_remaining_ms;
+} julia_fsm_snapshot_t;
+
+void julia_fsm_runtime_get_snapshot(julia_fsm_snapshot_t *snapshot);
+
 /**
  * 初始化设备行为管理。显示、声音和语音服务都可用时，开机完成后直接进入
  * 等待唤醒状态；关键能力不可用时仍保持开机状态，由应用报告严重故障。
@@ -47,6 +59,8 @@ esp_err_t julia_fsm_runtime_post(fsm_event_t event);
  * timer callback 或状态 observer 调用。入队后一直等待消费，保证确认对象生命周期。
  */
 esp_err_t julia_fsm_runtime_post_sync(fsm_event_t event);
+/** Execute require_wake only if the cloud still refers to the current revision. */
+esp_err_t julia_fsm_runtime_require_wake(uint32_t expected_revision);
 /**
  * 优先报告严重故障。设备会保存故障记录、显示故障状态并按配置尝试复位；
  * 同类故障短时间重复超过上限后停止自动复位，等待人工处理。

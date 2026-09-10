@@ -39,6 +39,9 @@ idf.py -B build build
 | 配置 | 要求 |
 | --- | --- |
 | `CONFIG_EXAMPLE_WIFI_SSID`／`CONFIG_EXAMPLE_WIFI_PASSWORD` | 本机受控测试网络 |
+| `CONFIG_NETWORK_WIFI_BACKUP_SSID`／`CONFIG_NETWORK_WIFI_BACKUP_PASSWORD` | 可选备用网络；启动先尝试原网络，失败后轮换，已联网时不主动切换；密码只保存在设备配置 |
+| `CONFIG_NETWORK_WIFI_THIRD_SSID`／`CONFIG_NETWORK_WIFI_THIRD_PASSWORD` | 可选第三个网络；失败后按原网络→备用→第三个轮换，跳过未配置项 |
+| `CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE` | 默认开启协议 v2；云端须先支持 session_sync 和 device_state 回执，否则设备不会放行语音 |
 | `CONFIG_COMM_MQTT_BROKER_URI` | MQTT 地址；`mqtt://` 为明文，`mqtts://` 才是 TLS |
 | `CONFIG_COMM_DEVICE_AUTH_*` | MQTT 设备认证方式；默认 NONE 仅适合受控开发 |
 | `CONFIG_WSS_SERVER_HOST`／`PORT`／`PATH` | WSS 主机、端口、路径，端口 9443、路径 `/voice` |
@@ -56,7 +59,7 @@ idf.py -B build build
 | `CONFIG_JULIA_BATTERY_PRESENT_MIN_MV`／`MAX_MV` | BAT节点有效电池电压窗口，默认2500～4350mV |
 | `CONFIG_JULIA_BATTERY_LOW_ENTER_PERCENT`／`LOW_EXIT_PERCENT` | 低电量进入／恢复回差，默认15%／25% |
 | `CONFIG_JULIA_BATTERY_CHARGE_*` | 疑似充电所需的原始电压上升、拔电压降、确认次数与证据超时；默认20mV／20mV／2次／60秒 |
-| `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS` | S1→S3 驻留阈值，默认 600 秒 |
+| `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS` | S1→S3 驻留阈值，默认 300 秒（5 分钟） |
 | `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS`／`CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS` | S3→S6、S5→S3 驻留阈值，默认分别为 300 秒、1800 秒 |
 | `CONFIG_JULIA_SERVICE_INIT_TIMEOUT_SECONDS` | 启动后等待 MQTT关键订阅与 WSS认证会话全部就绪的期限，默认 30 秒；超时进入一次 S7.1并保持 `offline` 标签 |
 | `CONFIG_NETWORK_WIFI_RETRY_BASE_MS`／`MAX_MS`／`JITTER_PERCENT` | Wi-Fi重连从约1秒指数退避到最多60秒，并减去最多20%的随机抖动；取得 IP 后计数清零 |
@@ -152,7 +155,7 @@ idf.py -B build reconfigure
 | `CONFIG_OTA_IMAGE_PROJECT_NAME` | `julia_fused_base` | 与工程名一致；不一致时 CMake 报错 |
 | `CONFIG_OTA_PRODUCT_ID` | `julia-ai-device` | OTA 请求与响应中的 `product` |
 | `CONFIG_OTA_HARDWARE_VERSION` | `1.0` | OTA 硬件兼容性校验 |
-| `PROJECT_VER` | `0.1.0` | 应用版本、OTA 当前版本和镜像内版本 |
+| `PROJECT_VER` | `0.1.2` | 应用版本、OTA 当前版本和镜像内版本 |
 
 版本必须为三段数字 `major.minor.patch`。发布清单中的 `version` 必须与待发布 `.bin` 的应用版本完全一致；普通升级要求目标版本高于设备版本。
 

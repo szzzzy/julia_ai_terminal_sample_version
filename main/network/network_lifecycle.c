@@ -66,6 +66,12 @@ static bool s_ip_ready;
 static bool s_connect_attempt_pending;
 static uint32_t s_retry_attempt;
 static int64_t s_next_retry_us = INT64_MAX;
+static wifi_config_t s_primary_wifi_config;
+/* Only lifecycle task changes the selected profile; events request rotation. */
+static unsigned s_wifi_profile;
+static bool s_rotate_wifi_profile;
+static bool s_backup_wifi_available;
+static bool s_third_wifi_available;
 #if CONFIG_NETWORK_WIFI_INITIAL_DIAGNOSTIC_SCAN
 static bool s_initial_scan_logged;
 #endif
@@ -121,6 +127,8 @@ static void network_lifecycle_cleanup(void)
     s_connect_attempt_pending = false;
     s_retry_attempt = 0;
     s_next_retry_us = INT64_MAX;
+    s_wifi_profile = 0;
+    s_rotate_wifi_profile = false;
     for (size_t i = 0; i < s_slot_count; i++) {
         s_slots[i].started_ok = false;
         s_slots[i].retry_us = INT64_MAX;
@@ -179,6 +187,36 @@ static uint32_t network_schedule_retry_locked(void)
     uint32_t delay_ms = network_next_retry_delay_ms();
     s_next_retry_us = esp_timer_get_time() + (int64_t)delay_ms * 1000LL;
     return delay_ms;
+}
+
+static esp_err_t network_apply_wifi_profile(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    bool rotate = s_rotate_wifi_profile;
+    s_rotate_wifi_profile = false;
+    portEXIT_CRITICAL(&s_state_lock);
+    if (rotate) {
+        do {
+            s_wifi_profile = (s_wifi_profile + 1U) % 3U;
+        } while ((s_wifi_profile == 1U && !s_backup_wifi_available) ||
+                 (s_wifi_profile == 2U && !s_third_wifi_available));
+    }
+    wifi_config_t config = s_primary_wifi_config;
+    if (s_wifi_profile != 0U) {
+        const char *ssid = s_wifi_profile == 1U ? CONFIG_NETWORK_WIFI_BACKUP_SSID
+                                               : CONFIG_NETWORK_WIFI_THIRD_SSID;
+        const char *password = s_wifi_profile == 1U ? CONFIG_NETWORK_WIFI_BACKUP_PASSWORD
+                                                   : CONFIG_NETWORK_WIFI_THIRD_PASSWORD;
+        memset(config.sta.ssid, 0, sizeof(config.sta.ssid));
+        memset(config.sta.password, 0, sizeof(config.sta.password));
+        memcpy(config.sta.ssid, ssid, strlen(ssid));
+        memcpy(config.sta.password, password, strlen(password));
+        config.sta.bssid_set = false;
+        config.sta.channel = 0;
+    }
+    ESP_LOGI(TAG, "Wi-Fi attempt profile=%u ssid=\"%.*s\"", s_wifi_profile,
+             (int)sizeof(config.sta.ssid), (const char *)config.sta.ssid);
+    return esp_wifi_set_config(WIFI_IF_STA, &config);
 }
 
 /** 启动时扫描一次热点，便于区分“找不到热点”和“认证失败”。 */
@@ -273,6 +311,9 @@ static void network_wifi_event_handler(void *arg, esp_event_base_t event_base,
         uint32_t delay_ms;
         uint32_t retry_attempt;
         portENTER_CRITICAL(&s_state_lock);
+        /* Retry an established network once; rotate after a failed association.
+         * A watchdog and its later DISCONNECTED event coalesce into one flag. */
+        if (!s_ip_ready) s_rotate_wifi_profile = true;
         s_ip_ready = false;
         s_connect_attempt_pending = false;
         /* Every disconnect closes the previous association attempt. Schedule
@@ -307,6 +348,7 @@ static void network_got_ip_handler(void *arg, esp_event_base_t event_base,
 
     portENTER_CRITICAL(&s_state_lock);
     s_ip_ready = true;
+    s_rotate_wifi_profile = false;
     s_connect_attempt_pending = false;
     s_retry_attempt = 0;
     s_next_retry_us = INT64_MAX;
@@ -469,6 +511,7 @@ static void network_lifecycle_task(void *parameter)
                                  esp_timer_get_time() >= s_next_retry_us;
                 if (timed_out) {
                     s_connect_attempt_pending = false;
+                    s_rotate_wifi_profile = true;
                     (void)network_schedule_retry_locked();
                 }
                 portEXIT_CRITICAL(&s_state_lock);
@@ -489,12 +532,14 @@ static void network_lifecycle_task(void *parameter)
             }
             portEXIT_CRITICAL(&s_state_lock);
             if (!can_connect) continue;
-            esp_err_t err = esp_wifi_connect();
+            esp_err_t err = network_apply_wifi_profile();
+            if (err == ESP_OK) err = esp_wifi_connect();
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "esp_wifi_connect failed: %s", esp_err_to_name(err));
                 portENTER_CRITICAL(&s_state_lock);
                 if (s_connect_attempt_pending && !s_ip_ready) {
                     s_connect_attempt_pending = false;
+                    s_rotate_wifi_profile = true;
                     (void)network_schedule_retry_locked();
                 }
                 portEXIT_CRITICAL(&s_state_lock);
@@ -599,6 +644,19 @@ esp_err_t network_lifecycle_start(void)
         },
     };
     err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    s_primary_wifi_config = wifi_cfg;
+    s_wifi_profile = 0;
+    s_rotate_wifi_profile = false;
+    s_backup_wifi_available = CONFIG_NETWORK_WIFI_BACKUP_SSID[0] != '\0' &&
+        strlen(CONFIG_NETWORK_WIFI_BACKUP_SSID) <= sizeof(wifi_cfg.sta.ssid) &&
+        strlen(CONFIG_NETWORK_WIFI_BACKUP_PASSWORD) <= sizeof(wifi_cfg.sta.password);
+    if (CONFIG_NETWORK_WIFI_BACKUP_SSID[0] != '\0' && !s_backup_wifi_available)
+        ESP_LOGW(TAG, "Backup Wi-Fi ignored: SSID/password exceeds driver limits");
+    s_third_wifi_available = CONFIG_NETWORK_WIFI_THIRD_SSID[0] != '\0' &&
+        strlen(CONFIG_NETWORK_WIFI_THIRD_SSID) <= sizeof(wifi_cfg.sta.ssid) &&
+        strlen(CONFIG_NETWORK_WIFI_THIRD_PASSWORD) <= sizeof(wifi_cfg.sta.password);
+    if (CONFIG_NETWORK_WIFI_THIRD_SSID[0] != '\0' && !s_third_wifi_available)
+        ESP_LOGW(TAG, "Third Wi-Fi ignored: SSID/password exceeds driver limits");
     if (err == ESP_OK) {
         err = esp_wifi_set_mode(WIFI_MODE_STA);
     }

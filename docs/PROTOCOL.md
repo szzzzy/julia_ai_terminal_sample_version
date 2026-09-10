@@ -50,7 +50,7 @@ WSS 使用 `server_certs/ca_cert.pem` 验证证书链；当前传输实现设置
 - `MIC_START`：确认实际话语开始，必要时打开上传，并停止当前扬声器播放；S4 中保持 S4。
 - `MIC_STOP`：确认当前话语结束，进入思考；保留音频上传。
 - `SPKE`：标记音频输入结束，排空已接收的 PCM 和 DMA 尾音后回到待机；默认服务器唤醒模式继续上传。
-- 本地唤醒模式在播放完成后启动陪伴上传计时，达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 600 秒）无后续对话时停止上传。
+- 本地唤醒模式在播放完成后启动陪伴上传计时，达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 300 秒）无后续对话时停止上传。
 - `MIC_STOP`、闭眼表情、夜间状态均不是隐私静音命令。
 - WSS transport 会话结束时关闭上传、停止播放、丢弃旧 generation PCM 并清除监听／忙碌状态；S1～S6 通过 `EVT_WSS_DISCONNECTED` 进入 S7.1。新连接从空 ring 按所选唤醒模式启动，不恢复旧业务轮次。
 - MQTT 会话断开时，S1～S6 通过 `EVT_MQTT_DISCONNECTED` 进入 S7.1；Wi-Fi 仅负责承载与重连，不直接驱动行为状态。S8 的 OTA 链路错误继续由 OTA 恢复策略处理。
@@ -79,7 +79,7 @@ PCM1 不包含会话编号、话语编号或采样时间戳。服务器应把连
 | 命令 | 设备行为 |
 | --- | --- |
 | `{"type":"wake_detected","interaction_id":"wake_<ms>"}` | S1/S3/S5/S6 投递 `EVT_WAKEUP`；FSM 提交 S4 后设备回 `state_ready` |
-| `MIC_START` | 清空待播 PCM、使旧播放代次失效并标记实际话语开始；S4 中不改变主状态 |
+| `MIC_START` | 普通交互中清空待播 PCM、使旧播放代次失效并标记实际话语开始；S4 中不改变主状态。终止提示期间忽略；v2 服务器唤醒模式下 S3/S5/S6 必须先收到 wake_detected |
 | `MIC_STOP` | 结束当前监听并进入思考；没有活动话语时忽略；不关闭 streaming |
 | `SPKS <rate>` | S4 且等待唤醒回应时作为 WAKE_REPLY，播放完成仍留 S4；S2.2 时作为正常回答并进入 S2.3；其他状态拒绝 |
 | `SPKV <n>` | 暂不执行动态调音；收到后记录并忽略，使用固件配置的固定音量 |
@@ -185,9 +185,9 @@ FILE_SEND SD:/sample.wav
 
 S2.2 等待回答受 `CONFIG_JULIA_DIALOG_REPLY_TIMEOUT_SECONDS` 限制，默认 30 秒（可配置 5～120 秒），从进入 S2.2 开始计时，接受 `SPKS` 并进入 S2.3 或离开 S2.2 时取消。S4/S2.1 等待用户话语结束受 `CONFIG_JULIA_DIALOG_LISTEN_TIMEOUT_SECONDS` 限制，默认 60 秒（可配置 10～300 秒），从进入对应状态开始计时。心跳和无关消息不会延长等待。超时后结束旧 WSS 会话，清理监听、播放和 busy 状态，首次离线按 S7.1 提示流程回到 S3 并后台重连；提示持续约 3 秒。若已经处于 OFFLINE，则直接清除旧 S1/S2/S4 并回到 S3，不重复提示。当前回答协议没有轮次 ID，因此不在旧连接上直接开启下一轮，以免迟到的回答串入新对话。
 
-S1 的陪伴期限由 FSM 在进入 S1 时独立记录（当前为 600 秒），到期自行处理 `EVT_USER_LEAVE`；队列丢失空闲通知不影响最终退出，提前或上一轮残留的超时通知不会结束新窗口。屏幕状态字幕按周期与最新提交状态对账，避免一次 LVGL 锁超时造成旧 S1/S2 字样残留。
+S1 的陪伴期限由 FSM 在进入 S1 时独立记录（当前为 300 秒，即 5 分钟），到期自行处理 `EVT_USER_LEAVE`；队列丢失空闲通知不影响最终退出，提前或上一轮残留的超时通知不会结束新窗口。屏幕状态字幕按周期与最新提交状态对账，避免一次 LVGL 锁超时造成旧 S1/S2 字样残留。
 
-当前协议没有云端免唤醒窗口结束通知。若云端在同一 WSS 连接内静默切换到等待唤醒，设备无法立即知道云端状态；本地仍按自己的 S1 期限退出，但收到新的 `wake_detected` 时会完成 S4 同步。需要即时同步窗口结束时，双方还须约定并实现明确的状态通知，不能仅靠 TCP/WSS 心跳推断。
+当前默认开启 `CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE`（协议 v2）。新连接必须先完成 `session_sync/session_sync_ack` 才放行语音命令和 PCM；设备发送带会话 ID、版本号的 `device_state` 并等待 `device_state_ack`。云端可用 `require_wake` 请求提前结束 S1，设备在 FSM 执行时检查版本并回复 `require_wake_ack`。重试、幂等、格式和部署顺序见 [云端修改提示词与协议契约](CLOUD_STATE_SYNC_V2_PROMPT.md)。关闭此选项才使用旧协议；旧模式仍无法得知云端在同一连接内静默结束免唤醒窗口。
 
 处理器允许纯文本命令末尾带空白和换行，不支持一条消息中的多行命令列表。注册载荷上限为 128 字节，FILE_SEND URI 缓冲区含 NUL 共 128 字节；语义 JSON 必须是单个完整对象。
 
@@ -321,7 +321,9 @@ MQTT 连接并收到 critical 主题的 SUBACK 后执行检查；默认周期为
 
 关键队列容量有界：队满时部分中间状态不再持久化，终态／重启事件可挤出最早记录。因此服务器应按 event_id 去重，并容忍重复及缺失的中间状态，不要求每次看到完整状态序列。
 
-当前错误名称包括：`NONE`、`PRECONDITION_LOW_POWER`、`NETWORK_TIMEOUT`、`TLS_VERIFY_FAILED`、`HTTP_STATUS_INVALID`、`RANGE_MISMATCH`、`IMAGE_TOO_LARGE`、`IMAGE_HEADER_INVALID`、`HASH_MISMATCH`、`IMAGE_VALIDATE_FAILED`、`BOOT_SELF_TEST_FAILED`、`ROLLBACK_UNAVAILABLE`、`MANIFEST_INVALID`、`ARTIFACT_QUARANTINED`、`BOOT_PARTITION_SET_FAILED`、`NVS_WRITE_FAILED`、`UNKNOWN`。
+当前错误名称包括：`NONE`、`PRECONDITION_LOW_POWER`、`NETWORK_TIMEOUT`、`TLS_VERIFY_FAILED`、`OUT_OF_MEMORY`、`HTTP_STATUS_INVALID`、`RANGE_MISMATCH`、`IMAGE_TOO_LARGE`、`IMAGE_HEADER_INVALID`、`HASH_MISMATCH`、`IMAGE_VALIDATE_FAILED`、`BOOT_SELF_TEST_FAILED`、`ROLLBACK_UNAVAILABLE`、`MANIFEST_INVALID`、`ARTIFACT_QUARANTINED`、`BOOT_PARTITION_SET_FAILED`、`NVS_WRITE_FAILED`、`UNKNOWN`。
+
+`OUT_OF_MEMORY` 表示已识别的 TLS/HTTP 分配失败，不隔离固件制品。固件串口同时输出内部 RAM 和 PSRAM 的剩余字节数及最大连续块；ESP-TLS 的 `0x7F00` 分配失败不再归入 `NETWORK_TIMEOUT`。
 
 `STORAGE_UNAVAILABLE` 枚举尚未映射为同名字符串，当前落为 `UNKNOWN`。`PRECONDITION_LOW_POWER` 也可能表示提交时空闲堆不足，不是可靠的电池电量测量结果。
 

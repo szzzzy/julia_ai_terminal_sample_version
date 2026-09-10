@@ -1,22 +1,35 @@
 /**
  * @file    julia_avatar.c
- * @brief   把听音、等待回答和说话状态转换为用户看到的 Julia 表情。
+ * @brief   Julia L1 立绘层：静态立绘 + 相位帧 + RMS 嘴型 + 微动。
  *
- * 普通状态使用稳定底图，通过眼睛区分正在听、等待回答和播放回答；设备说话时，
- * 嘴型由已经送往扬声器的声音强度驱动，而不是由网络到包速度驱动。睡眠时切换为
- * 完整闭眼画面。背光和是否进入待机由其它模块统一决定。
+ * 模块职责与边界：
+ *   - 本模块是"当前运行时真正生效"的 L1 立绘链路（app_main 经 julia_display_init()+
+ *     julia_avatar_init() 启动）。它构建 Julia 静态立绘，并按"对话相位"
+ *     （IDLE/LISTENING/THINKING/SPEAKING）使用统一稳定底图，以眼睛开合区分相位，
+ *     同时用 RMS 驱动 4 档嘴型，并运行一个"微动"任务（眨眼/呼吸由微动层承担）。
+ *   - 与之相对：julia_ui.c 是 fused 遗留的总控（不参与当前构建）；julia_backlight 管
+ *     背光；julia_display_theme（或 app/julia_idle_display.c）管显示功率/息屏。
+ *   - 上游调用方：voice_service（WSS 任务）经 julia_avatar_feed_pcm/talking_start/
+ *     talking_stop/set_dialog_phase 驱动嘴型与相位；julia_idle_display 经
+ *     julia_avatar_set_dozing 切换睡眠立绘。
  *
- * 独立任务每 40 ms 更新一次嘴型和微动。语音任务只写入“当前阶段”和声音强度，
- * 不直接操作界面对象；所有 LVGL 修改在内部串行完成。offline 是独立叠加层，
- * 对话相位和主状态换图都不得隐式清除它。
+ * 线程模型：
+ *   - 本模块所有 LVGL 对象操作都在 lvgl_port_lock() 临界区内进行（lvgl_port 内有独立
+ *     "lvgl" 任务在跑 lv_timer_handler）。
+ *   - julia_avatar_init() 创建一个 "avatar_l1" 任务（优先级 3，栈 4096，PSRAM），每
+ *     40ms 计算一次嘴型档位并调用 avatar_mouth_set_shape()。
+ *   - 相位/嘴型/dozing 状态用 portMUX_TYPE（s_phase_lock / s_state_lock）保护，因为
+ *     它们可能在 WSS 任务与 avatar_l1 任务之间并发读写。
  *
- * 内嵌相位画面解压到外部内存并校验完整性后才显示。嘴型将短时间声音能量分成四档，
- * 没有新声音或设备不在说话时自动闭嘴。
+ * 数据流：
+ *   - 相位帧：LISTEN/THINK/SPEAK .bin（嵌入）→ avatar_rle_decode_rgb565() 解到 PSRAM
+ *     （360x360 RGB565）→ 校验 CRC32 → 作为 lv_img_dsc_t 绑定到底图 s_base。
+ *   - 嘴型：voice_service 每帧 PCM → julia_avatar_feed_pcm() → mouth_level_for_frame()
+ *     计算 RMS 档位(0..3) → avatar_l1 任务每 40ms 调 avatar_mouth_set_shape()。
  */
 #include "julia_avatar.h"
 
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -31,7 +44,6 @@
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "lvgl.h"
-#include "sdkconfig.h"
 
 #include "avatar_chroma_assets.h"
 #include "avatar_face_base.h"
@@ -53,25 +65,18 @@
 #define BOOT_BLINK_COUNT            8U
 #define BOOT_BLINK_OPEN_MS          255U
 #define BOOT_BLINK_CLOSED_MS        120U
-#define STATUS_LABEL_X               60
-#define STATUS_LABEL_Y              100
-#define STATUS_LABEL_WIDTH          220
-#define OFFLINE_LABEL_Y             120
-#define BATTERY_LABEL_X              STATUS_LABEL_X
-#define BATTERY_LABEL_Y              (STATUS_LABEL_Y - 20)
-#define BATTERY_LABEL_WIDTH          STATUS_LABEL_WIDTH
 
-/* 整体移动 360×360 根对象会让每一帧都刷新全屏；当前 QSPI 面板分十条发送且没有
- * 撕裂同步信号，持续全屏更新会出现明显闪烁。因此微动只修改局部眼睛和嘴巴，
- * 不移动整幅立绘。 */
+/* Transforming the 360x360 root invalidates the complete display on every
+ * animation tick.  On the QSPI panel that frame is committed in ten strips,
+ * without a TE signal to keep the writes outside the LCD scanout window.  The
+ * result is continuous visible tearing/flicker.  Keep animation updates local
+ * to the eyes and mouth until panel-synchronised full-frame rendering exists. */
 #define AVATAR_ENABLE_FULL_FRAME_MOTION 0
 
 static const char *TAG = "julia_avatar";
 static lv_obj_t *s_motion_root;
 static lv_obj_t *s_base;
 static lv_obj_t *s_status_label;
-static lv_obj_t *s_offline_label;
-static lv_obj_t *s_battery_label;
 static volatile bool s_ready;
 static bool s_talking;
 static uint32_t s_smoothed_rms;
@@ -81,117 +86,28 @@ static uint32_t s_last_pcm_ms;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static julia_avatar_dialog_phase_t s_dialog_phase = JULIA_AVATAR_DIALOG_IDLE;
 static bool s_dozing;
-static bool s_offline;
-static bool s_battery_present;
-static bool s_battery_charging;
-static bool s_battery_low;
-static uint8_t s_battery_percent;
-static uint16_t s_battery_voltage_mv;
-/* 已应用相位与请求相位分开保存；LVGL 锁超时时保留请求，后续刷新可以安全重试。 */
+/* Last phase successfully assigned to the LVGL base image.  It is separate
+ * from the requested state so a lock timeout can be retried safely. */
 static julia_avatar_dialog_phase_t s_applied_dialog_phase =
     (julia_avatar_dialog_phase_t)(JULIA_AVATAR_DIALOG_SPEAKING + 1);
 static portMUX_TYPE s_phase_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_boot_sequence_played;
 static char s_status_text[32] = "S0 BOOT";
 
-static void battery_label_apply(bool present, bool charging, bool low,
-                                uint8_t percent)
-{
-    if (s_battery_label == NULL) return;
-    if (!present) {
-        lv_obj_add_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        char text[16];
-        snprintf(text, sizeof(text), charging ? "CHG %u%%" :
-                                             low ? "LOW %u%%" : "BAT %u%%",
-                 percent);
-        lv_label_set_text(s_battery_label, text);
-        lv_obj_set_style_text_color(
-            s_battery_label,
-            charging ? lv_palette_main(LV_PALETTE_GREEN) :
-            low ? lv_palette_main(LV_PALETTE_RED) : lv_color_black(),
-            LV_PART_MAIN);
-        lv_obj_clear_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
-    }
-    lv_obj_move_foreground(s_battery_label);
-    lv_obj_invalidate(s_battery_label);
-}
-
-static void status_label_place(void)
-{
-    if (s_status_label == NULL) return;
-    lv_obj_set_pos(s_status_label, STATUS_LABEL_X, STATUS_LABEL_Y);
-    lv_obj_set_width(s_status_label, STATUS_LABEL_WIDTH);
-    lv_obj_move_foreground(s_status_label);
-}
-
-/* Caller holds the LVGL lock. Retry the latest committed caption after contention. */
-static void status_label_sync(void)
-{
-    if (s_status_label == NULL) return;
-    char snapshot[sizeof(s_status_text)];
-    portENTER_CRITICAL(&s_phase_lock);
-    memcpy(snapshot, s_status_text, sizeof(snapshot));
-    portEXIT_CRITICAL(&s_phase_lock);
-    if (strcmp(lv_label_get_text(s_status_label), snapshot) == 0) return;
-    lv_label_set_text(s_status_label, snapshot);
-    status_label_place();
-    lv_obj_invalidate(s_status_label);
-}
-
 void julia_avatar_set_status_text(const char *text)
 {
     if (text == NULL || text[0] == '\0') return;
+    char snapshot[sizeof(s_status_text)];
     portENTER_CRITICAL(&s_phase_lock);
     strncpy(s_status_text, text, sizeof(s_status_text) - 1U);
     s_status_text[sizeof(s_status_text) - 1U] = '\0';
+    memcpy(snapshot, s_status_text, sizeof(snapshot));
     portEXIT_CRITICAL(&s_phase_lock);
 
     if (s_status_label == NULL || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
-    status_label_sync();
-    lvgl_port_unlock();
-}
-
-/* Caller holds the LVGL lock. Read the latest value after acquiring that lock
- * so an older caller cannot overwrite a newer connection state. */
-static void offline_label_sync(void)
-{
-    if (s_offline_label == NULL) return;
-    portENTER_CRITICAL(&s_phase_lock);
-    bool offline = s_offline;
-    portEXIT_CRITICAL(&s_phase_lock);
-    if (lv_obj_has_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN) == !offline) return;
-    if (offline) lv_obj_clear_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(s_offline_label);
-    lv_obj_invalidate(s_offline_label);
-}
-
-void julia_avatar_set_offline(bool offline)
-{
-    portENTER_CRITICAL(&s_phase_lock);
-    s_offline = offline;
-    portEXIT_CRITICAL(&s_phase_lock);
-
-    if (s_offline_label == NULL || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
-    offline_label_sync();
-    lvgl_port_unlock();
-}
-
-void julia_avatar_set_battery_status(bool present, bool charging, bool low,
-                                     uint8_t percent, uint16_t voltage_mv)
-{
-    if (percent > 100U) percent = 100U;
-    portENTER_CRITICAL(&s_phase_lock);
-    s_battery_present = present;
-    s_battery_charging = charging;
-    s_battery_low = low;
-    s_battery_percent = percent;
-    s_battery_voltage_mv = voltage_mv;
-    portEXIT_CRITICAL(&s_phase_lock);
-
-    if (s_battery_label == NULL || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
-    battery_label_apply(present, charging, low, percent);
+    lv_label_set_text(s_status_label, snapshot);
+    lv_obj_move_foreground(s_status_label);
+    lv_obj_invalidate(s_status_label);
     lvgl_port_unlock();
 }
 
@@ -318,20 +234,16 @@ static const lv_img_dsc_t *avatar_source_for_phase(julia_avatar_dialog_phase_t p
     return &avatar_asset_julia_s1_1_near_standby;
 }
 
-/* LISTEN 的闭眼表情已经完整烘焙在底图中，因此常态隐藏独立眼/嘴层；但 S4
- * 播放唤醒回应时 talking=true，必须临时显示嘴层并继续由 PCM 驱动。 */
+/* LISTEN的闭眼表情已经完整烘焙在底图中，因此隐藏独立眼/嘴层；IDLE恢复随机
+ * 眨眼，THINK/SPEAK持续睁眼。嘴型仅在SPEAK由talking_start/feed_pcm驱动。 */
 static void avatar_apply_phase_eyes(julia_avatar_dialog_phase_t phase)
 {
     bool full_closed_portrait = phase == JULIA_AVATAR_DIALOG_LISTENING;
-    bool talking;
-    portENTER_CRITICAL(&s_state_lock);
-    talking = s_talking;
-    portEXIT_CRITICAL(&s_state_lock);
     uint8_t eye_main_state = phase == JULIA_AVATAR_DIALOG_IDLE ? 1U : 4U;
     avatar_eyes_set_idle_closed(false);
     avatar_eyes_set_state(eye_main_state);
     avatar_eyes_set_visible(!full_closed_portrait);
-    avatar_mouth_set_visible(!full_closed_portrait || talking);
+    avatar_mouth_set_visible(!full_closed_portrait);
 }
 
 /* 把某对话框相位应用到底图。解开锁后由 WSS 任务调用，也可能在 avatar_l1 任务中触发。
@@ -347,7 +259,8 @@ static bool avatar_apply_dialog_phase(julia_avatar_dialog_phase_t phase)
     portEXIT_CRITICAL(&s_phase_lock);
     if (dozing) return false;
     const lv_img_dsc_t *source = avatar_source_for_phase(phase);
-    /* 解码期间可能到达更新相位；应用前再次核对，避免旧请求覆盖最新状态。 */
+    /* Decoding can take long enough for a later transport command to supersede
+     * this request. Never let a stale request overwrite the latest phase. */
     if (!s_base || !dialog_phase_is_current(phase)) return false;
     if (!lvgl_port_lock(pdMS_TO_TICKS(250))) {
         ESP_LOGW(TAG, "LVGL lock timeout applying %s phase", dialog_phase_name(phase));
@@ -376,8 +289,7 @@ static bool avatar_apply_dialog_phase(julia_avatar_dialog_phase_t phase)
 void julia_avatar_set_dozing(bool active)
 {
     portENTER_CRITICAL(&s_phase_lock);
-    bool previous_dozing = s_dozing;
-    bool changed = previous_dozing != active;
+    bool changed = s_dozing != active;
     s_dozing = active;
     julia_avatar_dialog_phase_t phase = s_dialog_phase;
     portEXIT_CRITICAL(&s_phase_lock);
@@ -388,7 +300,7 @@ void julia_avatar_set_dozing(bool active)
                                      : avatar_source_for_phase(phase);
     if (!lvgl_port_lock(pdMS_TO_TICKS(250))) {
         portENTER_CRITICAL(&s_phase_lock);
-        s_dozing = previous_dozing;
+        s_dozing = !active;
         portEXIT_CRITICAL(&s_phase_lock);
         ESP_LOGW(TAG, "LVGL lock timeout switching doze=%u", active ? 1U : 0U);
         return;
@@ -447,8 +359,8 @@ static uint8_t mouth_level_for_frame(const int16_t *samples, size_t count)
     }
     uint32_t rms = count ? integer_sqrt_u64(energy / count) : 0;
 
-    /* 与独立 lipsync 模块保持同一组非对称门限：快速张嘴、慢速回落，并限制每帧
-     * 只变化一档，避免临界音量附近来回抖动。 */
+    /* Same asymmetric thresholds as the fused lipsync module: fast attack,
+     * slower release, and one-level steps avoid chatter around a boundary. */
     s_smoothed_rms = (s_smoothed_rms * 5U + rms * 3U) / 8U;
     static const uint16_t rise[] = {300, 950, 2300};
     static const uint16_t fall[] = {180, 650, 1650};
@@ -462,8 +374,8 @@ static uint8_t mouth_level_for_frame(const int16_t *samples, size_t count)
     return level;
 }
 
-/* 只有 voice_playback 已成功写入扬声器的 PCM 才能到达这里；网络收包和本地资源
- * 读取均不能提前驱动嘴型。回调只更新受锁保护的能量状态，不访问 LVGL。 */
+/* 喂入一帧下行扬声器 PCM：计算嘴型档位并记录"最近一次音频时刻"。由 voice_service
+ * 的 WSS 任务调用。只做整字段更新（锁内），不在音频回调里碰 LVGL。 */
 void julia_avatar_feed_pcm(const int16_t *samples, size_t sample_count)
 {
     if (samples == NULL || sample_count == 0U) {
@@ -471,7 +383,8 @@ void julia_avatar_feed_pcm(const int16_t *samples, size_t sample_count)
     }
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
     portENTER_CRITICAL(&s_state_lock);
-    /* RMS 平滑器与 talking 门控使用同一把锁，已取消代次的迟到块不能重新张嘴。 */
+    /* Playback now feeds from another task; serialize the RMS smoother with
+     * talking_start/stop and never let a cancelled chunk reopen the mouth. */
     if (!s_talking) {
         portEXIT_CRITICAL(&s_state_lock);
         return;
@@ -482,8 +395,8 @@ void julia_avatar_feed_pcm(const int16_t *samples, size_t sample_count)
     portEXIT_CRITICAL(&s_state_lock);
 }
 
-/* 每轮实际播放都从闭嘴重新开始，避免沿用上一代次的 RMS；UI 尚未初始化时只缓存
- * 门控状态，初始化后由正常相位应用接管。 */
+/* 语音下行开始：置位 talking，清平滑器与目标档位。安全：可在 UI 初始化前调用
+ * （此时只更新静态字段，不触碰 LVGL）。 */
 void julia_avatar_talking_start(void)
 {
     portENTER_CRITICAL(&s_state_lock);
@@ -493,8 +406,6 @@ void julia_avatar_talking_start(void)
     s_target_mouth_level = 0;
     s_last_pcm_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
     portEXIT_CRITICAL(&s_state_lock);
-    /* S4 使用 LISTENING 闭眼底图，常态会隐藏独立嘴层；开播时显式恢复嘴层。 */
-    if (s_ready) avatar_mouth_set_visible(true);
 }
 
 /* 语音下行结束：清除说话状态并把嘴立刻闭合（不等下一个 40ms 节拍）。 */
@@ -506,19 +417,13 @@ void julia_avatar_talking_stop(void)
     s_mouth_level = 0;
     s_target_mouth_level = 0;
     portEXIT_CRITICAL(&s_state_lock);
-    /* 播放结束或会话 teardown 必须立即闭嘴，不能再等待下一个 40 ms 刷新节拍。 */
-    if (s_ready) {
-        avatar_mouth_set_shape(AVATAR_MOUTH_IDLE, 0);
-        portENTER_CRITICAL(&s_phase_lock);
-        julia_avatar_dialog_phase_t phase = s_dialog_phase;
-        bool dozing = s_dozing;
-        portEXIT_CRITICAL(&s_phase_lock);
-        avatar_mouth_set_visible(!dozing && phase != JULIA_AVATAR_DIALOG_LISTENING);
-    }
+    /* Close immediately on SPKE/session teardown rather than waiting for the
+     * next 40 ms lip-sync tick. */
+    if (s_ready) avatar_mouth_set_shape(AVATAR_MOUTH_IDLE, 0);
 }
 
-/* 请求相位与已应用相位分别记录：相位相同但上次因锁超时未应用时仍需重试；已经
- * 成功应用的重复请求不刷新底图，避免无意义的全屏传输。 */
+/* 设置对话框相位。may be called from WSS/command tasks；相位未变或已应用则忽略
+ * 重复请求（needs_apply 判断），避免重复把同一张底图 set 一遍。 */
 void julia_avatar_set_dialog_phase(julia_avatar_dialog_phase_t phase)
 {
     if (phase < JULIA_AVATAR_DIALOG_IDLE || phase > JULIA_AVATAR_DIALOG_SPEAKING) {
@@ -558,7 +463,7 @@ static void update_micro_motion(uint32_t now_ms)
         return;
     }
 
-    /* 缩放幅度只取约 1/256，既可感知呼吸又不暴露画面边缘。 */
+    /* A tiny zoom pulse reads as breathing without exposing the screen edge. */
     uint32_t breath_phase = now_ms % AVATAR_BREATH_PERIOD_MS;
     uint32_t half = AVATAR_BREATH_PERIOD_MS / 2U;
     uint32_t triangle = breath_phase <= half ? breath_phase : AVATAR_BREATH_PERIOD_MS - breath_phase;
@@ -593,39 +498,28 @@ static void update_micro_motion(uint32_t now_ms)
 static void avatar_task(void *argument)
 {
     (void)argument;
+    uint8_t displayed_level = UINT8_MAX;
     for (;;) {
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
         bool talking;
         uint8_t target;
         uint32_t last_pcm;
-        julia_avatar_dialog_phase_t phase;
-        bool dozing;
         portENTER_CRITICAL(&s_state_lock);
         talking = s_talking;
         target = s_target_mouth_level;
         last_pcm = s_last_pcm_ms;
         portEXIT_CRITICAL(&s_state_lock);
-        portENTER_CRITICAL(&s_phase_lock);
-        phase = s_dialog_phase;
-        dozing = s_dozing;
-        portEXIT_CRITICAL(&s_phase_lock);
 
         if (!talking || (uint32_t)(now_ms - last_pcm) > AVATAR_PCM_HOLD_MS) {
             target = 0;
         }
 
         if (lvgl_port_lock(pdMS_TO_TICKS(20))) {
-            status_label_sync();
-            offline_label_sync();
             update_micro_motion(now_ms);
-            /* S6→S4 的底图切换和 SPKS 可能并发；每个节拍重新校正显隐，避免
-             * talking_start 的一次性 LVGL 锁失败让整段唤醒回应都没有嘴型。 */
-            bool mouth_visible = !dozing &&
-                                 (phase != JULIA_AVATAR_DIALOG_LISTENING || talking);
-            avatar_mouth_set_visible(mouth_visible);
-            /* avatar_mouth 自身按当前 shape 去重；这里不再维护第二份缓存，避免
-             * talking_stop 强制闭嘴后，新一轮相同档位被错误跳过。 */
-            avatar_mouth_set_shape((avatar_mouth_shape_t)target, s_smoothed_rms);
+            if (target != displayed_level) {
+                avatar_mouth_set_shape((avatar_mouth_shape_t)target, s_smoothed_rms);
+                displayed_level = target;
+            }
             lvgl_port_unlock();
         }
         vTaskDelay(pdMS_TO_TICKS(AVATAR_UPDATE_MS));
@@ -672,7 +566,8 @@ esp_err_t julia_avatar_init(void)
 
     /* 状态叠字固定在屏幕坐标系，不挂到微动根对象，避免随立绘缩放或点头移动。 */
     s_status_label = lv_label_create(screen);
-    status_label_place();
+    lv_obj_set_pos(s_status_label, 60, 80);
+    lv_obj_set_width(s_status_label, 150);
     lv_label_set_long_mode(s_status_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_color(s_status_label, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_status_label, &lv_font_montserrat_14, LV_PART_MAIN);
@@ -683,45 +578,7 @@ esp_err_t julia_avatar_init(void)
     memcpy(status_snapshot, s_status_text, sizeof(status_snapshot));
     portEXIT_CRITICAL(&s_phase_lock);
     lv_label_set_text(s_status_label, status_snapshot);
-    status_label_place();
-
-    s_offline_label = lv_label_create(screen);
-    lv_label_set_text(s_offline_label, "offline");
-    lv_obj_set_pos(s_offline_label, STATUS_LABEL_X, OFFLINE_LABEL_Y);
-    lv_obj_set_width(s_offline_label, STATUS_LABEL_WIDTH);
-    lv_obj_set_style_text_color(s_offline_label, lv_palette_main(LV_PALETTE_RED),
-                                LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_offline_label, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_offline_label, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_clear_flag(s_offline_label, LV_OBJ_FLAG_SCROLLABLE);
-    if (!s_offline) lv_obj_add_flag(s_offline_label, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(s_offline_label);
-
-    s_battery_label = lv_label_create(screen);
-    lv_obj_set_pos(s_battery_label, BATTERY_LABEL_X, BATTERY_LABEL_Y);
-    lv_obj_set_width(s_battery_label, BATTERY_LABEL_WIDTH);
-    lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_battery_label, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_battery_label, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_clear_flag(s_battery_label, LV_OBJ_FLAG_SCROLLABLE);
-    bool battery_present;
-    bool battery_charging;
-    bool battery_low;
-    uint8_t battery_percent;
-    uint16_t battery_voltage_mv;
-    portENTER_CRITICAL(&s_phase_lock);
-    battery_present = s_battery_present;
-    battery_charging = s_battery_charging;
-    battery_low = s_battery_low;
-    battery_percent = s_battery_percent;
-    battery_voltage_mv = s_battery_voltage_mv;
-    portEXIT_CRITICAL(&s_phase_lock);
-    battery_label_apply(battery_present, battery_charging, battery_low,
-                        battery_percent);
-    (void)battery_voltage_mv;
-    ESP_LOGI(TAG, "status label ready x=%d y=%d width=%d text=%s",
-             lv_obj_get_x(s_status_label), lv_obj_get_y(s_status_label),
-             lv_obj_get_width(s_status_label), status_snapshot);
+    lv_obj_move_foreground(s_status_label);
     lv_obj_invalidate(screen);
     lvgl_port_unlock();
 
@@ -778,17 +635,14 @@ esp_err_t julia_avatar_play_boot_sequence(void)
     ESP_RETURN_ON_ERROR(lvgl_port_refr_now_sync(pdMS_TO_TICKS(500)),
                         TAG, "refresh closed boot frame");
 
-    /* 启动动画只使用受限亮度，避免背光浪涌与后续外设上电叠加。进入正常
-     * FSM 状态后，状态呈现仍按各自的运行期亮度配置接管。 */
-    esp_err_t fade_err = julia_backlight_fade_to(
-        CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT, 600);
+    esp_err_t fade_err = julia_backlight_fade_to(100, 300);
     if (fade_err == ESP_OK) {
-        fade_err = julia_backlight_wait_fade(700);
+        fade_err = julia_backlight_wait_fade(500);
     }
     if (fade_err != ESP_OK) {
-        ESP_LOGW(TAG, "Boot backlight fade failed: %s; using %d%% brightness",
-                 esp_err_to_name(fade_err), CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT);
-        julia_backlight_set(CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT);
+        ESP_LOGW(TAG, "Boot backlight fade failed: %s; using full brightness",
+                 esp_err_to_name(fade_err));
+        julia_backlight_set(100);
     }
     esp_err_t sequence_err = ESP_OK;
     for (unsigned i = 0; i < BOOT_BLINK_COUNT; ++i) {

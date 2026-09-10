@@ -40,6 +40,7 @@ static const char *const s_s7_sub_state_names[JULIA_S7_SUB_STATE_COUNT] = {
 
 static const char *const s_event_names[EVT_COUNT] = {
     [EVT_VOICE_SESSION_RESET] = "EVT_VOICE_SESSION_RESET",
+    [EVT_REQUIRE_WAKE] = "EVT_REQUIRE_WAKE",
     [EVT_NONE] = "EVT_NONE",
     [EVT_USER_LEAVE] = "EVT_USER_LEAVE",
     [EVT_USER_CALL] = "EVT_USER_CALL",
@@ -398,7 +399,7 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
         target_main_state = fsm->s7_return_state;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION &&
-               event == EVT_USER_LEAVE) {
+               (event == EVT_USER_LEAVE || event == EVT_REQUIRE_WAKE)) {
         /* 对话结束后的连续交流窗口已超时，重新要求唤醒词。 */
         target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
