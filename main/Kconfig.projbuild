@@ -66,7 +66,7 @@ menu "Example Configuration"
     config JULIA_BOOT_BRIGHTNESS_PERCENT
         int "Maximum backlight brightness during boot animation (percent)"
         range 0 100
-        default 25
+        default 50
 
     config JULIA_BATTERY_DIAGNOSTICS
         bool "Log battery voltage at startup checkpoints"
@@ -824,12 +824,12 @@ menu "Example Configuration"
             default 50
             help
                 Fixed backlight level used in the resident S1 companion state.
-                Interactive states remain at full brightness.
+                S2 dialog stages use 70 percent brightness.
 
         config JULIA_SILENT_BRIGHTNESS_PERCENT
             int "S5 silent-state brightness (percent)"
             range 0 100
-            default 50
+            default 30
             help
                 Fixed backlight level used in S5. The default is deliberately
                 lower than active states so silent mode is visually distinct.

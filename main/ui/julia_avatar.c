@@ -64,6 +64,7 @@
 #define AVATAR_FRAME_PIXELS        (AVATAR_FRAME_WIDTH * AVATAR_FRAME_HEIGHT)
 #define AVATAR_FRAME_BYTES         (AVATAR_FRAME_PIXELS * sizeof(uint16_t))
 #define BOOT_BLINK_COUNT            8U
+#define BOOT_CLOSED_HOLD_MS         300U
 #define BOOT_BLINK_OPEN_MS          255U
 #define BOOT_BLINK_CLOSED_MS        120U
 
@@ -770,15 +771,20 @@ esp_err_t julia_avatar_play_boot_sequence(void)
     ESP_RETURN_ON_ERROR(lvgl_port_refr_now_sync(pdMS_TO_TICKS(500)),
                         TAG, "refresh closed boot frame");
 
-    esp_err_t fade_err = julia_backlight_fade_to(100, 300);
-    if (fade_err == ESP_OK) {
-        fade_err = julia_backlight_wait_fade(500);
-    }
+    /* Keep the initial closed-eye hold and every blink interval unchanged.
+     * Hardware PWM ramps throughout the sequence instead of finishing before
+     * the first blink. The duration follows the existing animation timings. */
+    const uint32_t fade_ms = BOOT_CLOSED_HOLD_MS +
+        BOOT_BLINK_COUNT * (BOOT_BLINK_OPEN_MS + BOOT_BLINK_CLOSED_MS);
+    julia_backlight_set(0);
+    esp_err_t fade_err = julia_backlight_fade_to(CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT,
+                                               fade_ms);
     if (fade_err != ESP_OK) {
-        ESP_LOGW(TAG, "Boot backlight fade failed: %s; using full brightness",
+        ESP_LOGW(TAG, "Boot backlight fade failed: %s; using configured boot brightness",
                  esp_err_to_name(fade_err));
-        julia_backlight_set(100);
+        julia_backlight_set(CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT);
     }
+    vTaskDelay(pdMS_TO_TICKS(BOOT_CLOSED_HOLD_MS));
     esp_err_t sequence_err = ESP_OK;
     for (unsigned i = 0; i < BOOT_BLINK_COUNT; ++i) {
         if (boot_eye_frame(AVATAR_EYES_OPEN, BOOT_BLINK_OPEN_MS) != ESP_OK) {
@@ -795,6 +801,8 @@ esp_err_t julia_avatar_play_boot_sequence(void)
     if (lvgl_port_refr_now_sync(pdMS_TO_TICKS(500)) != ESP_OK) {
         sequence_err = ESP_FAIL;
     }
+    /* End at the exact target without adding another wait to boot timing. */
+    julia_backlight_set(CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT);
     s_boot_sequence_played = true;
     ESP_LOGI(TAG, "Boot eye sequence complete: %u rapid blinks in about 3 seconds",
              (unsigned)BOOT_BLINK_COUNT);

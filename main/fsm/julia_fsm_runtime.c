@@ -403,21 +403,22 @@ static void apply_presentation(julia_main_state_t main_state,
     case FSM_PRESENT_S2_1_LISTENING:
         /* 复用现有“听”呈现：闭眼立绘、停止嘴型播放并保持屏幕唤醒。 */
         julia_backlight_breathe_stop();
-        julia_backlight_set(100);
+        /* S4 shares this presentation but keeps its own interaction brightness. */
+        julia_backlight_set(main_state == JULIA_MAIN_STATE_S2_DIALOG ? 70 : 100);
         julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_LISTENING);
         julia_avatar_set_dozing(false);
         break;
     case FSM_PRESENT_S2_2_THINKING:
         /* 复用现有“想”呈现；推理与传输仍由原语音服务负责。 */
         julia_backlight_breathe_stop();
-        julia_backlight_set(100);
+        julia_backlight_set(70);
         julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_THINKING);
         julia_avatar_set_dozing(false);
         break;
     case FSM_PRESENT_S2_3_SPEAKING:
         /* 复用现有“说”呈现；音频播放与 PCM 嘴型仍由原播放链路负责。 */
         julia_backlight_breathe_stop();
-        julia_backlight_set(100);
+        julia_backlight_set(70);
         julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_SPEAKING);
         julia_avatar_set_dozing(false);
         break;

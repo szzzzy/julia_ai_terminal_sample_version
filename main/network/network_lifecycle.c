@@ -664,7 +664,9 @@ esp_err_t network_lifecycle_start(void)
         err = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
     }
     if (err == ESP_OK) {
-        err = esp_wifi_set_ps(WIFI_PS_NONE);
+        /* Global modem sleep keeps continuous voice upload active; the driver
+         * wakes for traffic and sleeps only when the link is idle. */
+        err = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     }
     if (err != ESP_OK) {
         goto failed;
@@ -680,6 +682,9 @@ esp_err_t network_lifecycle_start(void)
         goto failed;
     }
     s_wifi_driver_started = true;
+    ESP_LOGI(TAG, "Wi-Fi power save=MIN_MODEM min_active=%dms keepalive=%ds",
+             CONFIG_ESP_WIFI_SLP_DEFAULT_MIN_ACTIVE_TIME,
+             CONFIG_ESP_WIFI_SLP_DEFAULT_MAX_ACTIVE_TIME);
     esp_err_t tx_power_err = esp_wifi_set_max_tx_power(
         (int8_t)(CONFIG_NETWORK_WIFI_MAX_TX_POWER_DBM * 4));
     if (tx_power_err != ESP_OK) {
