@@ -330,8 +330,32 @@ static const lv_img_dsc_t *avatar_source_for_phase(julia_avatar_dialog_phase_t p
     return &avatar_asset_julia_s1_1_near_standby;
 }
 
-/* LISTEN的闭眼表情已经完整烘焙在底图中，因此隐藏独立眼/嘴层；IDLE恢复随机
- * 眨眼，THINK/SPEAK持续睁眼。嘴型仅在SPEAK由talking_start/feed_pcm驱动。 */
+/* Refresh from current playback ownership, including local notices on the
+ * closed-eye portrait. Retry every frame if a UI lock was unavailable. */
+static void avatar_sync_mouth(void)
+{
+    if (!s_ready || !lvgl_port_lock(pdMS_TO_TICKS(20))) return;
+    portENTER_CRITICAL(&s_phase_lock);
+    bool dozing = s_dozing;
+    julia_avatar_dialog_phase_t phase = s_dialog_phase;
+    portEXIT_CRITICAL(&s_phase_lock);
+    portENTER_CRITICAL(&s_state_lock);
+    bool talking = s_talking;
+    uint8_t target = s_target_mouth_level;
+    uint32_t last_pcm = s_last_pcm_ms;
+    uint32_t rms = s_smoothed_rms;
+    portEXIT_CRITICAL(&s_state_lock);
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    if (!talking || dozing || (uint32_t)(now_ms - last_pcm) > AVATAR_PCM_HOLD_MS)
+        target = 0;
+    avatar_mouth_set_visible(!dozing &&
+        (talking || phase != JULIA_AVATAR_DIALOG_LISTENING));
+    /* The mouth component deduplicates successfully applied shapes itself. */
+    avatar_mouth_set_shape((avatar_mouth_shape_t)target, rms);
+    lvgl_port_unlock();
+}
+
+/* LISTEN keeps its baked-in eyes, while active local speech exposes the mouth. */
 static void avatar_apply_phase_eyes(julia_avatar_dialog_phase_t phase)
 {
     bool full_closed_portrait = phase == JULIA_AVATAR_DIALOG_LISTENING;
@@ -339,7 +363,7 @@ static void avatar_apply_phase_eyes(julia_avatar_dialog_phase_t phase)
     avatar_eyes_set_idle_closed(false);
     avatar_eyes_set_state(eye_main_state);
     avatar_eyes_set_visible(!full_closed_portrait);
-    avatar_mouth_set_visible(!full_closed_portrait);
+    avatar_sync_mouth();
 }
 
 /* 把某对话框相位应用到底图。解开锁后由 WSS 任务调用，也可能在 avatar_l1 任务中触发。
@@ -502,6 +526,7 @@ void julia_avatar_talking_start(void)
     s_target_mouth_level = 0;
     s_last_pcm_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
     portEXIT_CRITICAL(&s_state_lock);
+    avatar_sync_mouth();
 }
 
 /* 语音下行结束：清除说话状态并把嘴立刻闭合（不等下一个 40ms 节拍）。 */
@@ -515,7 +540,7 @@ void julia_avatar_talking_stop(void)
     portEXIT_CRITICAL(&s_state_lock);
     /* Close immediately on SPKE/session teardown rather than waiting for the
      * next 40 ms lip-sync tick. */
-    if (s_ready) avatar_mouth_set_shape(AVATAR_MOUTH_IDLE, 0);
+    avatar_sync_mouth();
 }
 
 /* 设置对话框相位。may be called from WSS/command tasks；相位未变或已应用则忽略
@@ -594,30 +619,13 @@ static void update_micro_motion(uint32_t now_ms)
 static void avatar_task(void *argument)
 {
     (void)argument;
-    uint8_t displayed_level = UINT8_MAX;
     for (;;) {
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
-        bool talking;
-        uint8_t target;
-        uint32_t last_pcm;
-        portENTER_CRITICAL(&s_state_lock);
-        talking = s_talking;
-        target = s_target_mouth_level;
-        last_pcm = s_last_pcm_ms;
-        portEXIT_CRITICAL(&s_state_lock);
-
-        if (!talking || (uint32_t)(now_ms - last_pcm) > AVATAR_PCM_HOLD_MS) {
-            target = 0;
-        }
-
+        avatar_sync_mouth();
         if (lvgl_port_lock(pdMS_TO_TICKS(20))) {
             status_label_sync();
             offline_label_sync();
             update_micro_motion(now_ms);
-            if (target != displayed_level) {
-                avatar_mouth_set_shape((avatar_mouth_shape_t)target, s_smoothed_rms);
-                displayed_level = target;
-            }
             lvgl_port_unlock();
         }
         vTaskDelay(pdMS_TO_TICKS(AVATAR_UPDATE_MS));

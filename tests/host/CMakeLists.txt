@@ -69,6 +69,9 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME fault_restart_prompt
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_fault_restart_prompt.py"
             --cc "${CMAKE_C_COMPILER}" --out "${CMAKE_CURRENT_BINARY_DIR}/fault-prompt")
+    add_test(NAME prompt_mouth
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_prompt_mouth.py"
+            --cc "${CMAKE_C_COMPILER}" --out "${CMAKE_CURRENT_BINARY_DIR}/prompt-mouth")
     add_test(NAME ota_tls_memory
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ota_tls_memory.py"
             --cc "${CMAKE_C_COMPILER}" --out "${CMAKE_CURRENT_BINARY_DIR}/ota-memory")
