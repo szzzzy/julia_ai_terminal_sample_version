@@ -2,6 +2,7 @@
 /build*/
 /managed_components/
 /sdkconfig.old
+/sdkconfig
 
 # Python test cache
 __pycache__/

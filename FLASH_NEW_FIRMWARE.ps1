@@ -1,9 +1,9 @@
 param([string]$Port = 'COM8', [int]$Baud = 460800)
 $ErrorActionPreference = 'Stop'
-$juliaBuild = 'D:\CodexData\JuliaPrivate\esp-28848591972c\build'
+$juliaBuild = Join-Path $PSScriptRoot 'build'
 $juliaPython = 'D:\Espressif\python_env\idf5.5_py3.13_env\Scripts\python.exe'
 $juliaImage = Join-Path $juliaBuild 'julia_fused_base.bin'
-if (-not (Test-Path -LiteralPath $juliaImage)) { throw 'Provisioned firmware is missing. Do not substitute the old build directory.' }
+if (-not (Test-Path -LiteralPath $juliaImage)) { throw 'Firmware is missing. Run idf.py build in the project root first.' }
 Write-Host 'Target: esp-28848591972c; firmware: 0.1.4 device-provisioned control-v1'
 Get-FileHash -LiteralPath $juliaImage -Algorithm SHA256 | Format-List
 

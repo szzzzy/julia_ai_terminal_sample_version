@@ -1,5 +1,8 @@
 # 构建与发布
 
+> 2026-09-11 默认构建已统一：在 ESP-IDF 终端的项目根目录运行 `idf.py build`，使用根目录本地 `sdkconfig`，产物为 `build/julia_fused_base.bin`。本机配置已替换为 esp-28848591972c 的配套配置；VS Code 与烧录脚本也使用这个 build。`sdkconfig` 含私有凭证，已从 Git 跟踪中移除；`sdkconfig.defaults` 仅保留严格模式与 TLS 默认值，不含凭证。新检出工作区需先配置凭证，不能直接接入云端。历史文档中的私有 build 默认路径已被本次统一替代。
+
+
 文档版本：V1.0。返回 [项目入口](../README.md)。
 
 ## 1. 环境与依赖

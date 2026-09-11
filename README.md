@@ -1,5 +1,8 @@
 # Julia Fused-Base
 
+> 2026-09-11 默认构建已统一：在 ESP-IDF 终端的项目根目录运行 `idf.py build`，使用根目录本地 `sdkconfig`，产物为 `build/julia_fused_base.bin`。本机配置已替换为 esp-28848591972c 的配套配置；VS Code 与烧录脚本也使用这个 build。`sdkconfig` 含私有凭证，已从 Git 跟踪中移除；`sdkconfig.defaults` 仅保留严格模式与 TLS 默认值，不含凭证。新检出工作区需先配置凭证，不能直接接入云端。历史文档中的私有 build 默认路径已被本次统一替代。
+
+
 Julia Fused-Base 是面向 ESP32-S3 陪伴终端的设备固件，提供麦克风采集、WSS 语音传输、扬声器播放、屏幕表情、行为状态机、RTC／IMU 情境输入和 MQTT／HTTPS 固件 OTA。
 
 文档版本：V1.1。实现核对日期：2026-09-03。适用对象：当前工作区的实际构建配置。固件版本由根目录 `CMakeLists.txt` 的 `PROJECT_VER` 定义，当前为 `0.1.0`；文档版本与固件版本独立。
