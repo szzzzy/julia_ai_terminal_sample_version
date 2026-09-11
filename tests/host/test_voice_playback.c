@@ -145,6 +145,10 @@ int main(void)
     assert(starts == 2 && pcm_callbacks == 1 && stops == 2);
     assert(completion_generation == current_generation && completion_result == ESP_OK);
     puts("PASS: interrupt/restart suppresses old buffered PCM and stale completion");
+    voice_playback_timing_t timing;
+    assert(voice_playback_get_timing(current_generation, &timing));
+    assert(timing.first_output_us > 0 && timing.completed_us >= timing.first_output_us);
+    assert(!voice_playback_get_timing(current_generation - 1, &timing));
 
     reset();
     inject_gap = true;
@@ -178,6 +182,8 @@ int main(void)
     run();
     assert(writes == 1 && completion_result == ESP_FAIL && stops == 1);
     puts("PASS: I2S failure terminates and reports the active generation");
+    assert(voice_playback_get_timing(current_generation, &timing));
+    assert(timing.first_output_us == 0 && timing.completed_us > 0);
 
     reset();
     assert(voice_playback_start(24000, true, &current_generation) == ESP_OK);

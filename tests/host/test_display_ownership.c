@@ -66,6 +66,15 @@ int main(void)
     assert(strstr(runtime, "lvgl_port_set_display_off(true)") != NULL);
     free(runtime);
 
-    puts("PASS: S6 display hardware remains exclusively owned by FSM presentation");
+    char *battery = read_source("main/hardware/julia_battery.c");
+    assert_not_present(battery, "julia_charge_detector");
+    assert_not_present(battery, "JULIA_BATTERY_STATE_CHARGING");
+    free(battery);
+
+    char *avatar = read_source("main/ui/julia_avatar.c");
+    assert_not_present(avatar, "CHG %u%%");
+    free(avatar);
+
+    puts("PASS: display ownership and voltage-only battery UI constraints hold");
     return 0;
 }

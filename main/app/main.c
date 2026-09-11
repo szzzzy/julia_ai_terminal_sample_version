@@ -53,10 +53,8 @@ static void battery_status_updated(const julia_battery_status_t *status, void *c
     if (status == NULL || !status->valid) return;
     julia_avatar_set_battery_status(
         status->present,
-        status->state == JULIA_BATTERY_STATE_CHARGING,
         status->state == JULIA_BATTERY_STATE_LOW,
-        status->percent,
-        status->voltage_mv);
+        status->percent);
 }
 
 static void boot_stage_settle(const char *stage)

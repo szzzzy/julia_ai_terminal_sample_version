@@ -9,3 +9,5 @@ void voice_state_sync_end(void);
 void voice_state_sync_poll(void);
 bool voice_state_sync_handle_text(const uint8_t *text, size_t len);
 bool voice_state_sync_is_ready(void);
+/* Owner-task only; valid until start/end. Never use the ID as authorization. */
+const char *voice_state_sync_session_id(void);

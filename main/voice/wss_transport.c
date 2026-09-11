@@ -90,6 +90,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "wss_auth_policy.h"
 #include <sys/time.h>
 
 #include "lwip/sockets.h"
@@ -172,6 +173,16 @@ static wss_transport_config_t s_config;
 static void *s_queue_item;
 /** 表示当前连接已经不能安全继续；本轮处理结束后统一关闭并重连。 */
 static bool s_session_failed;
+/* Only the connection owner changes this latch. Clear after successful auth,
+ * not after an intervening network failure, to avoid credential retry storms. */
+static bool s_auth_rejected;
+static unsigned s_retry_floor_s;
+
+void wss_transport_defer_retry(unsigned seconds)
+{
+    if(seconds>300U) seconds=300U;
+    if(seconds>s_retry_floor_s) s_retry_floor_s=seconds;
+}
 /**
  * 服务器可能把升级响应和第一条 WebSocket 消息一起发来。响应头之后的字节必须
  * 留给消息解析，不能因握手完成而丢弃，否则第一条业务消息会缺失或错位。
@@ -776,12 +787,16 @@ static esp_err_t wss_ws_recv(uint8_t *opcode_out, uint8_t *payload, size_t cap,
  */
 static const char *wss_token(void)
 {
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    return CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE;
+#else
 #if defined(CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE)
     if (CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE[0] != '\0') {
         return CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE;
     }
 #endif
     return CONFIG_WSS_TOKEN;
+#endif
 }
 
 /** 大小写不敏感的 ASCII 等长比较。 */
@@ -981,9 +996,6 @@ static esp_err_t wss_ws_handshake(void)
     keyb64[outlen] = '\0';
 
     const char *token = wss_token();
-    if (token[0] == '\0') {
-        ESP_LOGW(TAG, "WSS token is empty; server may reject the upgrade");
-    }
 
     char req[WSS_REQ_BUF_SIZE];
     int n = snprintf(req, sizeof(req),
@@ -1044,8 +1056,10 @@ static esp_err_t wss_ws_handshake(void)
         s_rx_extra_pos = 0;
     }
     if (!wss_ws_validate_response(buf, header_len, (const char *)keyb64)) {
-        ESP_LOGE(TAG, "WSS handshake failed: invalid RFC 6455 upgrade response: %.*s",
-                 (int)header_len, buf);
+        if (wss_auth_response_rejected(buf, header_len)) s_auth_rejected = true;
+        /* Response headers may contain cookies or reflected credentials. */
+        ESP_LOGE(TAG, "WSS upgrade rejected: %s",
+                 s_auth_rejected ? "authentication; retry cooldown" : "invalid upgrade response");
         return ESP_FAIL;
     }
     return ESP_OK;
@@ -1059,6 +1073,11 @@ static esp_err_t wss_ws_handshake(void)
  */
 static bool wss_connect(void)
 {
+    if (!wss_auth_token_valid(wss_token())) {
+        s_auth_rejected = true;
+        ESP_LOGE(TAG, "WSS credential missing or invalid; configure device credential");
+        return false;
+    }
     esp_tls_t *tls = esp_tls_init();
     if (tls == NULL) {
         ESP_LOGE(TAG, "esp_tls_init failed");
@@ -1372,6 +1391,8 @@ static void wss_run_session(void)
                     }
                 }
                 ESP_LOGI(TAG, "WSS server sent CLOSE (code 0x%04X); replying CLOSE", close_code);
+                if (close_code == 4401) s_auth_rejected = true;
+                wss_transport_defer_retry(wss_close_retry_floor(close_code));
                 wss_set_owner_end_reason(WSS_TRANSPORT_END_PEER_CLOSE);
                 portENTER_CRITICAL(&s_start_lock);
                 s_session_ready = false;    /* 拒绝关闭等待期间产生的新上行条目。 */
@@ -1497,9 +1518,13 @@ static void wss_session_task(void *parameter)
     (void)parameter;
     for (;;) {
         if (wss_connect()) {
+            s_auth_rejected = false;
+            s_retry_floor_s=0;
             wss_run_session();
         }
-        vTaskDelay(pdMS_TO_TICKS((uint32_t)CONFIG_WSS_RECONNECT_INTERVAL_SECONDS * 1000U));
+        uint32_t delay_s = wss_auth_retry_seconds(s_auth_rejected, CONFIG_WSS_RECONNECT_INTERVAL_SECONDS);
+        if(delay_s<s_retry_floor_s) delay_s=s_retry_floor_s;
+        vTaskDelay(pdMS_TO_TICKS(delay_s * 1000U));
     }
 }
 

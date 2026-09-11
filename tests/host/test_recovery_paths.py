@@ -751,6 +751,8 @@ static julia_fsm_t fsm;
 static bool busy,playing,s_mic_streaming,s_dialog_listening,s_wake_reply_expected;
 static bool s_s4_ready_pending,s_s4_ready_committed,fail_send;
 static char s_interaction_id[64];
+static struct {uint32_t generation; char session[33],interaction[64]; int64_t spks_us,first_pcm_us; bool output_reported;} s_audio_timing;
+static const char *voice_state_sync_session_id(void){return "test-session";}
 static julia_main_state_t s_interaction_origin;
 static uint32_t s_playback_generation;
 static voice_playback_role_t s_playback_role;

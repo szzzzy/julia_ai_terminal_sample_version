@@ -1,0 +1,158 @@
+{
+  "firmware_version": "0.1.4",
+  "firmware_base": "b27969a",
+  "cloud_base": "a68e41b5fff5a35be61c0295159d0cad89586ddf",
+  "cloud_worktree": "/opt/julia-multidevice-contract-fix",
+  "cloud_branch": "codex/multidevice-contract-fix",
+  "cloud_changes_committed": false,
+  "cloud_tests": {
+    "passed": 96,
+    "failed": 0,
+    "elapsed_seconds": 160.229,
+    "log": "build/cloud-contract-fix/final-regression.log"
+  },
+  "firmware_tests": {
+    "passed": 31,
+    "failed": 0,
+    "elapsed_seconds": 5.92,
+    "log": "build/control-v1-ctest.log"
+  },
+  "cross_control": {
+    "first_wake_intent": "applied",
+    "lost_ack_retry": "same result, one execution",
+    "same_round_controls": 50,
+    "further_rounds": 200,
+    "late_round": "rejected",
+    "late_session": "rejected",
+    "wrong_device": "rejected",
+    "busy": "A paused, B unchanged",
+    "pending_controls": 0,
+    "hardware_tested": false,
+    "paid_api_used": false
+  },
+  "images": [
+    {
+      "path": "build/julia_fused_base.bin",
+      "bytes": 2542512,
+      "sha256": "311f32f3d3c2e2124050a05585d29fb795b35c75d7d74a3bdb4a63b8cfa132e2"
+    },
+    {
+      "path": "build-multidevice/julia_fused_base.bin",
+      "bytes": 2548496,
+      "sha256": "2f6d5108ff304ed71b39d6be517138327582c28fc2eef2b0712cfb10a9b11b5d"
+    }
+  ],
+  "image_validation": {
+    "project_name": "julia_fused_base",
+    "app_version": "0.1.4",
+    "esp_idf": "v5.5.4",
+    "checksum_valid": true,
+    "validation_hash_valid": true,
+    "app_partition_bytes": 7340032
+  },
+  "cloud_patch": {
+    "path": "docs/patches/cloud-control-v1-a68e41b.patch",
+    "bytes": 43342,
+    "sha256": "d90a80afe0b153250019095cb2c219d24b62bb7ebf643a5f2ab56a804b2e25ab"
+  },
+  "cloud_source_sha256": [
+    {
+      "path": "build/cloud-contract-fix/api_server/server/control_protocol.py",
+      "bytes": 6380,
+      "sha256": "53262033b0b7929b27de29d3d55c609c037c0e8e585ddc60aa4dacf6edce1147"
+    },
+    {
+      "path": "build/cloud-contract-fix/api_server/server/state_sync.py",
+      "bytes": 25678,
+      "sha256": "a759330c5bcac778f71e05e56de230a4cca69be31c8e563aae6cdda033bf8178"
+    },
+    {
+      "path": "build/cloud-contract-fix/api_server/server/mqtt_adapter.py",
+      "bytes": 14835,
+      "sha256": "5290bc9ff80e9b0d677ca764b87be3d8234e6ca6a538dd371617d41f6e2d9a1e"
+    },
+    {
+      "path": "build/cloud-contract-fix/api_server/server/mqtt_pure.py",
+      "bytes": 18483,
+      "sha256": "827d9aa6a0380eb06db4820390baa41bd09d0cf4908466ceac986bf85b983139"
+    },
+    {
+      "path": "build/cloud-contract-fix/api_server/server/wss_adapter.py",
+      "bytes": 29195,
+      "sha256": "40e47a799f71a390d5c612455cfd0db51880012ab3e32b1a837f634f1add0069"
+    },
+    {
+      "path": "build/cloud-contract-fix/api_server/tests/test_control_protocol.py",
+      "bytes": 11400,
+      "sha256": "21611fbacc412b386078bf4547a8d7e4ebff8aaa2924977d2854717ef014d8b6"
+    },
+    {
+      "path": "build/cloud-contract-fix/api_server/tests/test_multidevice.py",
+      "bytes": 18833,
+      "sha256": "0d68f39969876967aedc9e6a0e099207da09035a27b6b75bb878bb2aa01e5cba"
+    },
+    {
+      "path": "build/cloud-contract-fix/api_server/docs/MULTIDEVICE_CONTROL_V1.md",
+      "bytes": 5415,
+      "sha256": "342c4873c5260bfd15a7c566fdc1253ec4ba39f68bc3209229727059076f6ab2"
+    }
+  ],
+  "firmware_source_sha256": [
+    {
+      "path": "CMakeLists.txt",
+      "bytes": 1746,
+      "sha256": "9d9bba243e64cebfbc4c3773b09dab42ea9221c8ef6911f4aa4db8f96d86a4bb"
+    },
+    {
+      "path": "main/voice/voice_control_guard.c",
+      "bytes": 7607,
+      "sha256": "e962fe7bca30a7f01acc95dd10d9d59b70146be2e016cb7c1665e5d2758609d0"
+    },
+    {
+      "path": "main/voice/voice_control_guard.h",
+      "bytes": 1862,
+      "sha256": "d53e81569d0f6c481045c737ac1fedd794983731413855fd5d7caa66ee6fc38d"
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "bytes": 78328,
+      "sha256": "0fe88007bb2e2a1476c2103af875d72d8d632f2af98a9c54278436028798b6a1"
+    },
+    {
+      "path": "main/voice/voice_state_sync.c",
+      "bytes": 12542,
+      "sha256": "2849206c68a281fc52b7ba24fafe3140754a5cad7498df7a4f8a04557d0f07cd"
+    },
+    {
+      "path": "main/voice/wss_transport.c",
+      "bytes": 72640,
+      "sha256": "31733718e5f7daa7577e2fef0fbc965448e6e6f917b5b9e412098258fc9b2cf5"
+    },
+    {
+      "path": "main/voice/wss_auth_policy.h",
+      "bytes": 1198,
+      "sha256": "4ca2f654d77193daff167ba5bfd85167738725ac3ca9797466fdaf89794b1134"
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "bytes": 77284,
+      "sha256": "0ab7cd05abf8416e29f072fbbbb564f541aab87f41d683f5ec1ad92aba1dfec8"
+    },
+    {
+      "path": "main/fsm/julia_fsm.c",
+      "bytes": 26926,
+      "sha256": "ca7206d4c3f6d218a9b67d5bd60abdf3f3cbc237216f83def70f3d4ad3820d49"
+    },
+    {
+      "path": "main/fsm/julia_fsm_runtime.c",
+      "bytes": 43970,
+      "sha256": "4058cbb563895ffb8eff042abdd5553a9c1783a345a196786d993e90e5a6e232"
+    }
+  ],
+  "strict_candidate_credentials_empty": true,
+  "hardware_tests": "skipped_at_user_request",
+  "firmware_flashed": false,
+  "ota_uploaded": false,
+  "production_changed": false,
+  "paid_api_used": false
+}

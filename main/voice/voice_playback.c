@@ -21,7 +21,7 @@
 #include "freertos/task.h"
 #include "pcm_buffer.h"
 
-#define PLAYBACK_CAPACITY_BYTES (64U * 1024U)
+#define PLAYBACK_CAPACITY_BYTES (128U * 1024U)
 #define PLAYBACK_CHUNK_SAMPLES 160U
 #define PLAYBACK_PREBUFFER_MS 80U
 #define PLAYBACK_PREBUFFER_WAIT_MS 120U
@@ -44,6 +44,7 @@ static size_t s_local_offset;
 static int64_t s_last_input_us;
 static uint32_t s_completion_generation;
 static esp_err_t s_completion_result;
+static voice_playback_timing_t s_timing;
 static size_t s_high_water;
 static uint32_t s_overflows;
 static audio_pcm_sink_t s_pcm_sink;
@@ -61,6 +62,7 @@ static void complete(uint32_t generation, esp_err_t result)
         pcm_buffer_reset(&s_buffer);
         s_completion_generation = generation;
         s_completion_result = result;
+        s_timing.completed_us = esp_timer_get_time();
     }
     unlock();
 }
@@ -194,6 +196,8 @@ static void playback_task(void *arg)
          * talking 门控会拒绝该迟到块重新驱动嘴型。 */
         lock();
         current = s_active && s_generation == generation;
+        if (audio && current && s_timing.first_output_us == 0)
+            s_timing.first_output_us = esp_timer_get_time();
         unlock();
         if (audio && current && s_pcm_sink != NULL) {
             s_pcm_sink(pcm, bytes / sizeof(int16_t), s_pcm_ctx);
@@ -235,6 +239,7 @@ esp_err_t voice_playback_start(uint32_t rate, bool self_test, uint32_t *generati
     lock();
     if (++s_generation == 0) ++s_generation;
     *generation = s_generation;
+    s_timing = (voice_playback_timing_t){.generation = s_generation};
     pcm_buffer_reset(&s_buffer);
     s_rate = rate;
     s_test = self_test;
@@ -267,6 +272,7 @@ static esp_err_t start_local(uint32_t rate, const uint8_t *pcm, size_t bytes,
     }
     if (++s_generation == 0) ++s_generation;
     *generation = s_generation;
+    s_timing = (voice_playback_timing_t){.generation = s_generation};
     pcm_buffer_reset(&s_buffer);
     s_rate = rate;
     s_test = false;
@@ -334,6 +340,7 @@ esp_err_t voice_playback_write(const uint8_t *pcm, size_t bytes)
         ++s_overflows;
         s_completion_generation = s_generation;
         s_completion_result = ESP_ERR_NO_MEM;
+        s_timing.completed_us = esp_timer_get_time();
         s_active = false;
         pcm_buffer_reset(&s_buffer);
         result = ESP_ERR_NO_MEM;
@@ -401,6 +408,16 @@ bool voice_playback_is_active(void)
     bool active = s_active;
     unlock();
     return active;
+}
+
+bool voice_playback_get_timing(uint32_t generation, voice_playback_timing_t *out)
+{
+    if (!s_task || !out || !generation) return false;
+    lock();
+    bool match = generation == s_timing.generation;
+    if (match) *out = s_timing;
+    unlock();
+    return match;
 }
 
 bool voice_playback_take_completion(uint32_t *generation, esp_err_t *result)

@@ -1,0 +1,764 @@
+--- /dev/null
++++ b/api_server/server/control_protocol.py
+@@ -0,0 +1,139 @@
++"""Firmware-owned round barriers and bounded, acknowledged MQTT control."""
++import asyncio
++import json
++import logging
++import uuid
++
++log = logging.getLogger('vs.control')
++
++
++class SessionControl:
++    def __init__(self, session):
++        self.session = session
++        self.sequence = 0
++        self.confirmed_id = ''
++        self.control_sequence = 0
++        self.delivery_lock = asyncio.Lock()
++        self.control_lock = asyncio.Lock()
++        self.transitioning = False
++        self.pending_round = None
++        self.tasks = set()
++        self.device_ms = None
++        self.clock_at = None
++        self.last_result = None
++
++    def note_clock(self, data):
++        stamp = data.get('device_time_ms')
++        if type(stamp) is int and 0 <= stamp <= 2**53-1:
++            if self.device_ms is None or stamp > self.device_ms:
++                self.device_ms, self.clock_at = stamp, self.session.clock()
++
++    def accept_round_ack(self, data):
++        pending = self.pending_round
++        if not pending or not self.session.accepts(data):
++            return False
++        request, future = pending
++        if type(data.get('interaction_seq')) is not int: return False
++        if any(data.get(k) != request[k] for k in ('request_id','interaction_id','interaction_seq')):
++            return False
++        if type(data.get('accepted')) is not bool or not isinstance(data.get('code'), str):
++            return False
++        stamp = data.get('device_time_ms')
++        if type(stamp) is not int or not 0 <= stamp <= 2**53-1:
++            return False
++        if not future.done(): future.set_result(data)
++        return True
++
++    async def begin(self, engine, purpose, interaction_id=None):
++        s = self.session
++        if not s.owns() or s.engine is not engine or self.sequence >= 0xffffffff:
++            return False
++        self.transitioning = True
++        previous=list(self.tasks)
++        for task in previous: task.cancel()
++        seq = self.sequence + 1
++        iid = interaction_id or 'turn_' + uuid.uuid4().hex
++        request = dict(type='interaction_sync', interaction_id=iid,
++                       interaction_seq=seq, request_id='round_'+uuid.uuid4().hex, purpose=purpose)
++        future = s.loop.create_future()
++        self.pending_round = (request, future)
++        try:
++            if previous: await asyncio.gather(*previous,return_exceptions=True)
++            for _ in range(3):
++                if not s.owns() or s.engine is not engine: return False
++                await s.send_json(request)
++                try:
++                    ack = await asyncio.wait_for(asyncio.shield(future), 2)
++                except asyncio.TimeoutError:
++                    continue
++                if not ack['accepted']: return False
++                if not s.owns() or s.engine is not engine: return False
++                self.sequence = seq
++                self.confirmed_id = iid
++                self.control_sequence = 0
++                self.last_result = None
++                s.interaction_id = iid
++                engine._session_interaction_id = iid
++                self.note_clock(ack)
++                return True
++            # The device may have applied the barrier even when every ACK was lost.
++            # Do not invent a new sequence on this socket or resume the old round.
++            s.adapter.spawn(s.ws.close(code=4410, reason='interaction_sync_timeout'))
++            s.close()
++            return False
++        finally:
++            self.pending_round = None
++            if not future.done(): future.cancel()
++            self.transitioning = False
++
++    def queue(self, engine, text, sequence, interaction_id):
++        s = self.session
++        try:
++            data = json.loads(text)
++        except ValueError:
++            data = dict(type='command', command=text)
++        if not isinstance(data, dict): return
++        if (not s.owns() or s.engine is not engine or self.transitioning or
++                sequence != self.sequence or (interaction_id or '') != (s.interaction_id or '')): return
++        if len(self.tasks) >= 8:
++            log.warning('control queue full device=%s', s.device_id)
++            s.cancel_round(engine, 'control_queue_full')
++            return
++        task = s.loop.create_task(self._execute(engine, data, sequence, interaction_id))
++        self.tasks.add(task)
++        def done(t):
++            self.tasks.discard(t)
++            if not t.cancelled() and t.exception():
++                log.warning('control failed device=%s error=%s',s.device_id,type(t.exception()).__name__)
++        task.add_done_callback(done)
++
++    async def _execute(self, engine, data, sequence, iid):
++        s = self.session
++        async with self.control_lock:
++            def owns():
++                return (s.owns() and s.engine is engine and not self.transitioning and
++                        self.sequence == sequence and (s.interaction_id or '') == (iid or ''))
++            if not owns() or self.device_ms is None: return
++            mqtt = getattr(s.adapter.engine, 'mqtt', None)
++            if mqtt is None: return
++            if self.control_sequence >= 0xffffffff:
++                s.cancel_round(engine,'control_sequence_exhausted');return
++            self.control_sequence += 1
++            deadline = self.device_ms + int(max(0,s.clock()-self.clock_at)*1000) + 10000
++            payload = s.envelope(dict(data, interaction_id=iid or '', interaction_seq=sequence,
++                control_seq=self.control_sequence, request_id=uuid.uuid4().hex, expires_at_ms=deadline))
++            result = await mqtt.send_control(s.device_id,payload,owns)
++            self.last_result = result
++            if result is None and owns():
++                s.cancel_round(engine,'control_ack_timeout')
++                s.adapter.spawn(s.ws.close(code=4411,reason='control_ack_timeout'))
++            elif result is not None and not result.get('accepted') and owns() and result.get('code') in {
++                    'expired','invalid_deadline','out_of_order','request_id_conflict',
++                    'stale_request','invalid_envelope','round_sync_required'}:
++                s.cancel_round(engine,'control_rejected')
++                s.adapter.spawn(s.ws.close(code=4411,reason='control_rejected'))
++
++    def close(self):
++        for task in list(self.tasks): task.cancel()
++        if self.pending_round and not self.pending_round[1].done():
++            self.pending_round[1].cancel()
+--- a/api_server/server/state_sync.py
++++ b/api_server/server/state_sync.py
+@@ -8,6 +8,7 @@
+ import uuid
+ from pathlib import Path
+ from audio_pacer import PlaybackCancelled
++from control_protocol import SessionControl
+ 
+ 
+ class StateWaitTimeout(PlaybackCancelled):
+@@ -60,6 +61,11 @@
+         self.floor = None
+         self.playback_until = 0.
+         self.interaction_id = None
++        self.controls = SessionControl(self)
++        self.busy_until = 0.
++        self.busy_delay = 1.
++        self.busy_blocked = False
++        self.interrupt_pending = None
+         self.noreply_streak = 0
+         self.empty_cooldown_at = None
+         self.sends = {}
+@@ -89,6 +95,7 @@
+             return data
+         return dict(data, device_id=self.device_id, session_id=self.session_id,
+                     connection_id=self.connection_id, epoch=self.generation,
++                    interaction_seq=data.get('interaction_seq', self.controls.sequence),
+                     interaction_id=data.get('interaction_id', self.interaction_id or ''),
+                     request_id=data.get('request_id') or uuid.uuid4().hex)
+ 
+@@ -110,6 +117,9 @@
+             await self.send_json(dict(type='error', code='identity_or_envelope_invalid'))
+             return
+         kind = data.get('type')
++        if self.strict_identity and kind == 'session_sync' and (type(data.get('control_protocol')) is not int or data['control_protocol'] != 1):
++            await self.send_json(dict(type='error',code='control_protocol_required'))
++            return
+         sid = data.get('session_id')
+         if not isinstance(sid, str) or not re.fullmatch(r'[0-9a-fA-F]{32}', sid):
+             return
+@@ -138,6 +148,8 @@
+                 session_id=sid, state_revision=data['state_revision'], accepted=True)
+             if self.strict_identity:
+                 self.initial_ack['request_id'] = data['request_id']
++                self.initial_ack['control_protocol'] = 1
++                self.controls.note_clock(data)
+             if hasattr(self.adapter, 'activate'):
+                 await self.adapter.activate(self)
+             else:
+@@ -153,6 +165,7 @@
+             if type(data.get('protocol_version')) is not int or data['protocol_version'] != 2 or not valid_snapshot(data):
+                 return
+             self.apply(data)
++            if self.strict_identity: self.controls.note_clock(data)
+             await self.send_json(dict(type='device_state_ack', session_id=sid,
+                                      state_revision=data['state_revision'], **({'request_id': data['request_id']} if self.strict_identity else {})))
+         elif kind == 'require_wake_ack':
+@@ -208,6 +221,7 @@
+         return True
+ 
+     def retire(self):
++        self.interrupt_pending = None
+         self.state_changed.set()
+         self.mic_stop = None
+         engine, self.engine = self.engine, None
+@@ -246,6 +260,10 @@
+             return self.engine
+         if not self.ready or not self.owns() or self.state['state'] in PAUSE:
+             return None
++        if self.busy_blocked:
++            if self.clock() < self.busy_until: return None
++            self.busy_blocked = False
++            self.blocked_revision = None
+         if self.blocked_revision is not None:
+             return None  # Wait for a new device turn; never replay timed-out audio.
+         if self.state['state'] == 'S2' and self.state['sub_state'] != 'S2.1':
+@@ -254,8 +272,14 @@
+         lease = resources.try_voice(self.device_id) if resources else None
+         if resources and lease is None:
+             self.blocked_revision = self.state['state_revision']
+-            self.adapter.spawn(self.send_json(dict(type='busy', code='voice_capacity', retry_after_ms=1000)))
++            self.busy_blocked = True
++            self.busy_until = self.clock() + self.busy_delay
++            delay_ms = int(self.busy_delay * 1000)
++            self.busy_delay = min(self.busy_delay * 2, 30.)
++            self.adapter.spawn(self.send_json(dict(type='busy', code='voice_capacity', retry_after_ms=delay_ms,
++                interaction_seq=self.controls.sequence,interaction_id=self.controls.confirmed_id)))
+             return None
++        self.busy_delay = 1.
+         try:
+             if self.engine_factory:
+                 engine = self.engine_factory()
+@@ -307,6 +331,13 @@
+         self.retire()
+ 
+     async def deliver(self, engine, payload):
++        expected_round = self.controls.sequence
++        async with self.controls.delivery_lock:
++            if self.strict_identity and self.controls.sequence != expected_round:
++                return False
++            return await self._deliver_current(engine,payload)
++
++    async def _deliver_current(self, engine, payload):
+         if not self.owns() or not self.ready or self.engine is not engine:
+             return False
+         task = asyncio.current_task()
+@@ -314,6 +345,13 @@
+         epoch = self.generation
+         command = payload.split()[0] if isinstance(payload, str) and payload else None
+         try:
++            if self.strict_identity:
++                if self.interrupt_pending == (engine,epoch): return False
++                wake = json.loads(payload) if command and payload.startswith('{') else None
++                if self.allowed(payload) and (command=='MIC_START' or (wake and wake.get('type')=='wake_detected')):
++                    purpose = 'speech' if command=='MIC_START' else 'wake'
++                    if not await self.controls.begin(engine,purpose,wake.get('interaction_id') if wake else None):
++                        return False
+             if command == 'SPKS' and self.mic_stop is not None and self.mic_stop[:2] == (engine, epoch):
+                 stop_revision = self.mic_stop[2]
+                 timeout = float(getattr(self.adapter, 'cfg', {}).get('voice', {}).get('state_wait_timeout_s', 3))
+@@ -345,14 +383,20 @@
+                          self.session_id, epoch, command, self.state['state'], self.state['sub_state'])
+                 return False
+             stop_revision = self.state['state_revision']
++            interrupt = command=='MIC_START' and self.state['sub_state']=='S2.3'
+             if not self.owns() or self.engine is not engine or self.generation != epoch:
+                 return False
+             if isinstance(payload, str) and payload.startswith('{'):
+                 payload = json.dumps(self.envelope(json.loads(payload)), ensure_ascii=False)
+             timeout = float(getattr(self.adapter, 'cfg', {}).get('wss', {}).get('send_timeout_s', 3))
++            if interrupt:
++                self.interrupt_pending=(engine,epoch)
++                # A fast S2.1 device snapshot retires the old engine. It must
++                # cancel its audio tasks, not the MIC_START causing that snapshot.
++                self.sends.pop(task,None)
+             await asyncio.wait_for(self.ws.send(payload), timeout)
+             if not self.owns() or self.engine is not engine or self.generation != epoch:
+-                return False
++                return bool(interrupt and self.owns() and self.state['sub_state']=='S2.1')
+             if command == 'MIC_STOP' and self.engine is engine and self.generation == epoch:
+                 self.mic_stop = (engine, epoch, stop_revision)
+             if isinstance(payload,str):
+@@ -377,7 +421,9 @@
+         if payload.startswith('{'):
+             return json.loads(payload).get('type') == 'wake_detected' and state in WAIT | {'S1'}
+         command = payload.split()[0]
+-        if command in {'MIC_START', 'MIC_STOP'}:
++        if command == 'MIC_START':
++            return state in {'S1', 'S4'} or self.state['sub_state'] in {'S2.1','S2.3'}
++        if command == 'MIC_STOP':
+             return state in {'S1', 'S4'} or self.state['sub_state'] == 'S2.1'
+         if command in {'SPKS', 'SPKE'}:
+             return wake_ready or state == 'S4' or self.state['sub_state'] in {'S2.2', 'S2.3'}
+@@ -420,6 +466,7 @@
+             self.pending.pop(rid,None)
+ 
+     def close(self):
++        self.controls.close()
+         self.active = self.ready = False
+         self.retire()
+         for item in self.pending.values():
+@@ -434,10 +481,19 @@
+ 
+     def send_vcmd(self, text):
+         s = self.session
++        sequence = s.controls.sequence
++        try:
++            data=json.loads(text)
++            iid=data.get('interaction_id',getattr(self.engine,'_session_interaction_id',None))
++        except (ValueError,AttributeError):
++            iid=getattr(self.engine,'_session_interaction_id',None)
+         def publish():
+             mqtt = getattr(s.adapter.engine, 'mqtt', None)
+             if s.owns() and s.engine is self.engine and mqtt is not None:
++                if s.strict_identity:
++                    s.controls.queue(self.engine,text,sequence,iid)
++                    return
+                 mqtt.send_vcmd(s.device_id, text, session_id=s.session_id,
+-                               interaction_id=s.interaction_id or '', connection_id=s.connection_id, epoch=s.generation,
++                               interaction_id=iid or '', connection_id=s.connection_id, epoch=s.generation,
+                                owner=lambda: s.owns() and s.engine is self.engine)
+         s.loop.call_soon_threadsafe(publish)
+--- a/api_server/server/mqtt_adapter.py
++++ b/api_server/server/mqtt_adapter.py
+@@ -31,6 +31,7 @@
+         self.on_vcmd = on_vcmd or (lambda text: asyncio.sleep(0))
+         self.client = None
+         self.publications = set()
++        self.voice_pending = {}
+         self._ready = asyncio.Event()
+         self._stop = asyncio.Event()
+         self._loop = None          # 主事件循环(引擎线程等跨线程发布须经其调度)
+@@ -99,6 +100,8 @@
+         ]
+ 
+     async def stop(self):
++        for _,future in list(self.voice_pending.values()):
++            if not future.done(): future.set_result(None)
+         self._stop.set()
+         conn_task = getattr(self, "_conn_task", None)
+         if conn_task:
+@@ -133,6 +136,7 @@
+                 device = topic.split('/')[1]
+                 data = self._parse(text, 'vstatus')
+                 if isinstance(data, dict) and data.get('device_id') == device and all(k in data for k in ('type','session_id','interaction_id','request_id')):
++                    self.accept_control_ack(device,data)
+                     self.hub.record(device, 'vstatus', dict(data, text=text))
+             elif topic == t['vstatus'] and not self.cfg.get('mqtt', {}).get('require_auth'):
+                 self._handle_vstatus(text)
+@@ -192,6 +196,8 @@
+     # ---------------- 对外能力 ----------------
+ 
+     def send_vcmd(self, device_id, command_text, *, session_id='', interaction_id='', connection_id='', epoch=0, owner=None):
++        if self.cfg.get('mqtt', {}).get('require_auth'):
++            raise ValueError('strict voice control requires an active DeviceSession round and execution ACK')
+         component(device_id)
+         try:
+             data = json.loads(command_text)
+@@ -209,6 +215,50 @@
+         else:
+             raise ValueError('device control requires authenticated broker')
+ 
++    def accept_control_ack(self, device, data):
++        if data.get('type') != 'control_ack' or data.get('device_id') != device:
++            return False
++        if (not isinstance(data.get('session_id'),str) or not isinstance(data.get('request_id'),str) or
++                type(data.get('interaction_seq')) is not int or type(data.get('control_seq')) is not int): return False
++        key=(device,data.get('session_id'),data.get('request_id'))
++        pending=self.voice_pending.get(key)
++        if pending is None: return False
++        payload,future=pending
++        if any(data.get(k)!=payload[k] for k in ('interaction_id','interaction_seq','control_seq')):
++            return False
++        if type(data.get('accepted')) is not bool or not isinstance(data.get('code'),str): return False
++        if type(data.get('state_revision')) is not int or not 0<=data['state_revision']<=0xffffffff: return False
++        if not future.done(): future.set_result(data)
++        return True
++
++    async def send_control(self, device, payload, owner):
++        component(device)
++        if not self.cfg.get('mqtt',{}).get('require_auth') or payload.get('device_id')!=device:
++            raise ValueError('device-bound MQTT authentication required')
++        encoded=json.dumps(payload,separators=(',',':')).encode('utf-8')
++        if len(encoded)>768: raise ValueError('control payload too large')
++        key=(device,payload['session_id'],payload['request_id'])
++        if key in self.voice_pending or len(self.voice_pending)>=128:
++            raise ValueError('control pending capacity or request conflict')
++        future=asyncio.get_running_loop().create_future()
++        self.voice_pending[key]=(dict(payload),future)
++        try:
++            for _ in range(3):
++                if not owner() or self.client is None or not self._ready.is_set(): return None
++                started=asyncio.get_running_loop().time()
++                try:
++                    # PUBACK is transport confirmation only. The independent
++                    # future is completed exclusively by validated control_ack.
++                    await asyncio.wait_for(self.client.publish(f'voice/{device}/vcmd',encoded,qos=1),1)
++                    remaining=max(.001,2-(asyncio.get_running_loop().time()-started))
++                    return await asyncio.wait_for(asyncio.shield(future),remaining)
++                except (asyncio.TimeoutError,OSError,ConnectionError):
++                    if future.done(): return future.result()
++            return None
++        finally:
++            self.voice_pending.pop(key,None)
++            if not future.done(): future.cancel()
++
+     def send_ota_notify(self, device_id, job_id="job-001"):
+         self._publish(
+             f"{self.cfg['topics']['ota_notify']}/{device_id}",
+--- a/api_server/server/mqtt_pure.py
++++ b/api_server/server/mqtt_pure.py
+@@ -438,9 +438,13 @@
+         ev = asyncio.get_running_loop().create_future()
+         self._pubacks[pid] = ev
+         b0 = (PUBLISH << 4) | 0x02
+-        await self._io.write_packet(b0, enc_str(topic) + struct.pack(">H", pid) + payload)
+-        await asyncio.wait_for(ev, timeout=10)
+-        return pid
++        try:
++            await self._io.write_packet(b0, enc_str(topic) + struct.pack(">H", pid) + payload)
++            await asyncio.wait_for(ev, timeout=10)
++            return pid
++        finally:
++            self._pubacks.pop(pid,None)
++            if not ev.done(): ev.cancel()
+ 
+     async def close(self):
+         self._close_evt.set()
+--- a/api_server/server/wss_adapter.py
++++ b/api_server/server/wss_adapter.py
+@@ -498,6 +498,10 @@
+             if isinstance(data, dict):
+                 from state_sync import DeviceSession, MESSAGE_TYPES
+                 kind = data.get('type')
++                if kind == 'interaction_sync_ack':
++                    session = self.sessions.get(ws)
++                    if session and session.ready: session.controls.accept_round_ack(data)
++                    return file_rx
+                 if kind == 'session_sync' and self.modes.get(ws) != 'v2':
+                     self.modes[ws] = 'v2'
+                     self.sessions[ws] = DeviceSession(self, ws, device_id=self.authenticated.get(ws, 'legacy-single-device'))
+@@ -508,6 +512,8 @@
+                     return file_rx
+                 if kind == 'state_ready' and self.modes.get(ws) == 'v2':
+                     session = self.sessions.get(ws)
++                    if session and session.strict_identity and data.get('interaction_seq')!=session.controls.sequence:
++                        return file_rx
+                     if session and session.ready and session.engine and session.accepts(data):
+                         session.engine.on_state_ready(data)
+                     return file_rx
+--- /dev/null
++++ b/api_server/tests/test_control_protocol.py
+@@ -0,0 +1,208 @@
++"""Control-v1 state/ownership tests. Only I/O and resource boundaries are fake."""
++import asyncio
++import json
++import sys
++import unittest
++from pathlib import Path
++from types import SimpleNamespace
++
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'server'))
++from state_sync import DeviceSession, ScopedMqtt
++from mqtt_adapter import MqttAdapter
++from mqtt_pure import MqttPClient
++
++
++def snapshot(state='S3',rev=1,sub=''):
++    return dict(type='session_sync',protocol_version=2,control_protocol=1,device_time_ms=1000,
++        device_id='device-A',session_id='0'*32,interaction_id='',request_id='sync-1',
++        state=state,sub_state=sub,state_revision=rev,wake_required=state not in {'S1','S2','S4'},
++        companion_remaining_ms=0,reason='test')
++
++
++class Engine:
++    def __init__(self):
++        self._history=[];self._wake_ready_id=None;self._wake_ready_state=''
++        self._session_interaction_id=None
++    def on_client_connected(self,*args):pass
++    def apply_device_state(self,state):pass
++    def set_sink(self,*args):pass
++    def start(self):pass
++    def stop(self):pass
++    def close_session(self):pass
++
++
++class ControlTest(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        self.sent=[];self.clock=100.;self.background=[];self.ack=True
++        async def send(text):
++            data=json.loads(text) if text.startswith('{') else text
++            self.sent.append(data)
++            if isinstance(data,dict) and data['type']=='interaction_sync' and self.ack:
++                self.s.controls.accept_round_ack(dict(data,type='interaction_sync_ack',
++                    accepted=True,code='applied',device_time_ms=1000))
++        async def close(**kw):pass
++        self.ws=SimpleNamespace(send=send,close=close)
++        self.adapter=SimpleNamespace(identity=SimpleNamespace(enabled=True),cfg={},engine=SimpleNamespace(mqtt=None))
++        self.adapter.spawn=lambda coro:self.background.append(asyncio.create_task(coro))
++        self.s=DeviceSession(self.adapter,self.ws,Engine,lambda:self.clock,device_id='device-A')
++        await self.s.handle(snapshot());self.engine=self.s.ensure_engine()
++
++    async def asyncTearDown(self):
++        self.s.close()
++        await asyncio.gather(*self.s.cleanup,*self.background,*list(self.s.controls.tasks),return_exceptions=True)
++
++    async def test_first_wake_then_speech_have_distinct_confirmed_ids(self):
++        self.assertTrue(await self.s.deliver(self.engine,json.dumps(dict(type='wake_detected',interaction_id='wake_1'))))
++        self.assertEqual(self.s.interaction_id,'wake_1')
++        self.assertEqual(self.sent[-1]['interaction_seq'],1)
++        self.s.apply(dict(snapshot('S4',2),type='device_state'))
++        self.assertTrue(await self.s.deliver(self.engine,'MIC_START'))
++        self.assertNotEqual(self.s.interaction_id,'wake_1')
++        self.assertEqual(self.engine._session_interaction_id,self.s.interaction_id)
++        self.assertEqual(self.s.controls.sequence,2)
++        self.assertEqual(self.sent[-1],'MIC_START')
++
++    async def test_late_control_owner_is_rejected_and_current_id_preserved(self):
++        await self.s.controls.begin(self.engine,'wake','wake_1')
++        captured=[]
++        async def control(device,payload,owner):
++            if owner():captured.append(payload)
++            return dict(accepted=True,code='applied')
++        self.adapter.engine.mqtt=SimpleNamespace(send_control=control)
++        ScopedMqtt(self.s,self.engine).send_vcmd(json.dumps(dict(type='intent_result',intent='goodnight',interaction_id='wake_1')))
++        await asyncio.sleep(0);await asyncio.gather(*list(self.s.controls.tasks))
++        self.assertEqual(captured[0]['interaction_id'],'wake_1')
++        self.assertEqual(captured[0]['interaction_seq'],1)
++        self.assertEqual(captured[0]['control_seq'],1)
++        self.assertEqual(captured[0]['expires_at_ms'],11000)
++        await self.s.controls.begin(self.engine,'speech','turn_2')
++        self.s.controls.queue(self.engine,json.dumps(dict(type='intent_result',intent='goodnight')),1,'wake_1')
++        self.assertEqual(len(captured),1)
++
++    async def test_two_hundred_rounds_keep_bounded_pending_state(self):
++        for i in range(200):
++            self.assertTrue(await self.s.controls.begin(self.engine,'speech'))
++            self.assertEqual(self.s.controls.sequence,i+1)
++            self.assertIsNone(self.s.controls.pending_round)
++            self.assertEqual(len(self.s.controls.tasks),0)
++
++    async def test_interrupt_is_allowed_but_old_engine_pcm_cannot_follow(self):
++        self.s.state=dict(snapshot('S2',2,'S2.3'))
++        self.assertTrue(await self.s.deliver(self.engine,'MIC_START'))
++        self.assertFalse(await self.s.deliver(self.engine,b'old-audio'))
++        self.assertFalse(self.s.allowed('MIC_STOP'))
++
++    async def test_busy_retries_fresh_input_after_cooldown_without_fake_revision(self):
++        await self.s.controls.begin(self.engine,'wake','wake-busy')
++        self.s.interaction_id=None  # WAIT clears business history, not the confirmed wire round.
++        self.s.engine=None
++        class Resources:
++            calls=0
++            available=False
++            def try_voice(self,device):
++                self.calls+=1
++                return SimpleNamespace(release=lambda:None) if self.available else None
++        resources=Resources();self.adapter.resources=resources
++        self.assertIsNone(self.s.ensure_engine());await asyncio.sleep(0)
++        await asyncio.sleep(0)
++        self.assertEqual(self.sent[-1]['interaction_id'],'wake-busy')
++        resources.available=True
++        self.assertIsNone(self.s.ensure_engine());self.assertEqual(resources.calls,1)
++        self.clock+=1.1
++        self.assertIsNotNone(self.s.ensure_engine());self.assertEqual(resources.calls,2)
++        self.assertEqual(self.s.state['state_revision'],1)
++
++    async def test_session_file_before_first_wake_uses_empty_string_identity(self):
++        captured=[]
++        async def control(device,payload,owner):
++            self.assertTrue(owner());captured.append(payload)
++            return dict(accepted=True,code='applied')
++        self.adapter.engine.mqtt=SimpleNamespace(send_control=control)
++        ScopedMqtt(self.s,self.engine).send_vcmd('FILE_SEND SD:/sample.wav')
++        await asyncio.sleep(0);await asyncio.gather(*list(self.s.controls.tasks))
++        self.assertEqual(captured[0]['interaction_id'],'')
++        self.assertEqual(captured[0]['interaction_seq'],0)
++        self.assertEqual(captured[0]['control_seq'],1)
++
++    async def test_wrong_round_ack_cannot_open_gate(self):
++        self.ack=False
++        task=asyncio.create_task(self.s.controls.begin(self.engine,'speech'))
++        await asyncio.sleep(0);await asyncio.sleep(0)
++        request=self.s.controls.pending_round[0]
++        self.assertFalse(self.s.controls.accept_round_ack(dict(self.s.envelope(request),
++            type='interaction_sync_ack',interaction_seq=99,accepted=True,code='applied',device_time_ms=1000)))
++        self.assertFalse(task.done())
++        self.s.controls.accept_round_ack(dict(self.s.envelope(request),type='interaction_sync_ack',
++            accepted=True,code='applied',device_time_ms=1000))
++        self.assertTrue(await task)
++
++    async def test_missing_control_capability_is_not_silently_downgraded(self):
++        self.s.close();await asyncio.gather(*self.s.cleanup,return_exceptions=True)
++        self.s=DeviceSession(self.adapter,self.ws,Engine,device_id='device-A')
++        data=snapshot();data.pop('control_protocol');await self.s.handle(data)
++        self.assertFalse(self.s.ready);self.assertEqual(self.sent[-1]['code'],'control_protocol_required')
++
++    async def test_round_timeout_has_three_identical_requests_then_closes_only_session(self):
++        self.ack=False
++        self.assertFalse(await self.s.controls.begin(self.engine,'speech'))
++        requests=[x for x in self.sent if isinstance(x,dict) and x.get('type')=='interaction_sync']
++        self.assertEqual(len(requests),3);self.assertEqual(requests[0],requests[1]);self.assertEqual(requests[1],requests[2])
++        self.assertFalse(self.s.active);self.assertIsNone(self.s.controls.pending_round)
++
++    async def test_stale_control_cannot_cancel_current_round_when_queue_is_full(self):
++        await self.s.controls.begin(self.engine,'speech')
++        self.s.controls.tasks=set(object() for _ in range(8))
++        try:
++            self.s.controls.queue(self.engine,'{"type":"intent_result","intent":"normal"}',0,'old-round')
++            self.assertIs(self.s.engine,self.engine)
++        finally:self.s.controls.tasks.clear()
++
++    async def test_fast_interrupt_snapshot_does_not_cancel_causal_mic_start(self):
++        self.s.state=dict(snapshot('S2',2,'S2.3'))
++        original=self.ws.send
++        async def send(text):
++            await original(text)
++            if text=='MIC_START':self.s.apply(dict(snapshot('S2',3,'S2.1'),type='device_state'))
++        self.ws.send=send
++        self.assertTrue(await self.s.deliver(self.engine,'MIC_START'))
++        self.assertIsNone(self.s.engine)
++
++
++class MqttAckTest(unittest.IsolatedAsyncioTestCase):
++    async def test_lost_execution_ack_retries_original_payload_and_reclaims_pending(self):
++        mqtt=MqttAdapter({'mqtt':{'require_auth':True}},None,None,None);mqtt._ready.set()
++        payload=dict(type='intent_result',intent='normal',device_id='device-A',session_id='0'*32,
++            interaction_id='turn-1',interaction_seq=1,control_seq=1,request_id='lost',expires_at_ms=9000)
++        sent=[]
++        async def publish(topic,data,qos):sent.append(data)
++        mqtt.client=SimpleNamespace(publish=publish)
++        self.assertIsNone(await mqtt.send_control('device-A',payload,lambda:True))
++        self.assertEqual(len(sent),3);self.assertEqual(sent[0],sent[1]);self.assertEqual(sent[1],sent[2])
++        self.assertEqual(mqtt.voice_pending,{})
++
++    async def test_puback_does_not_finish_and_only_matching_execution_ack_does(self):
++        mqtt=MqttAdapter({'mqtt':{'require_auth':True}},None,None,None);mqtt._ready.set()
++        payload=dict(type='intent_result',intent='normal',device_id='device-A',session_id='0'*32,
++            interaction_id='turn-1',interaction_seq=1,control_seq=1,request_id='r1',expires_at_ms=9000)
++        published=[]
++        async def publish(topic,data,qos):published.append(data)
++        mqtt.client=SimpleNamespace(publish=publish)
++        task=asyncio.create_task(mqtt.send_control('device-A',payload,lambda:True))
++        await asyncio.sleep(0);await asyncio.sleep(0);self.assertFalse(task.done())
++        ack=dict(payload,type='control_ack',accepted=True,code='applied',state_revision=2)
++        self.assertFalse(mqtt.accept_control_ack('device-A',dict(ack,control_seq=2)))
++        self.assertFalse(mqtt.accept_control_ack('device-B',ack))
++        self.assertTrue(mqtt.accept_control_ack('device-A',ack));self.assertTrue((await task)['accepted'])
++        self.assertEqual(mqtt.voice_pending,{})
++
++    async def test_cancelled_puback_wait_releases_transport_record(self):
++        client=MqttPClient('test','127.0.0.1',1883)
++        async def write(*args):pass
++        client._io=SimpleNamespace(write_packet=write)
++        task=asyncio.create_task(client.publish('topic',b'{}'))
++        await asyncio.sleep(0);self.assertEqual(len(client._pubacks),1)
++        task.cancel();await asyncio.gather(task,return_exceptions=True)
++        self.assertEqual(client._pubacks,{})
++
++
++if __name__=='__main__':unittest.main()
+--- a/api_server/tests/test_multidevice.py
++++ b/api_server/tests/test_multidevice.py
+@@ -23,7 +23,7 @@
+ 
+ def sync(device, state='S1', rev=1, **kw):
+     data = snapshot(state, rev, kind='session_sync', remaining=600000 if state=='S1' else 0, **kw)
+-    return dict(data, device_id=device, interaction_id='', request_id='sync-1')
++    return dict(data, device_id=device, interaction_id='', request_id='sync-1',control_protocol=1,device_time_ms=1000)
+ 
+ 
+ class MultiDeviceTest(unittest.IsolatedAsyncioTestCase):
+@@ -63,15 +63,24 @@
+         sa,sb = (self.adapter.devices[d] for d in ('A','B'))
+         ea,eb=sa.ensure_engine(),sb.ensure_engine()
+         ea._history.append('only-A');eb._history.append('only-B')
++        for session,engine,socket in ((sa,ea,a),(sb,eb,b)):
++            task=asyncio.create_task(session.controls.begin(engine,'speech'))
++            request=json.loads(await socket.recv())
++            await socket.send(json.dumps(dict(request,type='interaction_sync_ack',accepted=True,
++                                               code='applied',device_time_ms=1000)))
++            self.assertTrue(await task)
+         for s in (sa,sb):
+             s.apply(snapshot('S2',2,sub='S2.2'))
+         await asyncio.gather(sa.deliver(ea,b'AA'),sb.deliver(eb,b'BB'))
+         self.assertEqual(await a.recv(),b'AA');self.assertEqual(await b.recv(),b'BB')
+         self.assertEqual(ea._history,['only-A']);self.assertEqual(eb._history,['only-B'])
+         sent=[]
+-        self.adapter.engine.mqtt=SimpleNamespace(send_vcmd=lambda *a,**kw:sent.append((a,kw)))
+-        ea.mqtt.send_vcmd('{"type":"intent_result"}')
+-        eb.mqtt.send_vcmd('{"type":"intent_result"}')
++        async def send_control(device,payload,owner):
++            if owner():sent.append(((device,),payload))
++            return dict(accepted=True,code='applied')
++        self.adapter.engine.mqtt=SimpleNamespace(send_control=send_control)
++        ea.mqtt.send_vcmd('{"type":"intent_result","intent":"normal"}')
++        eb.mqtt.send_vcmd('{"type":"intent_result","intent":"normal"}')
+         await asyncio.sleep(.02)
+         self.assertEqual({x[0][0] for x in sent},{'A','B'})
+         ea.snapshot=eb.snapshot=lambda:{'status':'ready'}
+@@ -181,6 +190,8 @@
+         if sa.cleanup:await asyncio.gather(*sa.cleanup)
+         self.assertIsNone(sb.ensure_engine())  # Busy revision is not resumed late.
+         sb.apply(snapshot('S2',2,sub='S2.1'))
++        self.assertIsNone(sb.ensure_engine())  # A new state doesn't bypass retry_after.
++        sb.clock=lambda:sb.busy_until+.1
+         self.assertIsNotNone(sb.ensure_engine())
+         await a.send(json.dumps(dict(sync('A'),state_revision=99)))
+         self.assertEqual(json.loads(await a.recv())['code'],'request_id_conflict')
+--- a/api_server/docs/MULTIDEVICE_PROTOCOL.md
++++ b/api_server/docs/MULTIDEVICE_PROTOCOL.md
+@@ -1,4 +1,6 @@
+ # Julia 多设备协议契约（候选实现，固件尚待适配与真机验收）
++
++本修复版本严格入口要求 `control_protocol=1`；轮次屏障、序号/有效期、执行回执和 busy 恢复以 [MULTIDEVICE_CONTROL_V1.md](MULTIDEVICE_CONTROL_V1.md) 为准。旧严格候选固件不可静默降级接入。
+ 
+ 适用入口：`wss.require_device_identity=true`。保留 `protocol_version=2` 的状态快照与原音频协议，增加身份和控制信封。旧固件使用独立进程、端口、MQTT broker 的兼容配置；共享 token 入口只能标记为 `legacy-single-device`，不算多设备身份隔离。
+ 
+--- /dev/null
++++ b/api_server/docs/MULTIDEVICE_CONTROL_V1.md
+@@ -0,0 +1,41 @@
++# 两端修正契约：control_protocol=1
++
++本次同时实现于严格固件和独立云端修复工作区，不改变 protocol_version=2、物理 device_id、随机 session_id、FSM 状态版本或 PCM 格式。旧单设备入口保持独立；严格 session_sync 增加 control_protocol=1，严格云端不对不支持此扩展的设备静默降级。
++
++## 轮次确认
++
++云端在每次 wake_detected 和实际 MIC_START 前，发送 WSS `interaction_sync`，携带原五项身份字段及从 1 递增的 interaction_seq。interaction_id 是该轮唯一 ID；不是引擎 epoch。固件接受恰好下一序号后使旧控制失效，回 `interaction_sync_ack`（accepted、code、interaction_seq、device_time_ms）。重复同序号同 ID 同 request 返回同一 ACK，不重复清理；旧序号或不同内容拒绝。此步骤不伪造 FSM 状态，真正状态迁移仍由后续 wake_detected/MIC_START 驱动。
++
++云端最多 3 次、间隔 2 秒等待匹配 ACK，再发送该轮业务；失败关闭本连接，重新同步。终止提示期间固件拒绝开启新轮次，保留晚安/拒绝语义。连接任务和发送锁共同保证屏障之前的旧音频不能越过新轮次；裸 PCM 不增加帧头。
++
++同一个 sequence/interaction_id 改 request_id 或 purpose 返回 request_id_conflict。state_ready 回显 interaction_seq；这仍是唤醒状态回执，不是播放完成。
++
++## MQTT 控制和执行结果
++
++控制除原身份字段外必须携带 interaction_seq、control_seq 和 expires_at_ms。control_seq 在每个 interaction_seq 内从 1 递增，云端串行发送并等待上一项的最终执行回执；最多 8 项排队，禁止跨轮重发。
++
++首次唤醒前的会话范围 FILE_SEND 使用 interaction_seq=0、interaction_id=""，仍要求已完成 session_sync 和有效的设备时钟锚点；它不授予语音交互资格。MIC_START/意图控制仍须完成语音轮次确认。
++
++固件在 WSS owner 实际执行时检查身份、轮次、序号和有效期。结果为 `type=control_ack`，回显五个身份字段与 interaction_seq/control_seq，含 accepted 布尔、code、state_revision。通过本设备 vstatus 发布；MQTT PUBACK 不代替此回执。accepted 表示业务命令已经应用（例如已启动本地终止提示），不表示声音已经播完；真实完成仍由既有播放排空/FSM 快照体现。
++
++固件保存最近 8 项执行结果和业务指纹。重复序号/ID/内容返回原结果；同序号或仍在缓存内的同 ID 改内容返回 request_id_conflict。淘汰记录仍受 control_seq 高水位保护：旧序号返回 stale_request，永远不重新执行。新轮次确认后回收缓存，旧轮消息先被轮次校验拒绝。不承诺无限期保存历史结果，也不靠强制重连腾槽。
++
++超时最多重发原封装 3 次、间隔 2 秒；不改 request_id、序号、内容或有效期。超时结果未知，云端取消该轮而非猜测成功。格式错误/错误设备或会话只脱敏诊断；可关联的拒绝结果使用 expired、stale_interaction、out_of_order、unsupported_operation、state_unavailable、terminal_reply、request_id_conflict、stale_request 等 code。
++
++结果指纹使用 cJSON 紧凑序列化后的完整封装，属性顺序也需保持不变。发送端一次序列化后原样重发。缓存回收后，以 (session_id, interaction_seq, control_seq) 的高水位拒绝旧请求，云端始终生成新的 UUID request_id；不允许通过改序号复用旧 request_id。旧的独立 MQTT 管理 CLI 不能绕过活动 WSS 轮次发严格控制；需通过 DeviceSession 调度。
++
++## 时钟与有效期
++
++device_time_ms/expires_at_ms 使用固件 esp_timer 启动后单调毫秒，不使用 UTC。云端以最近匹配轮次 ACK 的 device_time_ms 加自身单调经过时长推算保守期限；网络传输延迟会缩短可用时间，不能用服务器墙钟直接减固件时间。单条有效期上限 10 秒；已缓存的重复请求先返回原结果，不能把已经执行的请求重新判为未执行。没有本连接的时钟锚点时不发控制。
++
++## busy 与恢复
++
++云端引擎容量不足返回 busy/voice_capacity 和有界 retry_after_ms（1～30 秒退避）。冷却期间只丢弃当时收到的 PCM，不积压重放；到期可用新的实时输入重新申请资源，即使 S3 revision 未变。其它业务取消原因仍保留原轮次失效门槛。
++
++固件收到匹配 busy 时，取消该轮控制及对话声音，丢弃未发送采音，暂停至冷却到期；活动 S1/S2/S4 通过新增真实 EVT_VOICE_BUSY 返回 S3。S3/S5/S6 保持原状态，尤其不点亮休眠设备。到期从空上行缓冲恢复实时采音，不恢复旧轮次或伪造 state_revision。忙碌诊断与网络断开分开处理。
++
++busy 必须匹配当前 interaction_seq/interaction_id；迟到旧轮 busy 无效，终止提示期间不取消本地晚安/拒绝。同步/屏障/执行 ACK 超时后重连最少等待 30 秒；4001 会话替换、4404 路径错误和认证拒绝最少 60 秒。普通网络重连仍保留原间隔和快速离线检测。
++
++## 不变项与发布门槛
++
++保留 16kHz PCM1 上行、SPKS 16/24kHz 下行、播放预缓冲、SPKE 软件/DMA 排空、快速断线检测及唯一任务所有权。先完成两端自动化和固件构建，再审阅双设备步骤；本次不烧录在用设备、不部署或切换环境。

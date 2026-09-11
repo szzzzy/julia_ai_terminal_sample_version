@@ -13,7 +13,6 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "julia_charge_detector.h"
 #include "sdkconfig.h"
 
 #define JULIA_BAT_ADC_UNIT        ADC_UNIT_1
@@ -44,24 +43,6 @@
 #ifndef CONFIG_JULIA_BATTERY_LOW_EXIT_PERCENT
 #define CONFIG_JULIA_BATTERY_LOW_EXIT_PERCENT 25
 #endif
-#ifndef CONFIG_JULIA_BATTERY_CHARGE_RISE_MV
-#define CONFIG_JULIA_BATTERY_CHARGE_RISE_MV 20
-#endif
-#ifndef CONFIG_JULIA_BATTERY_CHARGE_EXIT_DROP_MV
-#define CONFIG_JULIA_BATTERY_CHARGE_EXIT_DROP_MV 20
-#endif
-#ifndef CONFIG_JULIA_BATTERY_CHARGE_CONFIRM_SAMPLES
-#define CONFIG_JULIA_BATTERY_CHARGE_CONFIRM_SAMPLES 2
-#endif
-#ifndef CONFIG_JULIA_BATTERY_CHARGE_EVIDENCE_TIMEOUT_SECONDS
-#define CONFIG_JULIA_BATTERY_CHARGE_EVIDENCE_TIMEOUT_SECONDS 60
-#endif
-
-#define CHARGE_EVIDENCE_TIMEOUT_SAMPLES \
-    ((CONFIG_JULIA_BATTERY_CHARGE_EVIDENCE_TIMEOUT_SECONDS + \
-      CONFIG_JULIA_BATTERY_MONITOR_INTERVAL_SECONDS - 1U) / \
-     CONFIG_JULIA_BATTERY_MONITOR_INTERVAL_SECONDS)
-
 static const char *TAG = "JULIA_BATTERY";
 static adc_oneshot_unit_handle_t s_adc;
 static adc_cali_handle_t s_cali;
@@ -71,7 +52,6 @@ static julia_battery_status_t s_status;
 static julia_battery_update_cb_t s_callback;
 static void *s_callback_ctx;
 static bool s_low_latched;
-static julia_charge_detector_t s_charge_detector;
 
 typedef struct {
     uint16_t mv;
@@ -82,7 +62,7 @@ typedef struct {
  * UI 提示和低电量趋势，不作为容量计量或保护阈值。 */
 static const battery_curve_point_t s_curve[] = {
     {3400, 0}, {3550, 15}, {3650, 30}, {3750, 50},
-    {3850, 65}, {3950, 80}, {4000, 100},
+    {3850, 65}, {3950, 80}, {4100, 90}, {4200, 100},
 };
 
 static uint8_t percent_for_voltage(uint16_t mv)
@@ -105,7 +85,6 @@ static const char *battery_state_name(julia_battery_state_t state)
     switch (state) {
     case JULIA_BATTERY_STATE_NORMAL: return "NORMAL";
     case JULIA_BATTERY_STATE_LOW: return "LOW";
-    case JULIA_BATTERY_STATE_CHARGING: return "CHARGING";
     case JULIA_BATTERY_STATE_UNKNOWN:
     default: return "UNKNOWN";
     }
@@ -146,13 +125,12 @@ static esp_err_t read_voltage(uint16_t *voltage_mv, uint16_t *minimum_mv,
     return ESP_OK;
 }
 
-static julia_battery_status_t update_status(uint16_t raw_mv, bool infer_charging)
+static julia_battery_status_t update_status(uint16_t raw_mv)
 {
     julia_battery_status_t snapshot;
     bool present = raw_mv >= CONFIG_JULIA_BATTERY_PRESENT_MIN_MV &&
                    raw_mv <= CONFIG_JULIA_BATTERY_PRESENT_MAX_MV;
     portENTER_CRITICAL(&s_status_lock);
-    bool previous_present = s_status.valid && s_status.present;
     uint16_t display_mv = raw_mv;
     if (present && s_status.valid && s_status.present) {
         display_mv = (uint16_t)(((uint32_t)s_status.voltage_mv * 3U + raw_mv + 2U) / 4U);
@@ -164,29 +142,15 @@ static julia_battery_status_t update_status(uint16_t raw_mv, bool infer_charging
 
     if (!present) {
         s_low_latched = false;
-        julia_charge_detector_reset(&s_charge_detector);
         s_status.state = JULIA_BATTERY_STATE_UNKNOWN;
     } else {
-        bool charging = false;
-        if (infer_charging && previous_present) {
-            charging = julia_charge_detector_update(
-                &s_charge_detector, true, raw_mv,
-                CONFIG_JULIA_BATTERY_CHARGE_RISE_MV,
-                CONFIG_JULIA_BATTERY_CHARGE_EXIT_DROP_MV,
-                CONFIG_JULIA_BATTERY_CHARGE_CONFIRM_SAMPLES,
-                CHARGE_EVIDENCE_TIMEOUT_SAMPLES);
-        } else {
-            julia_charge_detector_reset(&s_charge_detector);
-        }
-
         if (s_status.percent <= CONFIG_JULIA_BATTERY_LOW_ENTER_PERCENT) {
             s_low_latched = true;
         } else if (s_status.percent >= CONFIG_JULIA_BATTERY_LOW_EXIT_PERCENT) {
             s_low_latched = false;
         }
-        s_status.state = charging ? JULIA_BATTERY_STATE_CHARGING :
-                         s_low_latched ? JULIA_BATTERY_STATE_LOW :
-                         JULIA_BATTERY_STATE_NORMAL;
+        s_status.state = s_low_latched ? JULIA_BATTERY_STATE_LOW :
+                                         JULIA_BATTERY_STATE_NORMAL;
     }
     snapshot = s_status;
     portEXIT_CRITICAL(&s_status_lock);
@@ -253,7 +217,7 @@ void julia_battery_log_stage(const char *stage)
         ESP_LOGW(TAG, "stage=%s no valid ADC samples", stage ? stage : "unknown");
         return;
     }
-    julia_battery_status_t status = update_status(voltage_mv, false);
+    julia_battery_status_t status = update_status(voltage_mv);
     ESP_LOGI(TAG, "stage=%s vbat=%umV range=%u..%umV percent=%u present=%u state=%s",
              stage ? stage : "unknown",
              status.voltage_mv, minimum_mv, maximum_mv,
@@ -271,7 +235,7 @@ static void battery_monitor_task(void *arg)
     for (;;) {
         uint16_t voltage_mv = 0;
         if (read_voltage(&voltage_mv, NULL, NULL) == ESP_OK) {
-            julia_battery_status_t status = update_status(voltage_mv, true);
+            julia_battery_status_t status = update_status(voltage_mv);
             ESP_LOGI(TAG, "monitor vbat=%umV percent=%u present=%u state=%s",
                      status.voltage_mv, status.percent, status.present ? 1U : 0U,
                      battery_state_name(status.state));

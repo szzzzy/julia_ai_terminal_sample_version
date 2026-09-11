@@ -10,7 +10,6 @@ typedef enum {
     JULIA_BATTERY_STATE_UNKNOWN = 0,
     JULIA_BATTERY_STATE_NORMAL,
     JULIA_BATTERY_STATE_LOW,
-    JULIA_BATTERY_STATE_CHARGING,
 } julia_battery_state_t;
 
 typedef struct {
@@ -18,7 +17,7 @@ typedef struct {
     bool present;        /**< BAT 节点位于合理单节锂电池电压范围。 */
     uint16_t voltage_mv; /**< 滤波后的电池端估算电压。 */
     uint8_t percent;     /**< 基于带载端电压曲线估算的剩余百分比。 */
-    julia_battery_state_t state; /**< NORMAL／LOW／CHARGING 正交状态。 */
+    julia_battery_state_t state; /**< NORMAL／LOW 正交提示状态。 */
 } julia_battery_status_t;
 
 typedef void (*julia_battery_update_cb_t)(const julia_battery_status_t *status,

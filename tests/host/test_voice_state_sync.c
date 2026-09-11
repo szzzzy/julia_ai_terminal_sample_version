@@ -1,3 +1,4 @@
+#undef NDEBUG
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -10,6 +11,20 @@ static julia_fsm_snapshot_t snapshot;
 static char sent[512];
 static unsigned sends, failures, connected, requests, random_seed;
 static bool send_fails;
+static bool identity_fails;
+esp_err_t mqtt_comm_publish_voice_status(const char *device, const char *data, size_t len)
+{
+    assert(!strcmp(device,"esp-001122334455"));
+    assert(len < 512 && strstr(data,"device_state"));
+    return ESP_OK;
+}
+esp_err_t native_ota_get_device_id(char *id, size_t size)
+{
+    if (identity_fails) return ESP_FAIL;
+    assert(size >= sizeof("esp-001122334455"));
+    strcpy(id, "esp-001122334455");
+    return ESP_OK;
+}
 int64_t esp_timer_get_time(void) { return now; }
 void esp_fill_random(void *buf, size_t len) { memset(buf, ++random_seed, len); }
 void julia_fsm_runtime_get_snapshot(julia_fsm_snapshot_t *out) { *out = snapshot; }
@@ -21,6 +36,7 @@ esp_err_t wss_transport_send_now(uint8_t op, const uint8_t *data, size_t len)
     return send_fails ? ESP_FAIL : ESP_OK;
 }
 void wss_transport_fail_session(void) { ++failures; }
+void wss_transport_defer_retry(unsigned seconds) { assert(seconds==30 || seconds==60); }
 esp_err_t julia_fsm_runtime_post_sync(fsm_event_t event)
 {
     assert(event == EVT_WSS_CONNECTED); ++connected; return ESP_OK;
@@ -55,14 +71,14 @@ static void session_id(char *id)
 }
 static void ack(const char *type,const char *id,uint32_t revision)
 {
-    char json[256];
-    snprintf(json,sizeof(json),"{\"type\":\"%s\",\"session_id\":\"%s\",\"protocol_version\":2,\"state_revision\":%u,\"accepted\":true}",type,id,(unsigned)revision);
+    char json[384];
+    snprintf(json,sizeof(json),"{\"type\":\"%s\",\"device_id\":\"esp-001122334455\",\"request_id\":\"%s-%u\",\"session_id\":\"%s\",\"protocol_version\":2,\"control_protocol\":1,\"state_revision\":%u,\"accepted\":true}",type,strcmp(type,"session_sync_ack")==0?"session_sync":"device_state",(unsigned)revision,id,(unsigned)revision);
     receive(json);
 }
 static void require(const char *id,const char *request,uint32_t revision)
 {
-    char json[256];
-    snprintf(json,sizeof(json),"{\"type\":\"require_wake\",\"session_id\":\"%s\",\"request_id\":\"%s\",\"state_revision\":%u}",id,request,(unsigned)revision);
+    char json[384];
+    snprintf(json,sizeof(json),"{\"type\":\"require_wake\",\"device_id\":\"esp-001122334455\",\"interaction_id\":\"\",\"session_id\":\"%s\",\"request_id\":\"%s\",\"state_revision\":%u}",id,request,(unsigned)revision);
     receive(json);
 }
 int main(void)
@@ -70,7 +86,15 @@ int main(void)
     snapshot=(julia_fsm_snapshot_t){.main_state=JULIA_MAIN_STATE_S3_STANDBY,.revision=1};
     voice_state_sync_start(); assert(!voice_state_sync_is_ready() && sends==1);
     assert(strstr(sent,"session_sync") && strstr(sent,"\"wake_required\":true"));
+    assert(strstr(sent,"\"device_id\":\"esp-001122334455\""));
     char id[33]; session_id(id);
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    char wrong[384];
+    snprintf(wrong,sizeof(wrong),"{\"type\":\"session_sync_ack\",\"device_id\":\"esp-556677889900\",\"session_id\":\"%s\",\"request_id\":\"session_sync-1\",\"protocol_version\":2,\"control_protocol\":1,\"state_revision\":1,\"accepted\":true}",id);
+    receive(wrong);assert(!voice_state_sync_is_ready());
+    snprintf(wrong,sizeof(wrong),"{\"type\":\"session_sync_ack\",\"device_id\":\"esp-001122334455\",\"session_id\":\"%s\",\"request_id\":\"old-request\",\"protocol_version\":2,\"control_protocol\":1,\"state_revision\":1,\"accepted\":true}",id);
+    receive(wrong);assert(!voice_state_sync_is_ready());
+#endif
     ack("session_sync_ack","old-session",1); assert(!voice_state_sync_is_ready());
     ack("session_sync_ack",id,2); assert(!voice_state_sync_is_ready());
     ack("session_sync_ack",id,1); assert(voice_state_sync_is_ready() && connected==1);
@@ -101,6 +125,7 @@ int main(void)
     count=requests;require(id,"idle-2",2);assert(requests==count && strstr(sent,"stale_state"));
     voice_state_sync_end();assert(!voice_state_sync_is_ready());
     voice_state_sync_start();char next[33];session_id(next);assert(strcmp(id,next));
+    assert(strstr(sent,"\"device_id\":\"esp-001122334455\""));
     count=sends;require(id,"late",7);assert(sends==count);
     now+=2000000;voice_state_sync_poll();now+=2000000;voice_state_sync_poll();
     assert(failures==0);now+=2000000;voice_state_sync_poll();assert(failures==1 && !voice_state_sync_is_ready());
@@ -110,6 +135,8 @@ int main(void)
     now+=2000000;voice_state_sync_poll();now+=2000000;voice_state_sync_poll();now+=2000000;voice_state_sync_poll();
     assert(failures==2 && !voice_state_sync_is_ready());
     send_fails=true;voice_state_sync_start();assert(failures==3 && !voice_state_sync_is_ready());
+    send_fails=false;identity_fails=true;count=sends;
+    voice_state_sync_start();assert(failures==4 && sends==count && !voice_state_sync_is_ready());
     puts("PASS: v2 handshake, revisions, state ACKs, stale sessions, bounded retries and idempotent require_wake");
     return 0;
 }

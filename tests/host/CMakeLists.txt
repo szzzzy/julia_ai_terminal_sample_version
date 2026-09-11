@@ -1,18 +1,37 @@
 cmake_minimum_required(VERSION 3.16)
 project(julia_host_tests C)
 enable_testing()
+add_executable(test_wss_auth_policy test_wss_auth_policy.c)
+target_include_directories(test_wss_auth_policy PRIVATE ../../main/voice)
+add_test(NAME wss_auth_policy COMMAND test_wss_auth_policy)
 find_path(CJSON_DIR cJSON.h
     HINTS "${IDF_PATH}/components/json/cJSON" "$ENV{IDF_PATH}/components/json/cJSON")
 if(CJSON_DIR)
+    add_executable(test_voice_control_guard test_voice_control_guard.c
+        ../../main/voice/voice_control_guard.c "${CJSON_DIR}/cJSON.c")
+    target_include_directories(test_voice_control_guard PRIVATE ../../main/voice "${CJSON_DIR}")
+    if(NOT WIN32)
+        target_link_libraries(test_voice_control_guard PRIVATE m)
+    endif()
+    add_test(NAME voice_control_guard COMMAND test_voice_control_guard)
     add_executable(test_voice_state_sync test_voice_state_sync.c
         ../../main/voice/voice_state_sync.c ../../main/fsm/julia_fsm.c "${CJSON_DIR}/cJSON.c")
     target_include_directories(test_voice_state_sync PRIVATE state_sync_stubs stubs
-        ../../main/voice ../../main/fsm "${CJSON_DIR}")
+        ../../main/voice ../../main/fsm ../../main/ota "${CJSON_DIR}")
     set_property(TARGET test_voice_state_sync PROPERTY C_STANDARD 99)
     if(NOT WIN32)
         target_link_libraries(test_voice_state_sync PRIVATE m)
     endif()
     add_test(NAME voice_state_sync COMMAND test_voice_state_sync)
+    add_executable(test_voice_state_sync_strict test_voice_state_sync.c
+        ../../main/voice/voice_state_sync.c ../../main/fsm/julia_fsm.c "${CJSON_DIR}/cJSON.c")
+    target_compile_definitions(test_voice_state_sync_strict PRIVATE CONFIG_JULIA_MULTI_DEVICE_ENABLE=1)
+    target_include_directories(test_voice_state_sync_strict PRIVATE state_sync_stubs stubs
+        ../../main/voice ../../main/fsm ../../main/ota "${CJSON_DIR}")
+    if(NOT WIN32)
+        target_link_libraries(test_voice_state_sync_strict PRIVATE m)
+    endif()
+    add_test(NAME voice_state_sync_strict COMMAND test_voice_state_sync_strict)
 else()
     message(STATUS "Set IDF_PATH to include the cloud state sync regression test")
 endif()
@@ -30,7 +49,23 @@ if(NOT WIN32)
 endif()
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
+set(JULIA_CLOUD_SOURCE_DIR "" CACHE PATH "Cloud api_server source for offline firmware/cloud interop")
 if(Python3_Interpreter_FOUND)
+    if(CJSON_DIR)
+        add_test(NAME multidevice_routing COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/test_multidevice_routing.py"
+            --cc "${CMAKE_C_COMPILER}" --cjson "${CJSON_DIR}"
+            --out "${CMAKE_CURRENT_BINARY_DIR}/multidevice-routing")
+        if(JULIA_CLOUD_SOURCE_DIR)
+            if(NOT EXISTS "${JULIA_CLOUD_SOURCE_DIR}/server/control_protocol.py")
+                message(FATAL_ERROR "JULIA_CLOUD_SOURCE_DIR must contain the control-v1 cloud server")
+            endif()
+            add_test(NAME cross_control_protocol COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/test_cross_control_protocol.py"
+                --cloud-root "${JULIA_CLOUD_SOURCE_DIR}" --cc "${CMAKE_C_COMPILER}"
+                --cjson "${CJSON_DIR}" --out "${CMAKE_CURRENT_BINARY_DIR}/cross-control")
+        endif()
+    endif()
     add_test(NAME fault_restart_prompt
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_fault_restart_prompt.py"
             --cc "${CMAKE_C_COMPILER}" --out "${CMAKE_CURRENT_BINARY_DIR}/fault-prompt")
@@ -88,12 +123,6 @@ target_compile_definitions(test_display_ownership PRIVATE
     REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set_property(TARGET test_display_ownership PROPERTY C_STANDARD 99)
 add_test(NAME display_ownership COMMAND test_display_ownership)
-
-add_executable(test_charge_detector test_charge_detector.c
-    ../../main/hardware/julia_charge_detector.c)
-target_include_directories(test_charge_detector PRIVATE ../../main/hardware)
-set_property(TARGET test_charge_detector PROPERTY C_STANDARD 99)
-add_test(NAME charge_detector COMMAND test_charge_detector)
 
 add_executable(test_rtc_calendar test_rtc_calendar.c ../../main/hardware/rtc_calendar.c)
 target_include_directories(test_rtc_calendar PRIVATE stubs ../../main/hardware)

@@ -99,10 +99,8 @@ static julia_avatar_dialog_phase_t s_dialog_phase = JULIA_AVATAR_DIALOG_IDLE;
 static bool s_dozing;
 static bool s_offline;
 static bool s_battery_present;
-static bool s_battery_charging;
 static bool s_battery_low;
 static uint8_t s_battery_percent;
-static uint16_t s_battery_voltage_mv;
 /* Last phase successfully assigned to the LVGL base image.  It is separate
  * from the requested state so a lock timeout can be retried safely. */
 static julia_avatar_dialog_phase_t s_applied_dialog_phase =
@@ -111,21 +109,23 @@ static portMUX_TYPE s_phase_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_boot_sequence_played;
 static char s_status_text[32] = "S0 BOOT";
 
-static void battery_label_apply(bool present, bool charging, bool low,
-                                uint8_t percent)
+static uint8_t battery_display_percent(uint8_t percent)
+{
+    if (percent >= 98U) return 100U;
+    return (uint8_t)(((unsigned)percent + 2U) / 5U * 5U);
+}
+
+static void battery_label_apply(bool present, bool low, uint8_t percent)
 {
     if (s_battery_label == NULL) return;
     if (!present) {
         lv_obj_add_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
     } else {
         char text[16];
-        snprintf(text, sizeof(text), charging ? "CHG %u%%" :
-                                             low ? "LOW %u%%" : "BAT %u%%",
-                 percent);
+        snprintf(text, sizeof(text), low ? "LOW %u%%" : "BAT %u%%", percent);
         lv_label_set_text(s_battery_label, text);
         lv_obj_set_style_text_color(
             s_battery_label,
-            charging ? lv_palette_main(LV_PALETTE_GREEN) :
             low ? lv_palette_main(LV_PALETTE_RED) : lv_color_black(),
             LV_PART_MAIN);
         lv_obj_clear_flag(s_battery_label, LV_OBJ_FLAG_HIDDEN);
@@ -192,20 +192,18 @@ void julia_avatar_set_offline(bool offline)
     lvgl_port_unlock();
 }
 
-void julia_avatar_set_battery_status(bool present, bool charging, bool low,
-                                     uint8_t percent, uint16_t voltage_mv)
+void julia_avatar_set_battery_status(bool present, bool low, uint8_t percent)
 {
     if (percent > 100U) percent = 100U;
+    percent = battery_display_percent(percent);
     portENTER_CRITICAL(&s_phase_lock);
     s_battery_present = present;
-    s_battery_charging = charging;
     s_battery_low = low;
     s_battery_percent = percent;
-    s_battery_voltage_mv = voltage_mv;
     portEXIT_CRITICAL(&s_phase_lock);
 
     if (s_battery_label == NULL || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;
-    battery_label_apply(present, charging, low, percent);
+    battery_label_apply(present, low, percent);
     lvgl_port_unlock();
 }
 
@@ -700,20 +698,14 @@ esp_err_t julia_avatar_init(void)
     lv_obj_set_style_bg_opa(s_battery_label, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_clear_flag(s_battery_label, LV_OBJ_FLAG_SCROLLABLE);
     bool battery_present;
-    bool battery_charging;
     bool battery_low;
     uint8_t battery_percent;
-    uint16_t battery_voltage_mv;
     portENTER_CRITICAL(&s_phase_lock);
     battery_present = s_battery_present;
-    battery_charging = s_battery_charging;
     battery_low = s_battery_low;
     battery_percent = s_battery_percent;
-    battery_voltage_mv = s_battery_voltage_mv;
     portEXIT_CRITICAL(&s_phase_lock);
-    battery_label_apply(battery_present, battery_charging, battery_low,
-                        battery_percent);
-    (void)battery_voltage_mv;
+    battery_label_apply(battery_present, battery_low, battery_percent);
     lv_obj_invalidate(screen);
     lvgl_port_unlock();
 

@@ -39,6 +39,7 @@ static const char *const s_s7_sub_state_names[JULIA_S7_SUB_STATE_COUNT] = {
 };
 
 static const char *const s_event_names[EVT_COUNT] = {
+    [EVT_VOICE_BUSY] = "EVT_VOICE_BUSY",
     [EVT_VOICE_SESSION_RESET] = "EVT_VOICE_SESSION_RESET",
     [EVT_REQUIRE_WAKE] = "EVT_REQUIRE_WAKE",
     [EVT_NONE] = "EVT_NONE",
@@ -373,7 +374,7 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
     julia_s2_sub_state_t target_s2_sub_state = JULIA_S2_SUB_STATE_COUNT;
     julia_s7_sub_state_t target_s7_sub_state = JULIA_S7_SUB_STATE_NONE;
 
-    if (event == EVT_VOICE_SESSION_RESET &&
+    if ((event == EVT_VOICE_SESSION_RESET || event == EVT_VOICE_BUSY) &&
         (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
          fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG ||
          fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION)) {

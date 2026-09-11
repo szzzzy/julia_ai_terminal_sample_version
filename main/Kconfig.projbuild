@@ -111,34 +111,6 @@ menu "Example Configuration"
         range JULIA_BATTERY_LOW_ENTER_PERCENT 80
         default 25
 
-    config JULIA_BATTERY_CHARGE_RISE_MV
-        int "Voltage rise used to infer charging (mV)"
-        depends on JULIA_BATTERY_DIAGNOSTICS
-        range 10 300
-        default 20
-
-    config JULIA_BATTERY_CHARGE_EXIT_DROP_MV
-        int "Voltage drop used to infer charger removal (mV)"
-        depends on JULIA_BATTERY_DIAGNOSTICS
-        range 20 500
-        default 20
-
-    config JULIA_BATTERY_CHARGE_CONFIRM_SAMPLES
-        int "Consecutive samples required for charge-state changes"
-        depends on JULIA_BATTERY_DIAGNOSTICS
-        range 2 10
-        default 2
-
-    config JULIA_BATTERY_CHARGE_EVIDENCE_TIMEOUT_SECONDS
-        int "Stop showing charging without fresh rise evidence (seconds)"
-        depends on JULIA_BATTERY_DIAGNOSTICS
-        range 20 3600
-        default 60
-        help
-            STAT and USB VBUS are not connected to a readable GPIO. Stop the
-            inferred charging indication when voltage has not continued to rise
-            for this long, so unplugging cannot leave CHG latched indefinitely.
-
     config OTA_PRODUCT_ID
         string "OTA product identifier"
         default "native-ota-device"
@@ -633,6 +605,17 @@ menu "Example Configuration"
                 revision-checked require_wake requests on the same WSS socket.
                 Deploy the matching cloud protocol before using this firmware.
                 Disable only to connect to a legacy server without protocol v2.
+
+        config JULIA_MULTI_DEVICE_ENABLE
+            bool "Enable device-scoped voice control (staged cloud rollout)"
+            depends on JULIA_CLOUD_STATE_SYNC_ENABLE
+            default n
+            help
+                Use voice/{stable-device-id}/vcmd only, require explicit device
+                credentials without legacy fallback, and validate the JSON
+                control envelope on the WSS owner. Enable after cloud contract
+                verification; see docs/MULTIDEVICE_CONTRACT.md. This does not
+                add identifiers to legacy binary audio or define new commands.
 
         config JULIA_DIALOG_LISTEN_TIMEOUT_SECONDS
             int "S4/S2.1 listening timeout (seconds)"

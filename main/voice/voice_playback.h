@@ -12,14 +12,14 @@
  */
 
 /**
- * 创建唯一播放 Task 和 64 KiB PSRAM 缓冲。pcm_sink 在播放 Task 中同步调用，收到
+ * 创建唯一播放 Task 和 128 KiB PSRAM 缓冲。pcm_sink 在播放 Task 中同步调用，收到
  * 的 PCM 只在回调期间有效；回调不得阻塞或反向调用播放控制接口。
  */
 esp_err_t voice_playback_init(audio_pcm_sink_t pcm_sink, void *ctx);
 /** 开始网络回答或异步自检；新代次会取消旧播放，generation 用于隔离迟到结果。 */
 esp_err_t voice_playback_start(uint32_t rate, bool self_test, uint32_t *generation);
 /**
- * 播放只读的本地 PCM16，并使当前网络播放代次失效。数据不复制到 64 KiB 网络
+ * 播放只读的本地 PCM16，并使当前网络播放代次失效。数据不复制到 128 KiB 网络
  * 缓冲，因此 pcm 必须保持有效直至完成或取消；仅适合固件内嵌等静态资源。
  * bytes 必须为非零偶数，rate 只接受 16/24 kHz。
  */
@@ -54,3 +54,12 @@ bool voice_playback_is_active(void);
  * 拒绝旧代次，且只能指定一个结果消费者。
  */
 bool voice_playback_take_completion(uint32_t *generation, esp_err_t *result);
+
+/* Fixed-slot diagnostics, esp_timer_get_time() monotonic microseconds since boot.
+ * first_output_us records successful I2S submission, not acoustic measurement. */
+typedef struct {
+    uint32_t generation;
+    int64_t first_output_us;
+    int64_t completed_us;
+} voice_playback_timing_t;
+bool voice_playback_get_timing(uint32_t generation, voice_playback_timing_t *out);

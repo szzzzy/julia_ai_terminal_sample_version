@@ -226,14 +226,28 @@ static esp_err_t mqtt_get_device_auth(const char **username, const char **passwo
     *client_key = NULL;
 
 #if CONFIG_COMM_DEVICE_AUTH_NONE
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    ESP_LOGE(TAG, "Multi-device MQTT requires device-bound credentials; anonymous auth refused");
+    return ESP_ERR_INVALID_STATE;
+#else
     return ESP_OK;
+#endif
 #elif CONFIG_COMM_DEVICE_AUTH_USERNAME_PASSWORD
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    *username = CONFIG_COMM_DEVICE_AUTH_USERNAME;
+    *password = CONFIG_COMM_DEVICE_AUTH_PASSWORD;
+    if (**username == '\0' || **password == '\0') {
+        ESP_LOGE(TAG, "Multi-device MQTT credentials missing; legacy fallback refused");
+        return ESP_ERR_INVALID_ARG;
+    }
+#else
     *username = CONFIG_COMM_DEVICE_AUTH_USERNAME[0] != '\0' ?
                 CONFIG_COMM_DEVICE_AUTH_USERNAME :
                 (CONFIG_COMM_MQTT_USERNAME[0] != '\0' ? CONFIG_COMM_MQTT_USERNAME : NULL);
     *password = CONFIG_COMM_DEVICE_AUTH_PASSWORD[0] != '\0' ?
                 CONFIG_COMM_DEVICE_AUTH_PASSWORD :
                 (CONFIG_COMM_MQTT_PASSWORD[0] != '\0' ? CONFIG_COMM_MQTT_PASSWORD : NULL);
+#endif
     if (*username == NULL || *password == NULL) {
         ESP_LOGE(TAG, "MQTT username/password authentication is selected but credentials are empty");
         return ESP_ERR_INVALID_ARG;
@@ -1682,6 +1696,20 @@ esp_err_t mqtt_comm_publish(const char *topic, const char *data, size_t data_len
         return ESP_FAIL;
     }
     return ESP_OK;
+}
+
+esp_err_t mqtt_comm_publish_voice_status(const char *device_id, const char *data, size_t data_len)
+{
+    if (!device_id || !data || !data_len || data_len > 512U) return ESP_ERR_INVALID_ARG;
+    if (!s_client || !mqtt_comm_is_ready()) return ESP_ERR_INVALID_STATE;
+    /* Do not accumulate a state history during an outage. WSS snapshots remain
+     * the acknowledged authority; this MQTT mirror may be omitted under load. */
+    if (esp_mqtt_client_get_outbox_size(s_client) >= 4096) return ESP_ERR_NO_MEM;
+    char topic[96];
+    int n = snprintf(topic, sizeof(topic), "voice/%s/vstatus", device_id);
+    if (n <= 0 || (size_t)n >= sizeof(topic)) return ESP_ERR_INVALID_SIZE;
+    return esp_mqtt_client_enqueue(s_client, topic, data, (int)data_len, 0, 0, true) < 0
+               ? ESP_FAIL : ESP_OK;
 }
 
 /**

@@ -1,5 +1,9 @@
 # 设备通信协议
 
+`0.1.4` 严格多设备模式要求 [control_protocol=1](MULTIDEVICE_CONTROL_V1.md)，包括轮次确认与 MQTT 执行 ACK；旧单设备模式仍保留原编码。
+
+2026-09-10 多设备阶段改造、云端源码核对差异及严格模式限制见 [多设备协议核对](MULTIDEVICE_CONTRACT.md)。严格模式默认关闭；本文旧共享主题与凭证回退仅适用于旧模式。
+
 文档版本：V1.1。本文描述当前设备实现，供服务器联调使用。身份与版本基线见 [构建与发布](BUILD_AND_RELEASE.md)，限制与验证分别见 [工程边界](COMMENT_AUDIT_FINDINGS.md) 和 [验收清单](VALIDATION.md)。
 
 实现核对日期：2026-09-03。语音传输、音频播放和行为状态分别有自己的所有者；服务器不能以 TCP 写入成功或 MQTT PUBACK 代替设备播放完成。

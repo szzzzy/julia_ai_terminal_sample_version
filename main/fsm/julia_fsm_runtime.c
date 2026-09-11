@@ -619,7 +619,7 @@ static bool runtime_process_event(fsm_event_t event)
         (s_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY ||
          s_fsm.main_state == JULIA_MAIN_STATE_S5_SILENT ||
          s_fsm.main_state == JULIA_MAIN_STATE_S6_SLEEP)) return true;
-    if (event == EVT_VOICE_SESSION_RESET &&
+    if ((event == EVT_VOICE_SESSION_RESET || event == EVT_VOICE_BUSY) &&
         s_fsm.main_state != JULIA_MAIN_STATE_S1_COMPANION &&
         s_fsm.main_state != JULIA_MAIN_STATE_S2_DIALOG &&
         s_fsm.main_state != JULIA_MAIN_STATE_S4_INTERACTION) return true;

@@ -53,7 +53,7 @@
 7. 打开交互启动门槛，Wi-Fi 启动稳定默认等待1500ms后将 CPU 上限切到160MHz；MQTT／WSS 仅在此前置条件满足后启动。
 8. 仅在 `CONFIG_VOICE_PUSH_DEMO_ENABLE` 启用时启动文件推送演示。
 
-启动流程刻意用更长时间换取较低的重叠峰值；网络不可达不阻塞本地运行时。OTA 通用检查在最前执行；新镜像在关键应用初始化完成后才确认，验收失败保留回滚路径。RTC 年份编码仍保留旧格式，格式迁移待多版本联调。`JULIA_BATTERY` 的 `power_hold`、`ota_ready`、`display_ready`、`audio_ready`、`storage_ready`、`runtime_ready`、`wifi_started` 与 `wifi_settled` 日志用于比较各阶段电池电压，不能据此直接计算电流，也不参与充电趋势推断。进入运行期后 `battery_monitor` 默认每10秒更新滤波电压，并使用未低通的原始平均电压维护 NORMAL／LOW／CHARGING 提示状态；它不进入行为FSM。当前采用单节3.7V、750mAh锂电池，百分比曲线按整机带载体验将4.00V及以上映射为100%。有效电池始终在状态文字上方显示百分比：正常为黑色 `BAT xx%`，低电量为红色 `LOW xx%`，疑似充电为绿色 `CHG xx%`且覆盖LOW；仅电压无效时隐藏。CHG 默认用20mV趋势、2次确认，下降20mV确认拔线；60秒没有新的上升证据会退出，避免无限保持绿色。
+启动流程刻意用更长时间换取较低的重叠峰值；网络不可达不阻塞本地运行时。OTA 通用检查在最前执行；新镜像在关键应用初始化完成后才确认，验收失败保留回滚路径。RTC 年份编码仍保留旧格式，格式迁移待多版本联调。`JULIA_BATTERY` 的 `power_hold`、`ota_ready`、`display_ready`、`audio_ready`、`storage_ready`、`runtime_ready`、`wifi_started` 与 `wifi_settled` 日志用于比较各阶段电池电压，不能据此直接计算电流或充电状态。进入运行期后 `battery_monitor` 默认每10秒更新滤波电压，并维护 NORMAL／LOW 提示状态；它不进入行为FSM。当前采用单节3.7V、750mAh锂电池，保留老师指定的3.40V=0%、3.55V=15%标定点，按非线性表插值并以5%步进显示。有效电池始终在状态文字上方显示百分比：正常为黑色 `BAT xx%`，低电量为红色 `LOW xx%`；仅电压无效时隐藏。软件不再根据电压趋势推测充电，充电中／充满以ETA6098板载红灯为准。
 
 Wi-Fi 关联失败后从约 1 秒开始指数退避，最大 60 秒并带最多 20% 的负向随机抖动，重试次数不封顶；取得 IPv4 后退避清零并重新确认所有 IP-ready 服务。单次 `esp_wifi_connect()` 默认最多等待 20 秒，若 GOT_IP和断开事件都未到达，会主动结束卡住的尝试并继续重连。`ESP_ERR_WIFI_STATE` 不再被误当成已成功发起连接。
 

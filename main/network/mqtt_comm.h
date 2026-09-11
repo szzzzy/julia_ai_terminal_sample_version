@@ -76,6 +76,9 @@ esp_err_t mqtt_comm_register_topic(const char *topic, size_t max_payload_len,
  * @note 可在任意普通任务上下文中调用；不允许在中断上下文中调用。
  */
 esp_err_t mqtt_comm_publish(const char *topic, const char *data, size_t data_len);
+/* Best-effort device state mirror: skip when offline, bounded outbox admission.
+ * Caller supplies the stable local identity and a complete state envelope. */
+esp_err_t mqtt_comm_publish_voice_status(const char *device_id, const char *data, size_t data_len);
 
 /**
  * @brief 启动 MQTT 连接、订阅和升级检查后台任务。

@@ -74,6 +74,7 @@ typedef enum {
     EVT_PREPARE_TERMINAL_REPLY,   /**< 终止语义到达 S2 时，先回 S4 播放本地回应。 */
     EVT_VOICE_SESSION_RESET,     /**< 新语音会话不继承旧 S1/S2/S4，重新等待唤醒。 */
     EVT_REQUIRE_WAKE,            /**< 云端请求结束 S1 陪伴；活动交互期间拒绝。 */
+    EVT_VOICE_BUSY,              /**< 云端资源忙碌，结束当前交互并回到等待唤醒。 */
     EVT_COUNT,
 } fsm_event_t;
 

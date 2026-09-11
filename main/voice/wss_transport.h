@@ -17,6 +17,7 @@
  */
 #pragma once
 
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -135,6 +136,8 @@ esp_err_t wss_transport_enqueue(const void *item, size_t item_size);
 esp_err_t wss_transport_enqueue_control(const void *item, size_t item_size);
 /** 业务处理已经无法安全继续时，要求关闭当前连接并重新建立。 */
 void wss_transport_fail_session(void);
+/* WSS owner only; changes the next retry delay without blocking this callback. */
+void wss_transport_defer_retry(unsigned seconds);
 
 /**
  * 从其它任务请求结束当前语音连接。调用方只说明原因，不能直接关闭加密连接；

@@ -1,0 +1,18 @@
+# Overlay only: provision each device in a PRIVATE local configuration.
+# eFuse-derived device_id is esp-<12 lowercase hex digits>; do not invent another ID.
+CONFIG_JULIA_MULTI_DEVICE_ENABLE=y
+CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE=y
+# CONFIG_COMM_DEVICE_AUTH_NONE is not set
+# CONFIG_COMM_DEVICE_AUTH_TOKEN is not set
+# CONFIG_COMM_DEVICE_AUTH_CERTIFICATE is not set
+CONFIG_COMM_DEVICE_AUTH_USERNAME_PASSWORD=y
+# Cloud MqttPolicy maps this username to the device and validates its password.
+# Empty values intentionally refuse service; fill independently for A and B.
+CONFIG_COMM_DEVICE_AUTH_USERNAME=""
+CONFIG_COMM_DEVICE_AUTH_PASSWORD=""
+# Cloud DeviceIdentity must map this independent Bearer to the same eFuse device ID.
+CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE=""
+# This legacy fallback is not used in multi-device mode.
+CONFIG_WSS_TOKEN=""
+# Configure private WSS/MQTT endpoints and CA for the test environment separately.
+# Confirm TLS support on the broker before selecting mqtts://.

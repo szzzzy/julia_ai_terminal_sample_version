@@ -378,6 +378,19 @@ int main(void)
     assert(julia_fsm_handle_event(&ota_fsm, EVT_OTA_TASK_FAILED, NULL));
     assert(ota_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
 
+    /* Busy is a real event, not a fabricated revision or transport disconnect. */
+    julia_fsm_t busy_fsm;
+    enter_companion(&busy_fsm);
+    assert(julia_fsm_handle_event(&busy_fsm,EVT_VOICE_BUSY,NULL));
+    assert(busy_fsm.main_state==JULIA_MAIN_STATE_S3_STANDBY);
+    assert(julia_fsm_handle_event(&busy_fsm,EVT_WAKEUP,NULL));
+    assert(julia_fsm_handle_event(&busy_fsm,EVT_VOICE_BUSY,NULL));
+    assert(busy_fsm.main_state==JULIA_MAIN_STATE_S3_STANDBY);
+    assert(julia_fsm_transition_to(&busy_fsm,JULIA_MAIN_STATE_S6_SLEEP,JULIA_S2_SUB_STATE_NONE,EVT_NONE));
+    assert(!julia_fsm_handle_event(&busy_fsm,EVT_VOICE_BUSY,NULL));
+    assert(busy_fsm.main_state==JULIA_MAIN_STATE_S6_SLEEP);
+    assert(!strcmp(julia_fsm_event_name(EVT_VOICE_BUSY),"EVT_VOICE_BUSY"));
+
     /* 尚未配置目标的其他事件不能改变状态。 */
     assert(!julia_fsm_handle_event(&fsm, EVT_WAKEUP, NULL));
     assert(fsm.main_state == JULIA_MAIN_STATE_S0_BOOT);

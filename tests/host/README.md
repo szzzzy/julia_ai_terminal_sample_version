@@ -1,5 +1,9 @@
 # 固件主机回归测试
 
+`0.1.4` 新增 control-v1 轮次屏障、结果缓存与 busy 真实事件测试。设置 `-DJULIA_CLOUD_SOURCE_DIR=<云端 api_server 源码目录>` 后，额外运行实际 C/Python 消息互通替身测试，共 31 项；不设置时为 30 项，不需要真实设备或外部推理 API。
+
+2026-09-10 多设备阶段新增 WSS 凭证策略、严格同步、控制归属/去重与实际 MQTT 分派测试；完整配置包含 30 个 CTest 项。结果及双设备硬件边界见 [多设备验证交付](../../docs/MULTIDEVICE_VALIDATION_20260910.md)。TinyCC 在本机未跟踪全部头文件依赖，改动 stub/头文件后使用 `cmake --build build-host-multidevice --clean-first`，避免运行旧对象。
+
 这组测试直接编译设备使用的 `pcm_buffer.c` 和 `voice_playback.c`。播放测试只替换 RTOS 同步／任务、I2S 和时间接口，用确定性调度在写入中注入取消、断流和错误。
 
 ## 测试组织
@@ -55,6 +59,6 @@ ctest --test-dir build-host --output-on-failure
 - 上行pump的正常／追赶批次、8ms运行预算、恢复统计和发送失败不提前消费。
 - ring overflow 后 producer 只关闭入口，owner 才能清理；新连接只发送新代次PCM。
 - S6 面板／背光只由 FSM 呈现控制；motion只能投递 `EVT_MOTION_WAKE`，不得与idle、night或WSS断链路径旁路点亮。
-- 充电趋势使用未低通电压进入CHG，验证20mV压降退出、60秒无上升证据超时和电池消失复位。
+- 电池UI只显示BAT／LOW并按5%步进，不包含无法由GPIO确认的CHG状态。
 
 模拟写入不是物理扬声器输出；测试不能证明 DMA 排空时间、音质、多核最坏调度延迟或开机速度。这些项目仍按 [设备验收](../../docs/VALIDATION.md) 上板执行。

@@ -12,6 +12,10 @@
 #include "julia_fsm_runtime.h"
 #include "sdkconfig.h"
 #include "wss_transport.h"
+#include "ota_control_plane.h"
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+#include "mqtt_comm.h"
+#endif
 
 #if CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE
 #define SYNC_RETRY_US 2000000LL
@@ -24,7 +28,9 @@ static portMUX_TYPE s_sync_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_ready;
 static bool s_active;
 static char s_session_id[33];
+static char s_device_id[NATIVE_OTA_DEVICE_ID_SIZE];
 static char s_pending[STATE_MESSAGE_BYTES];
+static char s_pending_request[64];
 static uint32_t s_pending_revision;
 static bool s_waiting_ack;
 static bool s_have_revision;
@@ -37,6 +43,8 @@ typedef struct {
 } request_result_t;
 static request_result_t s_results[REQUEST_CACHE_SIZE];
 static unsigned s_result_next;
+
+const char *voice_state_sync_session_id(void) { return s_session_id; }
 
 static void set_ready(bool ready)
 {
@@ -96,11 +104,18 @@ static bool send_text(const char *text)
 
 static void prepare_state(const char *type, const julia_fsm_snapshot_t *snapshot)
 {
+    char envelope[192] = "";
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    snprintf(s_pending_request, sizeof(s_pending_request), "%s-%" PRIu32, type, snapshot->revision);
+    snprintf(envelope, sizeof(envelope),
+             "\"control_protocol\":1,\"device_time_ms\":%" PRIi64 ",\"interaction_id\":\"\",\"request_id\":\"%s\",",
+             esp_timer_get_time()/1000LL, s_pending_request);
+#endif
     int n = snprintf(s_pending, sizeof(s_pending),
-        "{\"type\":\"%s\",\"protocol_version\":2,\"session_id\":\"%s\","
+        "{\"type\":\"%s\",%s\"device_id\":\"%s\",\"protocol_version\":2,\"session_id\":\"%s\","
         "\"state_revision\":%" PRIu32 ",\"state\":\"S%d\",\"sub_state\":\"%s\","
         "\"wake_required\":%s,\"companion_remaining_ms\":%" PRIu32 ",\"reason\":\"%s\"}",
-        type, s_session_id, snapshot->revision, (int)snapshot->main_state,
+        type, envelope, s_device_id, s_session_id, snapshot->revision, (int)snapshot->main_state,
         substate(snapshot), wake_required(snapshot) ? "true" : "false",
         snapshot->companion_remaining_ms, julia_fsm_event_name(snapshot->reason));
     if (n <= 0 || (size_t)n >= sizeof(s_pending)) {
@@ -131,6 +146,11 @@ void voice_state_sync_end(void)
 void voice_state_sync_start(void)
 {
     voice_state_sync_end();
+    if (native_ota_get_device_id(s_device_id, sizeof(s_device_id)) != ESP_OK) {
+        ESP_LOGE(TAG, "stable device identity unavailable; refusing voice session");
+        wss_transport_fail_session();
+        return;
+    }
     uint8_t random_id[16];
     esp_fill_random(random_id, sizeof(random_id));
     for (size_t i = 0; i < sizeof(random_id); ++i)
@@ -154,6 +174,9 @@ void voice_state_sync_poll(void)
     int64_t now = esp_timer_get_time();
     if (!s_active || !s_waiting_ack || now < s_retry_us) return;
     if (s_sends >= SYNC_MAX_SENDS) {
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+        wss_transport_defer_retry(30);
+#endif
         ESP_LOGW(TAG, "cloud state ACK timeout; ending unsynchronized session");
         set_ready(false);
         s_active = false;
@@ -161,6 +184,10 @@ void voice_state_sync_poll(void)
         return;
     }
     if (send_text(s_pending)) {
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+        if (s_sends == 0 && voice_state_sync_is_ready())
+            (void)mqtt_comm_publish_voice_status(s_device_id, s_pending, strlen(s_pending));
+#endif
         ++s_sends;
         s_retry_us = now + SYNC_RETRY_US;
     }
@@ -209,10 +236,10 @@ static void handle_require_wake(const cJSON *root)
     s_result_next = (s_result_next + 1U) % REQUEST_CACHE_SIZE;
     strcpy(result->id, id->valuestring);
     int n = snprintf(result->response, sizeof(result->response),
-        "{\"type\":\"require_wake_ack\",\"session_id\":\"%s\",\"request_id\":\"%s\","
+        "{\"type\":\"require_wake_ack\",\"device_id\":\"%s\",\"interaction_id\":\"\",\"session_id\":\"%s\",\"request_id\":\"%s\","
         "\"accepted\":%s,\"state\":\"S%d\",\"sub_state\":\"%s\","
         "\"state_revision\":%" PRIu32 ",\"wake_required\":%s,\"reason\":\"%s\"}",
-        s_session_id, id->valuestring, accepted ? "true" : "false",
+        s_device_id, s_session_id, id->valuestring, accepted ? "true" : "false",
         (int)snapshot.main_state, substate(&snapshot), snapshot.revision,
         wake_required(&snapshot) ? "true" : "false", reason);
     if (n > 0 && (size_t)n < sizeof(result->response)) (void)send_text(result->response);
@@ -229,6 +256,30 @@ bool voice_state_sync_handle_text(const uint8_t *text, size_t len)
     bool state_ack = strcmp(type->valuestring, "device_state_ack") == 0;
     bool require = strcmp(type->valuestring, "require_wake") == 0;
     if (!sync_ack && !state_ack && !require) { cJSON_Delete(root); return false; }
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    const cJSON *device = cJSON_GetObjectItemCaseSensitive(root, "device_id");
+    if (!cJSON_IsString(device) || strcmp(device->valuestring, s_device_id)) {
+        ESP_LOGW(TAG, "ignoring control message for a different device");
+        cJSON_Delete(root);
+        return true;
+    }
+    if (sync_ack || state_ack) {
+        const cJSON *request = cJSON_GetObjectItemCaseSensitive(root, "request_id");
+        if (!cJSON_IsString(request) || strcmp(request->valuestring, s_pending_request)) {
+            cJSON_Delete(root);
+            return true;
+        }
+    }
+    if (sync_ack) {
+        const cJSON *protocol=cJSON_GetObjectItemCaseSensitive(root,"control_protocol");
+        if (!cJSON_IsNumber(protocol) || protocol->valuedouble!=1) {
+            ESP_LOGE(TAG,"cloud control protocol mismatch");
+            wss_transport_defer_retry(60);
+            s_active=false;set_ready(false);wss_transport_fail_session();
+            cJSON_Delete(root);return true;
+        }
+    }
+#endif
     const cJSON *session = cJSON_GetObjectItemCaseSensitive(root, "session_id");
     if (!s_active || !cJSON_IsString(session) ||
         strcmp(session->valuestring, s_session_id) != 0) {
@@ -265,6 +316,7 @@ bool voice_state_sync_handle_text(const uint8_t *text, size_t len)
     return true;
 }
 #else
+const char *voice_state_sync_session_id(void) { return ""; }
 void voice_state_sync_start(void) {}
 void voice_state_sync_end(void) {}
 void voice_state_sync_poll(void) {}

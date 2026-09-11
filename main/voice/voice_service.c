@@ -36,6 +36,8 @@
 #include "voice_uplink_ring.h"
 #include "voice_playback.h"
 #include "voice_state_sync.h"
+#include "voice_control_guard.h"
+#include "ota_control_plane.h"
 #include "wss_transport.h"
 #include "sdkconfig.h"
 
@@ -83,6 +85,7 @@ typedef enum {
     VOICE_JOB_SEND_TEXT,     /**< FSM 已提交状态后的 WSS 文本通知。 */
     VOICE_JOB_INTENT_GOODNIGHT, /**< MQTT 晚安语义，转交 WSS 任务串行收尾。 */
     VOICE_JOB_INTENT_DISMISS,   /**< MQTT 结束沟通语义，转交 WSS 任务串行收尾。 */
+    VOICE_JOB_SCOPED_CONTROL,  /**< 原始封装留到 WSS owner 校验，避免排队期间换轮。 */
 } voice_job_type_t;
 
 typedef struct {
@@ -132,6 +135,45 @@ extern const uint8_t goodnight_wav_end[]
 static uint32_t s_playback_generation;
 static voice_playback_role_t s_playback_role;
 static bool s_session_activated;
+/* MIC producer only stores a timestamp under the existing short critical section.
+ * WSS owner emits diagnostics; neither capture nor I2S tasks log telemetry. */
+static int64_t s_last_capture_us;
+static struct {
+    uint32_t generation;
+    char session[33];
+    char interaction[VOICE_INTERACTION_ID_MAX_LEN];
+    int64_t spks_us, first_pcm_us;
+    bool output_reported;
+} s_audio_timing;
+
+static void voice_service_timing_poll(bool completed)
+{
+    if (s_audio_timing.generation != s_playback_generation) return;
+    voice_playback_timing_t timing;
+    if (!voice_playback_get_timing(s_audio_timing.generation, &timing)) return;
+    if (!completed && (s_audio_timing.output_reported || !timing.first_output_us)) return;
+    portENTER_CRITICAL(&s_mic_state_lock);
+    int64_t last_capture = s_last_capture_us;
+    portEXIT_CRITICAL(&s_mic_state_lock);
+    ESP_LOGI(TAG, "audio_timing clock=boot_monotonic_us session_id=%s interaction_id=%s"
+             " generation=%" PRIu32 " last_capture=%" PRIi64 " spks=%" PRIi64
+             " first_pcm=%" PRIi64 " first_i2s_write=%" PRIi64 " completed=%" PRIi64,
+             s_audio_timing.session, s_audio_timing.interaction[0] ? s_audio_timing.interaction : "unknown",
+             timing.generation, last_capture, s_audio_timing.spks_us, s_audio_timing.first_pcm_us,
+             timing.first_output_us, timing.completed_us);
+    s_audio_timing.output_reported = true;
+    if (completed) s_audio_timing.generation = 0;
+}
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+#define VOICE_SCOPED_CONTROL_MAX_LEN 768U
+static voice_control_guard_t s_control_guard;
+static char s_voice_device_id[NATIVE_OTA_DEVICE_ID_SIZE];
+static char s_round_ack[512], s_round_request[64];
+static bool s_round_pending, s_round_speech;
+static int64_t s_busy_until_us;
+static void voice_service_apply_scoped_control(const uint8_t *data, size_t len);
+static bool voice_service_handle_control_json(const uint8_t *data, size_t len);
+#endif
 static FILE *s_file;
 static bool s_file_pending;
 static bool s_file_active;
@@ -601,9 +643,16 @@ static void voice_service_state_ready_poll(void)
         portEXIT_CRITICAL(&s_mic_state_lock);
         return;
     }
-    char payload[144];
+    char payload[384];
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    int length = snprintf(payload, sizeof(payload),
+        "{\"type\":\"state_ready\",\"device_id\":\"%s\",\"session_id\":\"%s\","
+        "\"interaction_id\":\"%s\",\"interaction_seq\":%" PRIu32 ",\"request_id\":\"ready-%" PRIu32 "\",\"state\":\"S4\"}",
+        s_voice_device_id, voice_state_sync_session_id(), id, s_control_guard.interaction_seq, s_uplink_generation);
+#else
     int length = snprintf(payload, sizeof(payload),
         "{\"type\":\"state_ready\",\"interaction_id\":\"%s\",\"state\":\"S4\"}", id);
+#endif
     if (length > 0 && (size_t)length < sizeof(payload) &&
         wss_transport_send_now(0x1, (const uint8_t *)payload, (size_t)length) == ESP_OK) {
         portENTER_CRITICAL(&s_mic_state_lock);
@@ -636,10 +685,23 @@ static bool voice_service_reply_timeout_poll(void)
     return true;
 }
 
+static bool voice_service_busy_wait(void)
+{
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    if (s_busy_until_us) {
+        if (esp_timer_get_time()<s_busy_until_us) return true;
+        s_busy_until_us=0;
+        voice_service_resume_uplink_after_file();
+    }
+#endif
+    return false;
+}
+
 static void voice_service_poll(void)
 {
     voice_state_sync_poll();
     if (!voice_state_sync_is_ready()) return;
+    if (voice_service_busy_wait()) return;
     if (!s_session_activated) {
         s_session_activated = true;
 #if CONFIG_JULIA_SERVER_WAKE_ENABLE
@@ -666,6 +728,7 @@ static void voice_service_poll(void)
     esp_err_t result;
     if (voice_playback_take_completion(&generation, &result) &&
         generation == s_playback_generation) {
+        voice_service_timing_poll(true);
         bool local_terminal = playback_role_is_terminal(s_playback_role);
         voice_service_speaker_done();
         if (result != ESP_OK && local_terminal) {
@@ -676,6 +739,7 @@ static void voice_service_poll(void)
                                                                      "ERROR playback_failed");
         }
     }
+    voice_service_timing_poll(false);
     if (s_file != NULL) {
         voice_service_file_poll();
         return;
@@ -826,6 +890,19 @@ static bool voice_service_handle_wake_json(const uint8_t *text, size_t len)
         cJSON_Delete(root);
         return true;
     }
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    const char *rejection = voice_control_guard_check(&s_control_guard, root,
+        s_voice_device_id, voice_state_sync_session_id(), id->valuestring);
+    uint32_t round;
+    if (!rejection && (!s_round_pending || s_round_speech || !s_control_guard.active ||
+        !voice_control_uint(root,"interaction_seq",&round) || round!=s_control_guard.interaction_seq ||
+        strcmp(id->valuestring,s_control_guard.interaction_id))) rejection="round_sync_required";
+    if (rejection) {
+        ESP_LOGW(TAG, "wake_detected ignored: %s", rejection);
+        cJSON_Delete(root);
+        return true;
+    }
+#endif
 
     julia_main_state_t state = julia_fsm_runtime_get_state();
     if (state == JULIA_MAIN_STATE_S4_INTERACTION) {
@@ -856,6 +933,9 @@ static bool voice_service_handle_wake_json(const uint8_t *text, size_t len)
     julia_idle_display_note_activity();
     julia_idle_display_set_busy(true);
     post_fsm_event(EVT_WAKEUP);
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    s_round_pending=false;
+#endif
     ESP_LOGI(TAG, "wake_detected id=%s origin=%s; state transition processed",
              id->valuestring, julia_fsm_main_state_name(state));
     cJSON_Delete(root);
@@ -873,12 +953,30 @@ static bool voice_service_handle_wake_json(const uint8_t *text, size_t len)
  */
 static void voice_service_on_server_text(const uint8_t *text, size_t len)
 {
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    if(len && text[0]=='{') {
+        /* Reject malformed strict envelopes before any legacy JSON parser can
+         * bypass the bounded depth/NUL/duplicate-field checks. */
+        cJSON *envelope=voice_control_parse((const char *)text,len);
+        bool valid=cJSON_IsObject(envelope);cJSON_Delete(envelope);
+        if(!valid){ESP_LOGW(TAG,"Ignoring malformed strict WSS envelope");return;}
+    }
+#endif
     if (voice_state_sync_handle_text(text, len)) return;
     if (!voice_state_sync_is_ready()) {
         ESP_LOGW(TAG, "Ignoring business command before session_sync_ack");
         return;
     }
-    ESP_LOGI(TAG, "Server cmd: %.*s", (int)len, (const char *)text);
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    if (voice_service_handle_control_json(text,len)) return;
+    if (s_busy_until_us) return;
+    bool mic_start=len==9 && !memcmp(text,"MIC_START",9);
+    if (mic_start && (!s_round_pending || !s_round_speech)) {
+        ESP_LOGW(TAG,"MIC_START ignored: round_sync_required");return;
+    }
+    if (s_round_pending && !mic_start && (len==0 || text[0]!='{')) return;
+#endif
+    ESP_LOGD(TAG, "Server command received (%u bytes)", (unsigned)len);
     if (voice_service_handle_wake_json(text, len)) return;
     if (len > strlen("FILE_SEND ") && strncmp((const char *)text, "FILE_SEND ", 10) == 0) {
         char uri[VOICE_SERVICE_URI_MAX_LEN];
@@ -895,6 +993,9 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
 
     if (len == strlen("MIC_START") && memcmp(text, "MIC_START", len) == 0) {
         voice_service_apply_mic_start();
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+        s_round_pending=false;
+#endif
         return;
     }
     if (len == strlen("MIC_STOP") && memcmp(text, "MIC_STOP", len) == 0) {
@@ -918,6 +1019,7 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
         }
         ESP_LOGI(TAG, "SPKT: asynchronous local tone test");
     } else if (len > 5 && memcmp(text, "SPKS ", 5) == 0) {
+        int64_t received_us = esp_timer_get_time();
         char buf[16];
         size_t n = len - 5;
         if (n >= sizeof(buf)) n = sizeof(buf) - 1;
@@ -936,6 +1038,12 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
         }
         if (end != buf && *end == '\0' && role != VOICE_PLAYBACK_ROLE_NONE &&
             voice_playback_start((uint32_t)rate, false, &s_playback_generation) == ESP_OK) {
+            memset(&s_audio_timing, 0, sizeof(s_audio_timing));
+            s_audio_timing.generation = s_playback_generation;
+            s_audio_timing.spks_us = received_us;
+            snprintf(s_audio_timing.session, sizeof(s_audio_timing.session), "%s",
+                     voice_state_sync_session_id());
+            snprintf(s_audio_timing.interaction, sizeof(s_audio_timing.interaction), "%s", s_interaction_id);
             s_playback_role = role;
             if (role == VOICE_PLAYBACK_ROLE_WAKE_REPLY) s_wake_reply_expected = false;
             voice_service_cancel_file();
@@ -994,6 +1102,10 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
  */
 static void voice_service_on_binary(const uint8_t *data, size_t len)
 {
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    if (s_round_pending || !s_control_guard.active || s_busy_until_us) return;
+#endif
+    int64_t received_us = esp_timer_get_time();
     if (!voice_state_sync_is_ready()) return;
     if (playback_role_is_terminal(s_playback_role)) return;
     if (data == NULL || len == 0U || (len & 1U) != 0U) {
@@ -1004,6 +1116,8 @@ static void voice_service_on_binary(const uint8_t *data, size_t len)
         return;
     }
     esp_err_t err = voice_playback_write(data, len);
+    if (err == ESP_OK && s_audio_timing.generation == s_playback_generation &&
+        s_audio_timing.first_pcm_us == 0) s_audio_timing.first_pcm_us = received_us;
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Downlink PCM write failed: %s", esp_err_to_name(err));
     }
@@ -1026,6 +1140,11 @@ static void voice_service_on_queue_item(void *item, size_t item_size)
     }
     voice_job_t *job = (voice_job_t *)item;
     switch (job->type) {
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    case VOICE_JOB_SCOPED_CONTROL:
+        voice_service_apply_scoped_control(job->data, job->len);
+        break;
+#endif
     case VOICE_JOB_SEND_FILE:
         job->data[VOICE_SERVICE_URI_MAX_LEN - 1] = '\0';
         (void)voice_service_push_file((const char *)job->data, true);
@@ -1059,6 +1178,15 @@ static void voice_service_on_queue_item(void *item, size_t item_size)
 /** 新语音连接从空的麦克风缓冲开始，断线前未发出的声音绝不在重连后补发。 */
 static void voice_service_on_session_start(void)
 {
+    memset(&s_audio_timing, 0, sizeof(s_audio_timing));
+    portENTER_CRITICAL(&s_mic_state_lock);
+    s_last_capture_us = 0;
+    portEXIT_CRITICAL(&s_mic_state_lock);
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    voice_control_guard_reset(&s_control_guard);
+    s_control_guard.active=true;
+    s_round_pending=false;s_round_ack[0]=0;s_round_request[0]=0;s_busy_until_us=0;
+#endif
     s_session_activated = false;
     /* A new socket starts in the server's wake-required mode. This is independent
      * of MQTT availability and must complete before accepting new voice commands. */
@@ -1272,6 +1400,7 @@ static void voice_service_apply_terminal_intent(fsm_event_t event, const char *i
  * 固定格式：{"type":"intent_result","intent":"normal|goodnight|dismiss"}。
  * 返回 true 表示载荷是 JSON 并已完成处理或拒绝；false 表示继续按旧文本命令解析。
  */
+#if !CONFIG_JULIA_MULTI_DEVICE_ENABLE
 static bool voice_service_handle_intent_json(const char *cmd, size_t cmd_len)
 {
     if (cmd_len == 0U || cmd[0] != '{') return false;
@@ -1310,6 +1439,159 @@ static bool voice_service_handle_intent_json(const char *cmd, size_t cmd_len)
     cJSON_Delete(root);
     return true;
 }
+#endif
+
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+static bool voice_service_handle_control_json(const uint8_t *data, size_t len)
+{
+    if (!len || data[0]!='{') return false;
+    cJSON *root=voice_control_parse((const char *)data,len);
+    const cJSON *type=cJSON_GetObjectItemCaseSensitive(root,"type");
+    bool sync=cJSON_IsString(type) && !strcmp(type->valuestring,"interaction_sync");
+    bool busy=cJSON_IsString(type) && !strcmp(type->valuestring,"busy");
+    if (!sync && !busy) {cJSON_Delete(root);return false;}
+    const char *error=voice_control_guard_check(&s_control_guard,root,s_voice_device_id,
+                                               voice_state_sync_session_id(),NULL);
+    if(error){ESP_LOGW(TAG,"WSS control ignored: %s",error);cJSON_Delete(root);return true;}
+    if(busy) {
+        if(playback_role_is_terminal(s_playback_role)) {cJSON_Delete(root);return true;}
+        uint32_t busy_round;
+        const cJSON *busy_id=cJSON_GetObjectItemCaseSensitive(root,"interaction_id");
+        if(!voice_control_uint(root,"interaction_seq",&busy_round) || busy_round!=s_control_guard.interaction_seq ||
+           strcmp(busy_id->valuestring,s_control_guard.interaction_id)) {
+            ESP_LOGW(TAG,"Ignoring stale busy notification");cJSON_Delete(root);return true;
+        }
+        const cJSON *code=cJSON_GetObjectItemCaseSensitive(root,"code");
+        uint32_t delay;
+        if(cJSON_IsString(code) && !strcmp(code->valuestring,"voice_capacity") &&
+           voice_control_uint(root,"retry_after_ms",&delay) && delay>=1000 && delay<=30000) {
+            /* Resource refusal is not a network disconnect. No fake revision or
+             * replay: end the actual dialog and reopen only fresh capture. */
+            s_busy_until_us=esp_timer_get_time()+(int64_t)delay*1000;
+            s_control_guard.active=false;s_round_pending=false;
+            voice_playback_stop_generation(s_playback_generation);s_playback_generation=0;
+            s_playback_role=VOICE_PLAYBACK_ROLE_NONE;s_audio_timing.generation=0;
+            voice_service_pause_uplink_for_file();
+            portENTER_CRITICAL(&s_mic_state_lock);
+            s_dialog_listening=false;s_reply_deadline_us=0;s_listen_deadline_us=0;
+            portEXIT_CRITICAL(&s_mic_state_lock);
+            julia_main_state_t state=julia_fsm_runtime_get_state();
+            if(state==JULIA_MAIN_STATE_S1_COMPANION || state==JULIA_MAIN_STATE_S2_DIALOG ||
+               state==JULIA_MAIN_STATE_S4_INTERACTION) post_fsm_event(EVT_VOICE_BUSY);
+            julia_avatar_talking_stop();julia_idle_display_set_busy(false);
+            ESP_LOGW(TAG,"Voice resource busy; fresh capture resumes after %lu ms",(unsigned long)delay);
+        }
+        cJSON_Delete(root);return true;
+    }
+    const char *id=cJSON_GetObjectItemCaseSensitive(root,"interaction_id")->valuestring;
+    const char *request=cJSON_GetObjectItemCaseSensitive(root,"request_id")->valuestring;
+    const cJSON *purpose=cJSON_GetObjectItemCaseSensitive(root,"purpose");
+    uint32_t seq=0;
+    bool speech=cJSON_IsString(purpose) && !strcmp(purpose->valuestring,"speech");
+    bool wake=cJSON_IsString(purpose) && !strcmp(purpose->valuestring,"wake");
+    if(!voice_control_uint(root,"interaction_seq",&seq) || (!speech && !wake)) error="invalid_envelope";
+    else if(seq==s_control_guard.interaction_seq && !strcmp(id,s_control_guard.interaction_id) &&
+            !strcmp(request,s_round_request) && s_control_guard.active && s_round_speech==speech) {
+        (void)wss_transport_send_now(1,(const uint8_t *)s_round_ack,strlen(s_round_ack));
+        cJSON_Delete(root);return true;
+    } else if(playback_role_is_terminal(s_playback_role)) error="terminal_reply";
+    else if(s_busy_until_us) error="busy";
+    else {
+        julia_main_state_t state=julia_fsm_runtime_get_state();
+        julia_s2_sub_state_t sub=julia_fsm_runtime_get_s2_sub_state();
+        bool allowed=wake ? (state==JULIA_MAIN_STATE_S1_COMPANION || state==JULIA_MAIN_STATE_S3_STANDBY ||
+                            state==JULIA_MAIN_STATE_S5_SILENT || state==JULIA_MAIN_STATE_S6_SLEEP) :
+                            (state==JULIA_MAIN_STATE_S1_COMPANION || state==JULIA_MAIN_STATE_S4_INTERACTION ||
+                             (state==JULIA_MAIN_STATE_S2_DIALOG &&
+                              (sub==JULIA_S2_SUB_STATE_S2_1_LISTENING || sub==JULIA_S2_SUB_STATE_S2_3_SPEAKING)));
+        error=allowed ? voice_control_begin(&s_control_guard,seq,id) : "state_unavailable";
+        if(error && !strcmp(error,"duplicate_round")) error="request_id_conflict";
+    }
+    char ack[512];
+    int n=snprintf(ack,sizeof(ack),"{\"type\":\"interaction_sync_ack\",\"device_id\":\"%s\","
+        "\"session_id\":\"%s\",\"interaction_id\":\"%s\",\"request_id\":\"%s\","
+        "\"interaction_seq\":%lu,\"accepted\":%s,\"code\":\"%s\",\"device_time_ms\":%" PRIi64 "}",
+        s_voice_device_id,voice_state_sync_session_id(),id,request,(unsigned long)seq,
+        error?"false":"true",error?error:"applied",esp_timer_get_time()/1000LL);
+    if(!error) {
+        s_round_pending=true;s_round_speech=speech;
+        portENTER_CRITICAL(&s_mic_state_lock);
+        snprintf(s_interaction_id,sizeof(s_interaction_id),"%s",id);
+        portEXIT_CRITICAL(&s_mic_state_lock);
+        snprintf(s_round_request,sizeof(s_round_request),"%s",request);
+        if(n>0 && (size_t)n<sizeof(ack)) strcpy(s_round_ack,ack);
+    }
+    if(n>0 && (size_t)n<sizeof(ack) &&
+       wss_transport_send_now(1,(const uint8_t *)ack,(size_t)n)!=ESP_OK) wss_transport_fail_session();
+    cJSON_Delete(root);return true;
+}
+
+static void voice_service_apply_scoped_control(const uint8_t *data, size_t len)
+{
+    cJSON *root=voice_control_parse((const char *)data,len);
+    const char *basic=voice_control_guard_check(&s_control_guard,root,s_voice_device_id,
+                                               voice_state_sync_session_id(),NULL);
+    if(basic){ESP_LOGW(TAG,"Scoped control ignored: %s",basic);cJSON_Delete(root);return;}
+    const char *cached=NULL;
+    const char *error=voice_control_evaluate(&s_control_guard,root,s_voice_device_id,
+        voice_state_sync_session_id(),esp_timer_get_time()/1000LL,&cached);
+    if(cached){(void)mqtt_comm_publish_voice_status(s_voice_device_id,cached,strlen(cached));cJSON_Delete(root);return;}
+    bool record=!error || !strcmp(error,"expired") || !strcmp(error,"invalid_deadline");
+    bool accepted=false;
+    if(!error) {
+        const char *type=cJSON_GetObjectItemCaseSensitive(root,"type")->valuestring;
+        julia_main_state_t state=julia_fsm_runtime_get_state();
+        bool terminal=playback_role_is_terminal(s_playback_role);
+        if(!strcmp(type,"intent_result")) {
+            const char *intent=cJSON_GetObjectItemCaseSensitive(root,"intent")->valuestring;
+            if(!strcmp(intent,"normal")){accepted=true;}
+            else if(strcmp(intent,"goodnight") && strcmp(intent,"dismiss")) error="unsupported_operation";
+            else if(terminal) error="terminal_reply";
+            else if(state!=JULIA_MAIN_STATE_S4_INTERACTION && state!=JULIA_MAIN_STATE_S2_DIALOG) error="state_unavailable";
+            else {
+                bool goodnight=!strcmp(intent,"goodnight");
+                voice_service_apply_terminal_intent(goodnight?EVT_INTENT_GOODNIGHT:EVT_INTENT_DISMISS,intent);
+                julia_main_state_t after=julia_fsm_runtime_get_state();
+                accepted=playback_role_is_terminal(s_playback_role) ||
+                    after==(goodnight?JULIA_MAIN_STATE_S6_SLEEP:JULIA_MAIN_STATE_S5_SILENT);
+            }
+        } else if(!strcmp(type,"command")) {
+            const char *command=cJSON_GetObjectItemCaseSensitive(root,"command")->valuestring;
+            if(!strcmp(command,"MIC_START")) {
+                if(terminal)error="terminal_reply";
+                else if(!s_round_pending || !s_round_speech)error="round_sync_required";
+                else {voice_service_apply_mic_start();s_round_pending=false;accepted=s_dialog_listening;}
+            } else if(!strcmp(command,"MIC_STOP")) {
+                bool listening=s_dialog_listening;
+                voice_service_apply_mic_stop();
+                accepted=!listening || (julia_fsm_runtime_get_state()==JULIA_MAIN_STATE_S2_DIALOG &&
+                    julia_fsm_runtime_get_s2_sub_state()==JULIA_S2_SUB_STATE_S2_2_THINKING);
+            }
+            else if(!strncmp(command,"FILE_SEND ",10)) {
+                if(voice_playback_is_active() || s_dialog_listening || s_file)error="state_unavailable";
+                else {esp_err_t err=voice_service_push_file(command+10,true);accepted=err==ESP_OK && s_file!=NULL;}
+            } else error="unsupported_operation";
+        } else error="unsupported_operation";
+    }
+    uint32_t seq,round;
+    if(!voice_control_uint(root,"control_seq",&seq) || !voice_control_uint(root,"interaction_seq",&round)) {
+        ESP_LOGW(TAG,"Scoped control ignored: invalid sequence");cJSON_Delete(root);return;
+    }
+    julia_fsm_snapshot_t state;julia_fsm_runtime_get_snapshot(&state);
+    char ack[512];
+    int n=snprintf(ack,sizeof(ack),"{\"type\":\"control_ack\",\"device_id\":\"%s\","
+        "\"session_id\":\"%s\",\"interaction_id\":\"%s\",\"request_id\":\"%s\","
+        "\"interaction_seq\":%lu,\"control_seq\":%lu,\"accepted\":%s,\"code\":\"%s\",\"state_revision\":%lu}",
+        s_voice_device_id,voice_state_sync_session_id(),cJSON_GetObjectItemCaseSensitive(root,"interaction_id")->valuestring,
+        cJSON_GetObjectItemCaseSensitive(root,"request_id")->valuestring,(unsigned long)round,(unsigned long)seq,
+        accepted?"true":"false",error?error:accepted?"applied":"state_unavailable",(unsigned long)state.revision);
+    if(n>0 && (size_t)n<sizeof(ack)) {
+        if(record && !voice_control_record(&s_control_guard,root,ack)) wss_transport_fail_session();
+        (void)mqtt_comm_publish_voice_status(s_voice_device_id,ack,(size_t)n);
+    }
+    cJSON_Delete(root);
+}
+#endif
 
 /**
  * @brief 处理一条完整重组的 MQTT 语音命令（通信层注册表回调）。
@@ -1322,6 +1604,12 @@ static bool voice_service_handle_intent_json(const char *cmd, size_t cmd_len)
  */
 static void voice_service_on_mqtt_command(const char *cmd, size_t cmd_len)
 {
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    if (!cmd || !cmd_len || cmd_len > VOICE_SCOPED_CONTROL_MAX_LEN) return;
+    esp_err_t err = voice_service_enqueue(VOICE_JOB_SCOPED_CONTROL,
+                                          (const uint8_t *)cmd, cmd_len);
+    if (err != ESP_OK) ESP_LOGW(TAG, "Scoped control not queued: %s", esp_err_to_name(err));
+#else
     if (cmd == NULL || cmd_len == 0U || cmd_len > VOICE_SERVICE_CMD_MAX_LEN) {
         ESP_LOGW(TAG, "Ignoring oversized or empty voice command");
         return;
@@ -1335,7 +1623,7 @@ static void voice_service_on_mqtt_command(const char *cmd, size_t cmd_len)
         ESP_LOGW(TAG, "Ignoring blank voice command");
         return;
     }
-    ESP_LOGI(TAG, "Voice command: %.*s", (int)cmd_len, cmd);
+    ESP_LOGD(TAG, "Voice command received (%u bytes)", (unsigned)cmd_len);
 
     if (voice_service_handle_intent_json(cmd, cmd_len)) return;
 
@@ -1364,8 +1652,9 @@ static void voice_service_on_mqtt_command(const char *cmd, size_t cmd_len)
             ESP_LOGW(TAG, "Voice MIC_STOP rejected: %s", esp_err_to_name(err));
         }
     } else {
-        ESP_LOGW(TAG, "Ignoring unknown voice command: %.*s", (int)cmd_len, cmd);
+        ESP_LOGW(TAG, "Ignoring unknown voice command");
     }
+#endif
 }
 
 /* ------------------------------------------------------------------ */
@@ -1388,10 +1677,20 @@ esp_err_t voice_service_init(void)
                             TAG, "create companion timer");
     }
 #endif
+#if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    ESP_RETURN_ON_ERROR(native_ota_get_device_id(s_voice_device_id, sizeof(s_voice_device_id)),
+                        TAG, "stable voice identity unavailable");
+    char topic[96];
+    int n = snprintf(topic, sizeof(topic), "voice/%s/vcmd", s_voice_device_id);
+    if (n <= 0 || (size_t)n >= sizeof(topic)) return ESP_ERR_INVALID_SIZE;
+    return mqtt_comm_register_topic(topic, VOICE_SCOPED_CONTROL_MAX_LEN, true,
+                                    voice_service_on_mqtt_command);
+#else
     /* 语音 topic 非 critical：语音订阅失败不影响 OTA 连接就绪判定。 */
     return mqtt_comm_register_topic(CONFIG_COMM_MQTT_VOICE_CMD_TOPIC,
                                     VOICE_SERVICE_CMD_MAX_LEN, false,
                                     voice_service_on_mqtt_command);
+#endif
 }
 
 esp_err_t voice_service_init_board_audio(void)
@@ -1451,7 +1750,11 @@ esp_err_t voice_service_send_chunk(const uint8_t *buf, size_t len)
     voice_uplink_push_result_t result = voice_uplink_ring_push(
         &s_uplink_ring, buf, len);
     switch (result) {
-    case VOICE_UPLINK_PUSH_OK: return ESP_OK;
+    case VOICE_UPLINK_PUSH_OK:
+        portENTER_CRITICAL(&s_mic_state_lock);
+        s_last_capture_us = esp_timer_get_time();
+        portEXIT_CRITICAL(&s_mic_state_lock);
+        return ESP_OK;
     case VOICE_UPLINK_PUSH_FULL: {
         /* 采集任务只报告缓冲已满；负责语音连接的任务统一停止上传并关闭连接，
          * 避免两个任务同时清理同一批声音和加密连接。 */

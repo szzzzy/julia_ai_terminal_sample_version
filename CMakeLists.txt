@@ -8,7 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 稳定版本号（与 fused 一致）：OTA 判断/状态上报/镜像头全部读取
 # esp_app_desc_t.version，格式严格 major.minor.patch；不依赖 git 派生。
-set(PROJECT_VER "0.1.3")
+set(PROJECT_VER "0.1.4")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # "Trim" the build. Include the minimal set of components, main, and anything it depends on.
