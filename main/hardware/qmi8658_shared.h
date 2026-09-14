@@ -8,6 +8,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stdbool.h>
 
 typedef struct {
     float ax_g;
@@ -19,12 +20,17 @@ typedef struct {
 } board_imu_sample_t;
 
 /**
- * @brief 探测 SA0 两种地址并配置为 30 Hz、±4 g、每轴 ±64 dps。
+ * @brief 探测并配置为 30 Hz、±4 g、每轴 ±64 dps，采样保持关闭。
  *
  * 重复调用复用已验证的设备句柄。返回成功只表示寄存器配置完成，不表示上层运动
  * 门限可达或已经完成实机标定。
  */
 esp_err_t board_imu_init(void);
+
+/** 单一运动任务切换采样；关闭清除 CTRL7 的 aEN/gEN，不切断板级供电。
+ * 开启后调用者必须等待新样本并重建运动基线。失败时可重试。
+ */
+esp_err_t board_imu_set_enabled(bool enabled);
 
 /**
  * @brief 阻塞读取一个寄存器快照并换算为 g 和 dps。

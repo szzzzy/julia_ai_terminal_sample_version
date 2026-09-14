@@ -5,6 +5,8 @@
  * 连续多次出现足够大的加速度变化或转动后向行为 FSM 投递运动唤醒事件；扬声器
  * 播放和冷却期间暂停判断，避免设备自身振动重复触发。运动只把 S6 恢复到 S3，
  * 不直接操作显示，也不冒充唤醒词进入交流。
+ * IMU 开机配置后保持采样关闭；本任务在观察到进入/离开 S6 时切换采样，
+ * 重新开启后等待稳定并重建基线。关闭失败时继续重试，不把失败当作已省电。
  */
 #include "julia_motion.h"
 
@@ -39,12 +41,32 @@ static void motion_task(void *argument)
     (void)argument;
     board_imu_sample_t previous = {0};
     bool baseline_valid = false;
+    bool sampling_enabled = false;
     unsigned consecutive = 0;
     TickType_t cooldown_until = 0;
 
     for (;;) {
         julia_main_state_t state = julia_fsm_runtime_get_state();
         TickType_t now = xTaskGetTickCount();
+        bool want_sampling = motion_monitor_state(state);
+        if (want_sampling != sampling_enabled) {
+            baseline_valid = false;
+            consecutive = 0;
+            esp_err_t err = board_imu_set_enabled(want_sampling);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "IMU sampling %s failed: %s; retrying",
+                         want_sampling ? "enable" : "disable", esp_err_to_name(err));
+                vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_IMU_MOTION_SAMPLE_MS));
+                continue;
+            }
+            sampling_enabled = want_sampling;
+            ESP_LOGI(TAG, "IMU sampling %s", sampling_enabled ? "on (S6)" : "off");
+            /* 重新开启后先等待传感器稳定；下一轮再确认状态并建立新基线。 */
+            if (sampling_enabled) {
+                vTaskDelay(pdMS_TO_TICKS(200));
+                continue;
+            }
+        }
         if (!motion_monitor_state(state)) {
             baseline_valid = false;
             consecutive = 0;

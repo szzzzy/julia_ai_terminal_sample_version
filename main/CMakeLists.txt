@@ -51,7 +51,7 @@ set(srcs
     "voice/voice_push_demo.c"
 
     # 存储与板级硬件。
-    "storage/sd_card.c"
+    # "storage/sd_card.c"  # 暂停 SD 功能，保留以便恢复。
     "hardware/tca9554.c"
     "hardware/julia_battery.c"
     "hardware/julia_power.c"
@@ -124,8 +124,8 @@ set(priv_requires
     esp-tls
     lwip
     fatfs
-    sdmmc
-    esp_driver_sdmmc
+    # sdmmc             # 随 SD 驱动暂停。
+    # esp_driver_sdmmc
     esp_driver_i2c
     esp_driver_spi
     esp_driver_i2s

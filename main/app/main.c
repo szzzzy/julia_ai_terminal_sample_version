@@ -29,7 +29,7 @@
 #include "mqtt_comm.h"
 #include "network_lifecycle.h"
 #include "ota_boot_flow.h"
-#include "sd_card.h"
+// #include "sd_card.h"  // SD 初始化暂停，恢复时取消注释。
 #include "voice_service.h"
 #if !CONFIG_JULIA_SERVER_WAKE_ENABLE
 #include "wake_detector.h"
@@ -186,12 +186,15 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Julia time context init failed: %s", esp_err_to_name(err));
     }
-    /* SDMMC 挂载复用已经初始化的 I2C 扩展器，不操作启动动画；失败只影响文件服务。 */
+    /* 暂停 SD 初始化与挂载；保留调用代码，恢复时同步启用驱动编译项和配置。
     err = sd_card_start();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SD card monitor not started: %s", esp_err_to_name(err));
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGI(TAG, "SD card disabled by configuration");
+    } else if (err != ESP_OK) {
+        ESP_LOGW(TAG, "SD card mount failed: %s", esp_err_to_name(err));
     }
-    boot_stage_settle("storage_ready");
+    */
+    boot_stage_settle("rtc_ready");
 
     /* 取得 IPv4 后按注册顺序启动 MQTT 与 WSS 语音服务；任一启动失败都由网络
      * 生命周期任务按独立的有界退避重试，服务之间互不干扰。 */

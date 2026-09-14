@@ -24,7 +24,9 @@
 /** 同时打开的最大文件数（voice_service 单文件推送 + 预留）。 */
 #define SD_CARD_MAX_FILES 4
 
+#if CONFIG_SD_CARD_ENABLE
 static const char *TAG = "sd_card";
+#endif
 
 /* 只保护状态快照；不串行化文件 IO，也不能检测运行中拔卡。 */
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;

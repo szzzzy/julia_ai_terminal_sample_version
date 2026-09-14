@@ -717,8 +717,10 @@ menu "Example Configuration"
 
         config SD_CARD_ENABLE
             bool "Mount SD card for voice files"
-            default y
+            default n
             help
+                Legacy driver option: the current application does not compile
+                or start sd_card.c. Enabling this alone does not restore SD support.
                 Mounts the SD card (FAT) at /sdcard over SDMMC 1-bit so
                 voice_service can serve "SD:/<name>" FILE_SEND URIs and the push
                 demo can transfer the test audio files. D3/CS is routed through

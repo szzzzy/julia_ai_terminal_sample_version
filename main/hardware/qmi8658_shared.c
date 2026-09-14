@@ -6,9 +6,7 @@
  * SA0 地址，并在 WHO_AM_I 不匹配时移除临时设备句柄，避免留下半初始化对象。
  *
  * 配置固定为 30 Hz、加速度 ±4 g、陀螺仪每轴 ±64 dps；它服务于 S6 运动诊断，
- * 不是通用姿态解算驱动。当前上层 120 dps 门限超过三轴同时满量程时的最大向量模
- * （约 111 dps），因此陀螺仪分支无法触发；在调整量程或门限并验证前，只能依赖
- * 加速度变化分支。
+ * 不是通用姿态解算驱动。初始化保持采样关闭，由运动任务仅在 S6 开启。
  */
 #include "qmi8658_shared.h"
 
@@ -44,7 +42,7 @@ static const char *TAG = "QMI8658";
 static i2c_master_dev_handle_t s_dev;
 static uint8_t s_address;
 
-/* s_dev 只在运动监测任务初始化后读取；本模块不提供多任务并发保护。 */
+/* 启动阶段配置完成后，由运动任务独占设备的采样控制和读数；不提供并发保护。 */
 
 static esp_err_t read_regs(uint8_t reg, uint8_t *data, size_t length)
 {
@@ -93,6 +91,7 @@ esp_err_t board_imu_init(void)
     if (err != ESP_OK) err = try_address(bus, QMI8658_ADDR_HIGH);
     ESP_RETURN_ON_ERROR(err, TAG, "QMI8658 not found");
 
+    ESP_RETURN_ON_ERROR(board_imu_set_enabled(false), TAG, "disable accel/gyro");
     ESP_RETURN_ON_ERROR(write_reg(QMI8658_CTRL1, QMI8658_AUTO_INCREMENT), TAG,
                         "configure CTRL1");
     ESP_RETURN_ON_ERROR(write_reg(QMI8658_CTRL2, QMI8658_ACC_4G_30HZ), TAG,
@@ -101,11 +100,15 @@ esp_err_t board_imu_init(void)
                         "configure gyroscope");
     ESP_RETURN_ON_ERROR(write_reg(QMI8658_CTRL6, 0x00), TAG,
                         "disable attitude engine");
-    ESP_RETURN_ON_ERROR(write_reg(QMI8658_CTRL7, QMI8658_ENABLE_ACC_GYR), TAG,
-                        "enable accel/gyro");
 
-    ESP_LOGI(TAG, "ready address=0x%02x odr=30Hz accel=+/-4g gyro=+/-64dps", s_address);
+    ESP_LOGI(TAG, "ready address=0x%02x odr=30Hz accel=+/-4g gyro=+/-64dps sampling=off", s_address);
     return ESP_OK;
+}
+
+esp_err_t board_imu_set_enabled(bool enabled)
+{
+    /* QMI8658C CTRL7: aEN bit0, gEN bit1。保留现有开启配置，关闭两传感器时写 0。 */
+    return write_reg(QMI8658_CTRL7, enabled ? QMI8658_ENABLE_ACC_GYR : 0x00);
 }
 
 static int16_t le_i16(const uint8_t *data)
