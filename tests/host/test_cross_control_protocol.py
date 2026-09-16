@@ -40,7 +40,7 @@ char input[1400];while(fgets(input,sizeof(input),stdin)){
 }return 0;}
 '''
 code=a.out/'cross_firmware.c';exe=a.out/'cross_firmware.exe';code.write_text(driver,encoding='utf-8')
-subprocess.run([a.cc,*['-I'+str(d) for d in (root/'tests/host',root/'tests/host/stubs',root/'main/voice',root/'main/fsm',a.cjson)],str(code),str(root/'main/voice/voice_control_guard.c'),str(root/'main/fsm/julia_fsm.c'),str(a.cjson/'cJSON.c'),'-o',str(exe)],check=True)
+subprocess.run([a.cc,*['-I'+str(d) for d in (root/'tests/host',root/'tests/host/stubs',root/'main/voice', root/'main/voice/protocol', root/'main/network/wss',root/'main/behavior',a.cjson)],str(code),str(root/'main/voice/protocol/voice_control_guard.c'),str(root/'main/behavior/julia_fsm.c'),str(a.cjson/'cJSON.c'),'-o',str(exe)],check=True)
 
 class Firmware:
     def __init__(self,device,sid):

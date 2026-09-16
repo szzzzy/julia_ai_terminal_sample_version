@@ -11,7 +11,7 @@
  *     （present / bind / crossfade / transition_direct_*）。
  *   - 它不做底层渲染：立绘部件的逐层摆放/眨眼/呼吸由 avatar_parts 与
  *     avatar_micro_motion 承担；背光由 julia_backlight 承担；显示功率/主题策略由
- *     julia_display_theme（或当前生效的 app/julia_idle_display.c）承担。
+ *     julia_display_theme（或当前生效的 behavior/julia_idle_display.c）承担。
  *
  * 移植与构建状态（重要，非 bug）：
  *   - main/CMakeLists.txt 的 srcs 并未纳入本文件，也未纳入 julia_display_theme.c

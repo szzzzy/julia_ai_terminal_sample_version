@@ -235,8 +235,10 @@ static bool service_state_apply_event(fsm_event_t event)
         julia_avatar_set_offline(state == JULIA_SERVICE_OFFLINE);
         const char *name = state == JULIA_SERVICE_ONLINE ? "ONLINE" :
                            state == JULIA_SERVICE_OFFLINE ? "OFFLINE" : "CONNECTING";
-        ESP_LOGI(TAG, "service=%s online_links=0x%02x by %s", name,
-                 (unsigned)online_links, julia_fsm_event_name(event));
+        ESP_LOGI(TAG, "service=%s online_links=0x%02x by %s behavior=%s/%s", name,
+                 (unsigned)online_links, julia_fsm_event_name(event),
+                 julia_fsm_main_state_name(s_fsm.main_state),
+                 julia_fsm_s7_sub_state_name(s_fsm.s7_sub_state));
     }
     if (state == JULIA_SERVICE_ONLINE && s_service_init_timer != NULL) {
         (void)esp_timer_stop(s_service_init_timer);
@@ -683,6 +685,22 @@ static int64_t *event_deadline(fsm_event_t event)
  */
 static bool runtime_process_event(fsm_event_t event)
 {
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+    /* IMU 是本地入口，不能像服务端唤醒词一样以收到事件作为会话可用的依据。
+     * 在消费时检查而非仅在采样时检查，覆盖排队期间断线、初始同步尚未完成和
+     * OFFLINE 提示结束后回到 S3 的情况；拒绝即丢弃，不在恢复联网后补触发。
+     * 聚合状态可能落后于连接，因此还要核对实际链路与会话同步快照。
+     * 兼容配置的搬动只回 S3，不需要云端，不能套用这个 S4 准入限制。 */
+    if (event == EVT_MOTION_WAKE &&
+        (s_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY ||
+         julia_fsm_is_quiet(s_fsm.main_state)) &&
+        (julia_fsm_runtime_get_service_state() != JULIA_SERVICE_ONLINE ||
+         !mqtt_comm_is_ready() || !wss_transport_is_ready() ||
+         !voice_state_sync_is_ready())) {
+        ESP_LOGD(TAG, "motion wake ignored: interaction services not ready");
+        return false;
+    }
+#endif
     /* 安静恢复期间 S3 的驻留计时还没重新开始，忽略这次到期。 */
     if (s_quiet_recovery && s_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY &&
         event == EVT_STANDBY_TIMEOUT) return false;
@@ -715,15 +733,21 @@ static bool runtime_process_event(fsm_event_t event)
         /* 快照巡检在两条实际链路均就绪后结束恢复并重新开始 S3 驻留计时。 */
         return true;
     }
-    /* 已处于 OFFLINE 时不再重复播报，但会话失效不能被一起吞掉：
-     * MQTT 可能整轮离线，而语音对话本身一直是正常的。 */
-    if (event == EVT_WSS_DISCONNECTED && previous == JULIA_SERVICE_OFFLINE)
+    /* 播报去重/初始连接宽限不能吞掉会话失效：MQTT 尚未就绪时，WSS 也可能
+     * 已经接受服务器唤醒进入 S4。CONNECTING 期间断开仍应立即退出旧会话，
+     * 但保留初始连接截止时间，届时再提示；OFFLINE 期间则避免重复播报。 */
+    if (event == EVT_WSS_DISCONNECTED && previous != JULIA_SERVICE_ONLINE)
         return runtime_process_event(EVT_VOICE_SESSION_RESET);
     /* 连接类事件到这里只更新服务状态；只有“由非 OFFLINE 变为 OFFLINE”才继续往下
      * 交给 FSM，产生一次 S7.1 提示。 */
     if (service_event && (julia_fsm_runtime_get_service_state() != JULIA_SERVICE_OFFLINE ||
                           previous == JULIA_SERVICE_OFFLINE)) return true;
     bool applied = julia_fsm_handle_event(&s_fsm, event, NULL);
+    if (service_event && !applied) {
+        ESP_LOGW(TAG, "offline notice skipped: event=%s state=%s/%s",
+                 julia_fsm_event_name(event), julia_fsm_main_state_name(s_fsm.main_state),
+                 julia_fsm_s7_sub_state_name(s_fsm.s7_sub_state));
+    }
     if (!applied) ESP_LOGD(TAG, "ignored event=%s state=%s/%s", julia_fsm_event_name(event),
                            julia_fsm_main_state_name(s_fsm.main_state),
                            julia_fsm_s2_sub_state_name(s_fsm.s2_sub_state));

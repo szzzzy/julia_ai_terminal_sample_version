@@ -107,3 +107,24 @@ bool download_url_host_allowed(const char *url, const char *allowlist)
     }
     return false;
 }
+
+bool download_server_url(const char *url, bool legacy, char *out, size_t capacity)
+{
+    static const char old_origin[] = "https://8.133.215.254:8443";
+    static const char new_origin[] = "https://8.133.215.254:18443";
+    if (url == NULL || out == NULL) return false;
+    size_t length = strlen(url);
+    size_t prefix = sizeof(old_origin) - 1U;
+    bool migrate = !legacy && strncmp(url, old_origin, prefix) == 0 &&
+        (url[prefix] == '\0' || url[prefix] == '/' ||
+         url[prefix] == '?' || url[prefix] == '#');
+    size_t extra = migrate ? 1U : 0U;
+    if (capacity <= length || capacity - length <= extra) return false;
+    if (migrate) {
+        memcpy(out, new_origin, sizeof(new_origin) - 1U);
+        memcpy(out + sizeof(new_origin) - 1U, url + prefix, length - prefix + 1U);
+    } else {
+        memcpy(out, url, length + 1U);
+    }
+    return true;
+}

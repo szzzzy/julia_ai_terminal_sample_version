@@ -8,6 +8,23 @@
 
 int main(void)
 {
+    char migrated[128];
+    assert(download_server_url("https://8.133.215.254:8443/a?sig=8443", false, migrated, sizeof(migrated)));
+    assert(strcmp(migrated, "https://8.133.215.254:18443/a?sig=8443") == 0);
+    const char *unchanged[] = {"https://8.133.215.254:18443/a", "https://other:8443/a",
+        "https://8.133.215.254:84430/a", "https://8.133.215.254:8443@other/a",
+        "http://8.133.215.254:8443/a", "https://other/a?url=https://8.133.215.254:8443/a"};
+    for (unsigned i=0; i<sizeof(unchanged)/sizeof(unchanged[0]); ++i) {
+        assert(download_server_url(unchanged[i], false, migrated, sizeof(migrated)));
+        assert(strcmp(migrated, unchanged[i]) == 0);
+    }
+    const char *old = "https://8.133.215.254:8443";
+    assert(download_server_url(old, true, migrated, sizeof(migrated)));
+    assert(strcmp(migrated, old) == 0);
+    assert(!download_server_url(old, false, migrated, strlen(old)+1));
+    assert(download_server_url(old, false, migrated, strlen(old)+2));
+    assert(strcmp(migrated, "https://8.133.215.254:18443") == 0);
+    assert(!download_server_url(NULL, false, migrated, sizeof(migrated)));
     const char *hosts=" one.example, allowed.example ,other.example";
     assert(download_url_host_allowed("https://ALLOWED.example:9443/fw.bin?x=1", hosts));
     assert(!download_url_host_allowed("https://allowed.example:pass@other.invalid/fw.bin", hosts));

@@ -26,7 +26,7 @@
  *         `vendor_config.init_cmds` 覆盖厂商特定初始化命令；未提供时使用驱动内置默认序列。
  *
  * @see   main/display/julia_display.c（板级接线与初始化顺序）
- * @see   main/lvgl_port/lvgl_port.c（LVGL 刷新回调与 DMA 同步）
+ * @see   main/display/lvgl_port/lvgl_port.c（LVGL 刷新回调与 DMA 同步）
  */
 #pragma once
 

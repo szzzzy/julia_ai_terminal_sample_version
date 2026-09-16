@@ -39,6 +39,9 @@
 #include "julia_fsm.h"
 #include "julia_fsm_runtime.h"
 #include "julia_fault.h"
+#if CONFIG_JULIA_IMU_LOGGER_ENABLE
+#include "imu_logger.h"
+#endif
 #if CONFIG_VOICE_PUSH_DEMO_ENABLE
 #include "voice_push_demo.h"
 #endif
@@ -122,6 +125,14 @@ void app_main(void)
 
     ota_boot_flow_run();
     boot_stage_settle("ota_ready");
+
+#if CONFIG_JULIA_IMU_LOGGER_ENABLE
+    /* 实验模式独占 IMU：保留电源与启动验收，跳过产品语音、状态机和运动任务。 */
+    esp_err_t logger_err = imu_logger_start();
+    ota_boot_flow_complete(logger_err == ESP_OK);
+    ESP_ERROR_CHECK(logger_err);
+    return;
+#endif
 
     esp_err_t err;
     esp_err_t visual_error = ESP_OK;

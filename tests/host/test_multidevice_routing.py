@@ -53,8 +53,8 @@ code = a.out / "routing.c"
 exe = a.out / "routing.exe"
 code.write_text(COMMON + prefix + function(source, "voice_service_busy_wait") + "\n" + function(source, "voice_service_handle_control_json") + "\n" + function(source, "voice_service_apply_scoped_control") + "\n" +
                 function(source, "voice_service_on_mqtt_command") + main, encoding="utf-8")
-subprocess.run([a.cc, "-I"+str(root/"tests/host"), "-I"+str(root/"tests/host/stubs"), "-I"+str(root/"main/fsm"), "-I"+str(root/"main/voice"),
-                "-I"+a.cjson, str(code), str(root/"main/voice/voice_control_guard.c"),
+subprocess.run([a.cc, "-I"+str(root/"tests/host"), "-I"+str(root/"tests/host/stubs"), "-I"+str(root/"main/behavior"), "-I"+str(root/"main/voice"), "-I"+str(root/"main/voice/protocol"), "-I"+str(root/"main/network/wss"),
+                "-I"+a.cjson, str(code), str(root/"main/voice/protocol/voice_control_guard.c"),
                 str(Path(a.cjson)/"cJSON.c"), "-o", str(exe)], check=True)
 subprocess.run([str(exe)], check=True)
 
@@ -95,14 +95,14 @@ capture_common = '#define CONFIG_JULIA_LOCAL_CAPTURE_ENABLE 1\n' + COMMON.replac
 code.write_text(capture_common + capture_fixture + '\n'.join(function(source, n) for n in names) + capture_main,
                 encoding="utf-8")
 subprocess.run([a.cc, *["-I"+str(d) for d in (root/"tests/host", root/"tests/host/stubs",
-                root/"main/fsm", root/"main/voice", Path(a.cjson))], str(code),
-                str(root/"main/voice/voice_control_guard.c"), str(Path(a.cjson)/"cJSON.c"),
+                root/"main/behavior", root/"main/voice", root/"main/voice/protocol", root/"main/network/wss", Path(a.cjson))], str(code),
+                str(root/"main/voice/protocol/voice_control_guard.c"), str(Path(a.cjson)/"cJSON.c"),
                 "-o", str(exe)], check=True)
 subprocess.run([str(exe)], check=True)
 
 # Compile the actual credential selectors in all supported non-certificate modes.
 mqtt = (root / "main/network/mqtt_comm.c").read_text(encoding="utf-8")
-wss = (root / "main/voice/wss_transport.c").read_text(encoding="utf-8")
+wss = (root / "main/network/wss/wss_transport.c").read_text(encoding="utf-8")
 for mode in ("NONE", "USERNAME_PASSWORD", "TOKEN"):
     fixture = COMMON + r'''
 #define CONFIG_JULIA_MULTI_DEVICE_ENABLE 1

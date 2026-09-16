@@ -17,7 +17,7 @@
 | HW-01 | 共享 I2C／IMU | TCA9554 初始化失败清理已修复；QMI8658 固定为每轴 ±64dps，陀螺仪门限现为 `CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS=30`，落在量程内（三轴合成上界约 110.9dps） | 验证低内存恢复；陀螺仪量程与门限仍需上板标定确认 |
 | DISPLAY-01 | 显示驱动契约 | `julia_display_set_backlight()` 只有声明；ST77916 `swap_xy` 的 QSPI 路径绕过命令封装并忽略错误；panel 开关错误现在保留为待重试状态 | 新代码使用 `julia_backlight`；修复 QSPI 命令与错误传播后再开放对应 API |
 
-源码定位：[voice_service.c](../main/voice/voice_service.c)、[wss_transport.c](../main/voice/wss_transport.c)、[board_audio.c](../components/julia_board_audio/board_audio.c)、[sd_card.c](../main/storage/sd_card.c)、[tca9554.c](../main/hardware/tca9554.c)、[qmi8658_shared.c](../main/hardware/qmi8658_shared.c)、[esp_lcd_st77916.c](../main/display/esp_lcd_st77916.c)。
+源码定位：[voice_service.c](../main/voice/voice_service.c)、[wss_transport.c](../main/network/wss/wss_transport.c)、[board_audio.c](../components/julia_board_audio/board_audio.c)、[sd_card.c](../main/storage/sd_card.c)、[tca9554.c](../main/hardware/tca9554.c)、[qmi8658_shared.c](../main/hardware/qmi8658_shared.c)、[esp_lcd_st77916.c](../main/display/esp_lcd_st77916.c)。
 
 ## 2. OTA 与发布
 

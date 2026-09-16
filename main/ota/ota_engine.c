@@ -717,11 +717,23 @@ static void ota_engine_task(void *pvParameter)
 
     /* 最多允许一次“服务器忽略 Range 后从零重试”：避免把完整镜像追加到旧偏移，也避免
      * 无限循环消耗网络与 Flash。第二次仍拿不到合法 206 时按失败退出本任务。 */
+    /* Map only the transport URL; retain NVS artifact identity and validation. */
+    char server_url[NATIVE_OTA_URL_SIZE + 1U];
+#ifdef CONFIG_JULIA_LEGACY_SERVER_PORTS
+    const bool legacy_server = true;
+#else
+    const bool legacy_server = false;
+#endif
+    if (!download_server_url(request.url, legacy_server, server_url, sizeof(server_url))) {
+        failure_reason = NATIVE_OTA_FAILURE_IMAGE_VALIDATE_FAILED;
+        goto cleanup;
+    }
+
     for (unsigned http_attempt = 0; http_attempt < 2; ++http_attempt) {
         memset(&headers, 0, sizeof(headers));
         /* 每次重试都创建新的 HTTP 客户端，确保上一次连接的响应状态不会被复用。 */
         esp_http_client_config_t config = {
-            .url = request.url,
+            .url = server_url,
             .cert_pem = (char *)server_cert_pem_start,
             .timeout_ms = CONFIG_EXAMPLE_OTA_RECV_TIMEOUT,
             .keep_alive_enable = true,

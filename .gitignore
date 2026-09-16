@@ -3,6 +3,9 @@
 /managed_components/
 /sdkconfig.old
 /sdkconfig
+/sdkconfig.imu-test
+/sdkconfig.imu-test.old
+/imu_records/
 
 # Python test cache
 __pycache__/

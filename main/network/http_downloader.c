@@ -2,7 +2,7 @@
  * @file    http_downloader.c
  * @brief   公共 HTTPS 数据面下载器实现。
  *
- * 当前唯一调用方是音频素材下载（`main/audio/audio_engine.c`）；OTA 下载仍在
+ * 当前唯一调用方是音频素材下载（`main/audio_assets/audio_engine.c`）；OTA 下载仍在
  * `ota_engine.c` 内自带一套 HTTP 循环，两者各写一份状态码/长度/ETag/Range 策略，
  * 只共用响应头采集与 Content-Range 解析。改这里时必须同步核对 OTA 侧，反之亦然。
  *
@@ -104,6 +104,17 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
         return ESP_ERR_INVALID_ARG;
     }
 
+    /* Apply on every transfer/retry, including old NVS resume URLs. */
+    char server_url[NATIVE_OTA_URL_SIZE + 1U];
+#ifdef CONFIG_JULIA_LEGACY_SERVER_PORTS
+    const bool legacy_server = true;
+#else
+    const bool legacy_server = false;
+#endif
+    if (!download_server_url(config->url, legacy_server, server_url, sizeof(server_url))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
     memset(result, 0, sizeof(*result));
     result->failure_reason = NATIVE_OTA_FAILURE_NONE;
 
@@ -123,7 +134,7 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
         result->etag[0] = '\0';
         /* 每次重试都创建新的 HTTP 客户端，确保上一次连接的响应状态不会被复用。 */
         esp_http_client_config_t http_config = {
-            .url = config->url,
+            .url = server_url,
             .cert_pem = config->cert_pem != NULL ?
                         config->cert_pem : (const char *)server_cert_pem_start,
             .timeout_ms = config->timeout_ms,

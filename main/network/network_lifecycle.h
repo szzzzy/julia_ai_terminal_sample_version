@@ -70,7 +70,7 @@ esp_err_t network_lifecycle_start(void);
  *
  * true 只是请求：本模块 Task 先通知 WSS/MQTT owner 断开并清理连接，两者都确认后
  * 才停止无线电；false 重新启动驱动，但联网服务仍保持暂停，直到重新取得 IPv4 地址
- * 后由 IP-ready 回调恢复。当前调用方为 `app/julia_quiet_power.c`。
+ * 后由 IP-ready 回调恢复。当前调用方为 `behavior/julia_quiet_power.c`。
  *
  * @note 可在普通任务上下文调用；不得从 ISR 调用。
  */

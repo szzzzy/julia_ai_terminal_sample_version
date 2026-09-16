@@ -108,7 +108,7 @@ int main(void)
                                     JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S2_DIALOG,
                                     JULIA_S2_SUB_STATE_S2_2_THINKING));
-    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S4_INTERACTION,
+    assert(!julia_fsm_can_transition(JULIA_MAIN_STATE_S4_INTERACTION,
                                      JULIA_S2_SUB_STATE_NONE,
                                      JULIA_MAIN_STATE_S2_DIALOG,
                                      JULIA_S2_SUB_STATE_S2_1_LISTENING));
@@ -280,6 +280,10 @@ int main(void)
     assert(wake_fsm.main_state == JULIA_MAIN_STATE_S4_INTERACTION);
     assert(!julia_fsm_handle_event(&wake_fsm, EVT_USER_CALL, NULL));
     assert(wake_fsm.main_state == JULIA_MAIN_STATE_S4_INTERACTION);
+    assert(julia_fsm_handle_event(&wake_fsm, EVT_LOCAL_SPEECH_START, NULL));
+    assert(julia_fsm_handle_event(&wake_fsm, EVT_LOCAL_SPEECH_START, NULL));
+    assert(wake_fsm.main_state == JULIA_MAIN_STATE_S4_INTERACTION);
+    assert(wake_fsm.s2_sub_state == JULIA_S2_SUB_STATE_NONE);
     assert(julia_fsm_handle_event(&wake_fsm, EVT_START_DIALOG, NULL));
     assert(wake_fsm.main_state == JULIA_MAIN_STATE_S2_DIALOG);
     assert(wake_fsm.s2_sub_state == JULIA_S2_SUB_STATE_S2_2_THINKING);

@@ -18,7 +18,7 @@
  *         on_color_trans_done 挂到 lvgl_port_color_trans_done，它是像素 DMA 传输完成的
  *         唯一同步点：ISR 只 give 信号，真正的等待发生在 LVGL flush 任务里。
  *
- * @see    main/lvgl_port/lvgl_port.c（LVGL 显示端口与刷新回调）
+ * @see    main/display/lvgl_port/lvgl_port.c（LVGL 显示端口与刷新回调）
  * @see    main/display/esp_lcd_st77916.c（通用 ST77916 面板驱动）
  * @see    main/app/main.c（顶层初始化顺序：显示 → 立绘）
  */

@@ -32,20 +32,20 @@ static void assert_not_present(const char *text, const char *needle)
 
 int main(void)
 {
-    char *idle = read_source("main/app/julia_idle_display.c");
+    char *idle = read_source("main/behavior/julia_idle_display.c");
     assert_not_present(idle, "julia_backlight_");
     assert_not_present(idle, "lvgl_port_set_display_off");
     assert_not_present(idle, "julia_avatar_set_dozing");
     free(idle);
 
-    char *motion = read_source("main/context/julia_motion.c");
+    char *motion = read_source("main/behavior/julia_motion.c");
     assert_not_present(motion, "julia_idle_display_note_activity");
     assert_not_present(motion, "julia_backlight_");
     assert_not_present(motion, "lvgl_port_set_display_off");
     assert(strstr(motion, "julia_fsm_runtime_post(EVT_MOTION_WAKE)") != NULL);
     free(motion);
 
-    char *night = read_source("main/context/julia_night_schedule.c");
+    char *night = read_source("main/behavior/julia_night_schedule.c");
     assert_not_present(night, "julia_idle_display_note_activity");
     free(night);
 
@@ -60,7 +60,7 @@ int main(void)
     *next_function = saved;
     free(voice);
 
-    char *runtime = read_source("main/fsm/julia_fsm_runtime.c");
+    char *runtime = read_source("main/behavior/julia_fsm_runtime.c");
     assert(strstr(runtime, "case FSM_PRESENT_S6_SLEEP:") != NULL);
     assert(strstr(runtime, "julia_backlight_force_off();") != NULL);
     assert(strstr(runtime, "lvgl_port_set_display_off(true)") != NULL);

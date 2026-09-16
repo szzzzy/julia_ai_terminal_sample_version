@@ -51,20 +51,18 @@ Julia Fused-Base 是面向 ESP32-S3 陪伴终端的设备固件，提供麦克�
 ```text
 julia-fused-base/
 ├─ main/                        应用源码，按功能域组织
-│  ├─ app/                      应用入口、错峰开机、闲置显示策略
-│  ├─ voice/                    WSS 语音业务、播放任务、PCM 缓冲、唤醒
-│  ├─ network/                  Wi-Fi 生命周期、MQTT、HTTP 下载
-│  ├─ ota/                      固件清单、下载、校验、启动确认与上报
-│  ├─ fsm/                      行为状态转换与运行实例
-│  ├─ context/                  时间同步、夜间策略、运动检测
-│  ├─ display/                  LCD 面板驱动和板级配置
-│  ├─ lvgl_port/                LVGL 任务、绘制缓冲与刷新同步
-│  ├─ ui/                       立绘、眼睛／嘴型、背光与生成资源
-│  ├─ hardware/                 IO 扩展器、RTC、IMU 与 LED 接口
-│  ├─ storage/                  SDMMC 挂载与存储接口
-│  ├─ audio/                    音频素材下载模块，业务入口未接通
-│  ├─ memory/                   记忆／例行参考源码，未参与当前构建
-│  ├─ PCF85063/、QMI8658/        参考驱动，当前使用 hardware/ 下的共享接口
+│  ├─ app/                      应用入口、启动装配和初始化顺序
+│  ├─ behavior/                 状态图、事件运行时、故障恢复，以及运动、夜间、闲置显示和静默电源策略
+│  ├─ network/                  Wi-Fi 生命周期、MQTT 和 HTTPS 下载
+│  ├─ voice/                    实时语音业务装配
+│  ├─ audio_assets/             音频素材清单和下载，当前未接通 MQTT 下载触发
+│  ├─ time/                     系统时间服务：RTC 恢复、SNTP 校时及写回 RTC
+│  ├─ hardware/                 I2C 总线、RTC/IMU 外设访问、电池、电源与 LED
+│  ├─ display/                  LCD 驱动、面板配置、背光
+│  ├─ ui/                       立绘、眼睛/嘴型、RLE 解码和生成资源，负责界面内容
+│  ├─ ota/                      固件清单、下载校验、持久化、启动验收/回滚及状态上报
+│  ├─ storage/                  SDMMC 挂载接口，目前暂停编译
+│  ├─ legacy/                   未参与当前构建的旧版实现，按 voice/context/memory/ui/display/hardware/storage 分类归档
 │  ├─ CMakeLists.txt            实际源文件、依赖与资源注册
 │  └─ Kconfig.projbuild         应用配置项
 ├─ components/
@@ -84,7 +82,7 @@ julia-fused-base/
 └─ partitions_16mb.csv          Flash 分区布局
 ```
 
-`build/`、`build-host/` 和 `build-ota-name/` 是生成目录，不属于源码。`voice/` 负责实时对话音频，`audio/` 负责音频素材下载，二者职责不同。模块详情及未参与编译的文件见 [源码组织](main/README.md)。
+`build/`、`build-host/` 和 `build-ota-name/` 是生成目录，不属于源码。`voice/` 负责实时对话音频，`audio_assets/` 负责音频素材下载，二者职责不同。模块详情及未参与编译的文件见 [源码组织](main/README.md)。
 
 ## 快速开始
 

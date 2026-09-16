@@ -1,5 +1,20 @@
 menu "Example Configuration"
 
+    config JULIA_LEGACY_SERVER_PORTS
+        bool "Legacy customer test server ports (9443/8443/1883)"
+        default n
+        help
+            Keep legacy HTTPS URLs unchanged. Use the matching endpoint profile
+            for WSS and MQTT; this option does not change the voice protocol.
+
+    config JULIA_IMU_LOGGER_ENABLE
+        bool "Standalone IMU experiment firmware (no product voice/FSM)"
+        default n
+        help
+            Trusted LAN only. Exposes HTTP start/status/retry on port 8080.
+            Records one 8-second action in RAM, then uploads to the requesting PC.
+            Build separately with sdkconfig.imu-test.defaults; do not deploy as product firmware.
+
     config JULIA_LOCAL_CAPTURE_ENABLE
         bool "Device endpointing with negotiated capture-v1 protocol"
         depends on JULIA_SERVER_WAKE_ENABLE && JULIA_CLOUD_STATE_SYNC_ENABLE
@@ -443,7 +458,8 @@ menu "Example Configuration"
 
     config COMM_MQTT_BROKER_URI
         string "MQTT broker URI"
-        default "mqtt://192.168.137.1:1883"
+        default "mqtts://8.133.215.254:1883" if JULIA_LEGACY_SERVER_PORTS
+        default "mqtts://8.133.215.254:11883"
         help
             MQTT broker URI. Production devices should use mqtts:// and a broker
             certificate trusted by the ESP-IDF certificate bundle.
@@ -547,7 +563,7 @@ menu "Example Configuration"
 
         config WSS_SERVER_HOST
             string "WSS voice server host"
-            default "192.168.137.1"
+            default "8.133.215.254"
             help
                 Host name or IP address of the WSS (WebSocket over TLS) voice streaming
                 server. The server certificate must chain to server_certs/ca_cert.pem.
@@ -555,7 +571,8 @@ menu "Example Configuration"
         config WSS_SERVER_PORT
             int "WSS voice server port"
             range 1 65535
-            default 9443
+            default 9443 if JULIA_LEGACY_SERVER_PORTS
+            default 19443
             help
                 TCP port of the WSS voice streaming server.
 
@@ -937,9 +954,13 @@ menu "Example Configuration"
 
         config JULIA_IMU_MOTION_SAMPLE_MS
             int "IMU motion sample period (ms)"
-            range 20 1000
+            range 10 1000
             default 200
             depends on JULIA_IMU_MOTION_ENABLE
+            help
+                Task polling interval only, not the sensor ODR. A 10 ms interval
+                does not create 100 fresh samples/s when the sensor runs at 30 Hz.
+                Use the independent logger for high-ODR characterization.
 
         config JULIA_IMU_MOTION_CONFIRM_FRAMES
             int "Consecutive IMU motion frames"

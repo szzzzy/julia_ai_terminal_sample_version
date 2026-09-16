@@ -270,8 +270,7 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
                target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S6_SLEEP) ||
                (to_main_state == JULIA_MAIN_STATE_S2_DIALOG &&
-                (to_s2_sub_state == JULIA_S2_SUB_STATE_S2_2_THINKING ||
-                 to_s2_sub_state == JULIA_S2_SUB_STATE_S2_1_LISTENING));
+                to_s2_sub_state == JULIA_S2_SUB_STATE_S2_2_THINKING);
 
     case JULIA_MAIN_STATE_S5_SILENT:
         return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
@@ -422,10 +421,16 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
     julia_s2_sub_state_t target_s2_sub_state = JULIA_S2_SUB_STATE_COUNT;
     julia_s7_sub_state_t target_s7_sub_state = JULIA_S7_SUB_STATE_NONE;
 
-    /* 播放中被本地语音打断与新一轮听音共用同一落点，避免播放阶段的旧子状态残留。 */
+    /* S4 已经承担 S2.1 的听音职责：起音只确认事件，不重复迁移、呈现或重启
+     * 听音计时；段结束的 EVT_START_DIALOG 直接进入 S2.2。S2.1 重复起音同理。 */
+    if (event == EVT_LOCAL_SPEECH_START &&
+        (fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
+         (fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG &&
+          fsm->s2_sub_state == JULIA_S2_SUB_STATE_S2_1_LISTENING))) return true;
+
+    /* 陪伴中起音、播放中被打断才需要进入 S2.1。 */
     if (event == EVT_LOCAL_SPEECH_START &&
         (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
-         fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
          (fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG &&
           fsm->s2_sub_state == JULIA_S2_SUB_STATE_S2_3_SPEAKING))) {
         target_main_state = JULIA_MAIN_STATE_S2_DIALOG;

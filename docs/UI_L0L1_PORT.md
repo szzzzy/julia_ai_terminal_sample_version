@@ -17,7 +17,7 @@ app_main
 下行 PCM → PSRAM 缓冲 → voice_playback / I2S → julia_avatar_feed_pcm → 嘴型
 ```
 
-实际文件是 `main/display/julia_display.c`、`main/display/esp_lcd_st77916.c`、`main/lvgl_port/lvgl_port.c`、`main/ui/julia_avatar.c` 和 `main/ui/julia_backlight.c`。`julia_ui.c`、`st77916_qspi.c`、`julia_display_theme.c` 不参与当前构建。
+实际文件是 `main/display/julia_display.c`、`main/display/esp_lcd_st77916.c`、`main/display/lvgl_port/lvgl_port.c`、`main/ui/julia_avatar.c` 和 `main/display/julia_backlight.c`。`julia_ui.c`、`st77916_qspi.c`、`julia_display_theme.c` 不参与当前构建。
 
 ## 2. 板级参数与刷新
 
@@ -34,7 +34,7 @@ app_main
 
 任务周期不是屏幕实测帧率。整屏传输会拆分为多条带，刷新受总线、DMA、锁竞争和重绘面积影响。
 
-所有 LVGL 对象访问应使用 `lvgl_port_lock()`／`unlock()`。音频入口只维护嘴型目标数据，不在 PCM 回调中绘制图像。具体同步与刷新完成处理见 [lvgl_port.c](../main/lvgl_port/lvgl_port.c)。
+所有 LVGL 对象访问应使用 `lvgl_port_lock()`／`unlock()`。音频入口只维护嘴型目标数据，不在 PCM 回调中绘制图像。具体同步与刷新完成处理见 [lvgl_port.c](../main/display/lvgl_port/lvgl_port.c)。
 
 ## 3. 开机呈现
 
@@ -90,7 +90,7 @@ ETA6098 的 STAT 未接入可读GPIO，因此软件不再显示绿色CHG或推�
 
 ## 6. FSM 映射
 
-状态机定义在 [julia_fsm.h](../main/fsm/julia_fsm.h)，呈现由 [julia_fsm_runtime.c](../main/fsm/julia_fsm_runtime.c) 绑定。
+状态机定义在 [julia_fsm.h](../main/behavior/julia_fsm.h)，呈现由 [julia_fsm_runtime.c](../main/behavior/julia_fsm_runtime.c) 绑定。
 
 | 行为状态 | 呈现 |
 | --- | --- |

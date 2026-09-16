@@ -70,3 +70,8 @@ bool download_parse_content_range(const char *value, size_t *start,
  * @return true 允许下载；false URL 形式不合法或主机不在列表中。
  */
 bool download_url_host_allowed(const char *url, const char *allowlist);
+
+/* Copy a URL for transport, mapping only the old development HTTPS authority.
+ * Input/output must not overlap. Never logs paths, query strings or credentials.
+ * Persistent manifest identity is deliberately left unchanged. */
+bool download_server_url(const char *url, bool legacy, char *out, size_t capacity);

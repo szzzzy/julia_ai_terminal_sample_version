@@ -21,7 +21,7 @@
 
 复现：引擎 `_session_interaction_id="wake_123"`，调用实际 `_publish_intent_result("goodnight")`，输出 `voice/esp-001122334455/vcmd` 中 `interaction_id=""`；实际固件校验返回 `stale_interaction`。同路径 dismiss 也受影响。
 
-位置：[云端 ScopedMqtt](../build/cloud-compat-20260910/state_sync.py:435)、[云端覆盖字段](../build/cloud-compat-20260910/mqtt_adapter.py:203)、[固件校验](../main/voice/voice_control_guard.c:60)。
+位置：[云端 ScopedMqtt](../build/cloud-compat-20260910/state_sync.py:435)、[云端覆盖字段](../build/cloud-compat-20260910/mqtt_adapter.py:203)、[固件校验](../main/voice/protocol/voice_control_guard.c:60)。
 
 建议先修云端：使用经过当前 engine 所有权校验的交互 ID，保证唤醒消息和后续 MQTT 意图一致；不能让固件放宽为空即接受。
 
@@ -37,7 +37,7 @@
 
 固件去重表为 32 项、不淘汰，只在 WSS 重建时清空；云端为新意图生成新 request_id，未实现该容量的协商/回收。探针前 32 条通过，第 33 条返回 `dedup_capacity`。normal 意图也占槽。wake_detected 也调用相同 guard，所以满表后新的唤醒同样会被拒绝。
 
-位置：[容量](../main/voice/voice_control_guard.h:8)、[拒绝逻辑](../main/voice/voice_control_guard.c:63)、[唤醒共用校验](../main/voice/voice_service.c:877)。这是上轮保守阶段实现的已知限制，云端完成后仍未消除。
+位置：[容量](../main/voice/protocol/voice_control_guard.h:8)、[拒绝逻辑](../main/voice/protocol/voice_control_guard.c:63)、[唤醒共用校验](../main/voice/voice_service.c:877)。这是上轮保守阶段实现的已知限制，云端完成后仍未消除。
 
 需要双方确定有界去重的安全回收条件；不能简单淘汰旧 ID 后声称不重复执行，也不应靠定期断线来腾空间。
 
@@ -63,7 +63,7 @@
 
 云端源码接收 vstatus 也只记录到 hub，未形成命令完成等待/结果校验；协议尚缺具体回执 type、状态字段、结果码。此项需两端共同补齐，不能只在文档中声明已支持。
 
-位置：[固件实际分派](../main/voice/voice_service.c:1395)、[状态镜像](../main/voice/voice_state_sync.c:183)、[云端 vstatus 接收](../build/cloud-compat-20260910/mqtt_adapter.py:132)。
+位置：[固件实际分派](../main/voice/voice_service.c:1395)、[状态镜像](../main/voice/protocol/voice_state_sync.c:183)、[云端 vstatus 接收](../build/cloud-compat-20260910/mqtt_adapter.py:132)。
 
 ## 已匹配项
 

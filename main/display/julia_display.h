@@ -4,7 +4,7 @@
  *
  * @note  初始化成功只表示面板和绘图通道可用，不代表用户已经看到画面；应用应先
  *        绘制完整首帧，再打开背光，避免显示上电噪声或白屏。
- * @see   main/lvgl_port/lvgl_port.h（LVGL 显示端口与刷新回调）
+ * @see   main/display/lvgl_port/lvgl_port.h（LVGL 显示端口与刷新回调）
  */
 #pragma once
 

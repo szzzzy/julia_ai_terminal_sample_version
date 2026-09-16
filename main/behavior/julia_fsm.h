@@ -26,7 +26,7 @@ typedef enum {
     JULIA_MAIN_STATE_S1_COMPANION,     /**< 对话结束后的免唤醒陪伴。 */
     JULIA_MAIN_STATE_S2_DIALOG,        /**< 对话；具体阶段由 S2 子状态表示。 */
     JULIA_MAIN_STATE_S3_STANDBY,       /**< 默认待机，等待唤醒词。 */
-    JULIA_MAIN_STATE_S4_INTERACTION,   /**< 发起交互。 */
+    JULIA_MAIN_STATE_S4_INTERACTION,   /**< 交互听音，与 S2.1 共用听音行为；说完直接进入 S2.2。 */
     JULIA_MAIN_STATE_S5_SILENT,        /**< 静默。 */
     JULIA_MAIN_STATE_S6_SLEEP,         /**< 睡眠。 */
     JULIA_MAIN_STATE_S7_FAULT,         /**< 异常提示；具体语义由 S7.1／S7.2 表示。 */

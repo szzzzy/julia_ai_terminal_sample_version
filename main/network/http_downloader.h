@@ -2,7 +2,7 @@
  * @file    http_downloader.h
  * @brief   公共 HTTPS 数据面下载器：Range 断点续传、ETag 与响应一致性校验。
  *
- * 当前唯一调用方是音频素材下载（`main/audio/audio_engine.c`）。OTA 下载保留在
+ * 当前唯一调用方是音频素材下载（`main/audio_assets/audio_engine.c`）。OTA 下载保留在
  * `ota_engine.c` 内的独立 HTTP 循环，两者只共用本模块的响应头采集
  * （http_downloader_collect_headers）和 `ota_stability` 的 Content-Range 解析；
  * 状态码、长度、ETag 与 Range 回退策略各写一份，修改任一侧都必须同步检查另一侧。

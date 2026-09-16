@@ -12,7 +12,7 @@
  *
  * 构建状态（重要）：
  *   - main/CMakeLists.txt 的 srcs 未纳入本文件；运行时实际生效的息屏/功率策略由
- *     app/julia_idle_display.c 承担（更精简的三态 ACTIVE/QUIET/SLEEP）。因此本文件为
+ *     behavior/julia_idle_display.c 承担（更精简的三态 ACTIVE/QUIET/SLEEP）。因此本文件为
  *     遗留/备用实现，可能由另一条链路或未来版本启用。
  *   NOTE：需结合调用方确认——是否仍被引用；否则本文件可整体裁剪。
  *

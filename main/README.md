@@ -8,21 +8,23 @@
 
 所有下列 `main/` 模块属于同一个 ESP-IDF 组件；板级音频独立位于 `components/julia_board_audio`。
 
-| 目录 | 当前职责与入口 |
+| 目录 | 职能 |
 | --- | --- |
-| `app/` | `main.c` 装配服务；`julia_idle_display.c` 维护活动时间与显示忙碌状态 |
-| `voice/` | `voice_service.c` 处理语音业务；`voice_playback.c` 与 `pcm_buffer.c` 管理播放；`wss_transport.c` 管理传输；`voice_uri.c` 映射文件路径 |
-| `network/` | Wi-Fi 后台生命周期、MQTT 主题路由与 OTA 控制；`http_downloader.c` 是音频素材下载使用的 HTTPS 下载器，OTA 在 `ota_engine.c` 内保留独立 HTTP 循环，两者只共用响应头采集与 Content-Range 解析 |
-| `ota/` | OTA 清单校验、下载、持久化、隔离／冷却、启动验收及可靠状态上报 |
-| `audio/` | 音频素材清单和下载引擎；应用只调用初始化占位入口，未接通 MQTT 下载触发 |
-| `fsm/` | `julia_fsm.c` 定义状态图和现有事件映射；`julia_fsm_runtime.c` 串行处理事件、S3/S7.1 计时和异常呈现；`julia_fault.c` 保存 S7.2 严重故障快照 |
-| `context/` | `julia_time.c` 恢复 RTC／执行 SNTP；夜间调度和 IMU 运动检测产生 FSM 事件 |
-| `display/` | `julia_display.c` 配置 QSPI 面板；`esp_lcd_st77916.c` 提供面板驱动 |
-| `lvgl_port/` | 显示缓冲、刷新完成同步、LVGL 任务与互斥接口 |
-| `ui/` | `julia_avatar.c` 管理立绘和对话相位；眼睛、嘴型部件与 `julia_backlight.c` 提供呈现 |
-| `hardware/` | TCA9554 共享 I2C、RTC／IMU 访问；LED 模块有编译入口但未由应用初始化 |
-| `storage/` | `sd_card.c` 执行 SDMMC 挂载；不是热插拔监视服务 |
-| `memory/` | 记忆与例行参考源码，不参与当前构建 |
+| `app/` | 应用入口、启动装配和初始化顺序。 |
+| `diagnostics/` | 默认关闭的独立 IMU 实验模式：单动作采集、提示与上传；使用说明见 [IMU 工具](../tools/imu_logger/README.md)。 |
+| `behavior/` | 状态图、事件运行时、故障恢复，以及运动、夜间、闲置显示和静默电源策略。 |
+| `network/` | Wi-Fi 生命周期、MQTT 和 HTTPS 下载；wss/ 管理 WebSocket 连接、认证与发送。 |
+| `voice/` | 实时语音业务装配；capture/ 采集与唤醒，playback/ 播放及 PCM 缓冲，protocol/ 状态同步、控制校验与 URI，uplink/ 上行缓冲与发送泵，demo/ 可选推送演示。 |
+| `audio_assets/` | 音频素材清单和下载，当前未接通 MQTT 下载触发。 |
+| `time/` | 系统时间服务：RTC 恢复、SNTP 校时及写回 RTC。 |
+| `hardware/` | I2C 总线、RTC/IMU 外设访问、电池、电源与 LED。 |
+| `display/` | LCD 驱动、面板配置、背光；lvgl_port/ 管理 LVGL 任务、缓冲、刷新同步与锁。 |
+| `ui/` | 立绘、眼睛/嘴型、RLE 解码和生成资源，负责界面内容。 |
+| `ota/` | 固件清单、下载校验、持久化、启动验收/回滚及状态上报。 |
+| `storage/` | SDMMC 挂载接口，目前暂停编译。 |
+| `legacy/` | 未参与当前构建的旧版实现，按 voice/context/memory/ui/display/hardware/storage 分类归档。 |
+
+所有运行模块仍属于一个 ESP-IDF main 组件，头文件名称保持不变。旧参考实现不加入运行时 include 路径。板级音频继续位于 `components/julia_board_audio`。
 
 ## 推荐阅读顺序
 
@@ -144,10 +146,10 @@ S7.2 只接收关键初始化、FSM 内部损坏和 OTA 无法安全恢复等严
 
 以下源码不在当前 `srcs` 中，不应作为默认运行链路的修改入口：
 
-- `julia_voice.c`、`context/julia_context.c`、`memory/julia_memory.c`、`memory/julia_routine.c`。
-- `ui/julia_ui.c`、`ui/julia_display_theme.c`、`ui/avatar_micro_motion.c`、`ui/avatar_micro_action.c`、`ui/avatar_parts/avatar_face.c`。
-- `voice/julia_lipsync.c`、`display/st77916_qspi.c`、`storage/julia_sd.c`。
-- `PCF85063/PCF85063.c`、`QMI8658/QMI8658.c`。
+- `legacy/voice/julia_voice.c`、`legacy/context/julia_context.c`、`legacy/memory/julia_memory.c`、`legacy/memory/julia_routine.c`。
+- `legacy/ui/julia_ui.c`、`legacy/ui/julia_display_theme.c`、`legacy/ui/avatar_micro_motion.c`、`legacy/ui/avatar_micro_action.c`、`legacy/ui/avatar_parts/avatar_face.c`。
+- `legacy/voice/julia_lipsync.c`、`legacy/display/st77916_qspi.c`、`legacy/storage/julia_sd.c`。
+- `legacy/hardware/PCF85063/PCF85063.c`、`legacy/hardware/QMI8658/QMI8658.c`。
 
 其中部分文件依赖仓库中不存在的头文件。接入这些模块前应先确定模块所有权、依赖、初始化顺序和并发模型，不能只把文件加入 CMake。
 

@@ -1,0 +1,6 @@
+# Endpoint overlay only; does not reproduce historical voice firmware.
+CONFIG_JULIA_LEGACY_SERVER_PORTS=y
+CONFIG_WSS_SERVER_HOST="8.133.215.254"
+CONFIG_WSS_SERVER_PORT=9443
+CONFIG_WSS_PATH="/voice"
+CONFIG_COMM_MQTT_BROKER_URI="mqtts://8.133.215.254:1883"

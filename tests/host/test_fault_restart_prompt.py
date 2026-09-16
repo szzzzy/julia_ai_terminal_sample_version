@@ -34,7 +34,7 @@ static void vTaskDelay(unsigned ticks){
     now+=(int64_t)ticks*10000;
     if(!stalled && now>=3280000)active=false;
 }
-''', [("main/fsm/julia_fsm_runtime.c", ["play_fault_restart_prompt"])], r'''
+''', [("main/behavior/julia_fsm_runtime.c", ["play_fault_restart_prompt"])], r'''
 int main(void){
     play_fault_restart_prompt();
     assert(now>=3280000 && now<4000000 && !talking && !active && stops==0);

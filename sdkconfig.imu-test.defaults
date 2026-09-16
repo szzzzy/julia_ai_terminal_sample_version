@@ -1,0 +1,2 @@
+# Apply after sdkconfig.defaults, using a separate SDKCONFIG and build directory.
+CONFIG_JULIA_IMU_LOGGER_ENABLE=y

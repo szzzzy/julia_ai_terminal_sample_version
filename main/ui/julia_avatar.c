@@ -10,7 +10,7 @@
  *     受 AVATAR_ENABLE_FULL_FRAME_MOTION=0 控制，当前不执行；随机眨眼由 avatar_eyes
  *     自带的 blink_task 独立调度）。
  *   - 与之相对：julia_ui.c 是 fused 遗留的总控（不参与当前构建）；julia_backlight 管
- *     背光；julia_display_theme（或 app/julia_idle_display.c）管显示功率/息屏。
+ *     背光；julia_display_theme（或 behavior/julia_idle_display.c）管显示功率/息屏。
  *   - 上游调用方：voice_service（WSS/播放任务）经 julia_avatar_feed_pcm/talking_start/
  *     talking_stop 驱动嘴型，并在进入 S6 时经 julia_avatar_set_suspended 暂停后台更新；
  *     相位与睡眠立绘统一由 julia_fsm_runtime 设置（set_dialog_phase/set_dozing），

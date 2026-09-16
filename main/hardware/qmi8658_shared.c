@@ -139,3 +139,39 @@ esp_err_t board_imu_read(board_imu_sample_t *sample)
     sample->gz_dps = le_i16(&data[10]) * GYRO_DPS_PER_LSB;
     return ESP_OK;
 }
+
+#if CONFIG_JULIA_IMU_LOGGER_ENABLE
+esp_err_t board_imu_logger_configure(void)
+{
+    ESP_RETURN_ON_ERROR(board_imu_set_enabled(false), TAG, "disable for logger");
+    ESP_RETURN_ON_ERROR(write_reg(QMI8658_CTRL2, 0x36), TAG, "logger accel 16g ODR6");
+    ESP_RETURN_ON_ERROR(write_reg(QMI8658_CTRL3, 0x66), TAG, "logger gyro 1024dps ODR6");
+    ESP_RETURN_ON_ERROR(write_reg(0x06, 0), TAG, "logger LPF disabled");
+    uint8_t settings[4];
+    ESP_RETURN_ON_ERROR(read_regs(QMI8658_CTRL2, settings, sizeof(settings)), TAG, "readback");
+    if (settings[0] != 0x36 || settings[1] != 0x66 || settings[3] != 0)
+        return ESP_ERR_INVALID_RESPONSE;
+    /* CTRL7 bit6 is reserved in Rev A; no need to copy the legacy wake setting. */
+    return write_reg(QMI8658_CTRL7, 0x03);
+}
+
+esp_err_t board_imu_logger_read(uint32_t *counter, int16_t raw[6])
+{
+    if (!counter || !raw) return ESP_ERR_INVALID_ARG;
+    uint8_t before[3], block[17];
+    /* Read timestamp first, then timestamp/temp/six axes in one burst. A final
+     * timestamp check rejects any sample update spanning those transfers. */
+    esp_err_t err = read_regs(0x30, before, sizeof(before));
+    if (err != ESP_OK) return err;
+    err = read_regs(0x30, block, sizeof(block));
+    if (err != ESP_OK) return err;
+    uint8_t after[3];
+    err = read_regs(0x30, after, sizeof(after));
+    if (err != ESP_OK) return err;
+    for (unsigned i = 0; i < 3; ++i)
+        if (before[i] != block[i] || after[i] != block[i]) return ESP_ERR_NOT_FINISHED;
+    *counter = (uint32_t)block[0] | ((uint32_t)block[1] << 8) | ((uint32_t)block[2] << 16);
+    for (unsigned i = 0; i < 6; ++i) raw[i] = le_i16(block + 5 + i * 2);
+    return ESP_OK;
+}
+#endif

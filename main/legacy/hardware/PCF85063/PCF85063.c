@@ -17,7 +17,7 @@
  * 补充说明（参考实现上下文）：
  * - 本文件是 Waveshare 移植的 PCF85063 完整驱动（含闹钟、复位、报警等），
  *   经外部 I2C_Driver 组件（I2C_Write/I2C_Read）访问 RTC，从机地址 0x51。
- * - 旧上游 main/context/julia_context.c 同样未参与当前构建。
+ * - 旧上游 main/legacy/context/julia_context.c 同样未参与当前构建。
  * - 时间字段均为十进制（decToBcd/bcdToDec 已转换），年份为 0~99 存寄存器，真实
  *   年份 = 1970 + 寄存器值（YEAR_OFFSET）。
  */

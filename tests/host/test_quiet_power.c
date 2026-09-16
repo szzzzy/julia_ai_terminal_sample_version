@@ -7,7 +7,7 @@
 #include "freertos/FreeRTOS.h"
 void vTaskDelay(TickType_t ticks);
 BaseType_t xTaskCreate(void (*fn)(void *), const char *, unsigned, void *, unsigned, TaskHandle_t *);
-#include "../../main/app/julia_quiet_power.c"
+#include "../../main/behavior/julia_quiet_power.c"
 
 static jmp_buf done;
 static unsigned step;

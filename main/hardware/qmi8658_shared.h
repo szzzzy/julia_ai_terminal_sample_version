@@ -12,6 +12,8 @@
 
 #include "esp_err.h"
 #include <stdbool.h>
+#include <stdint.h>
+#include "sdkconfig.h"
 
 typedef struct {
     float ax_g;
@@ -42,3 +44,14 @@ esp_err_t board_imu_set_enabled(bool enabled);
  * 数据不含时间戳或新鲜度标志；调用者负责采样节拍和失败后的基线重建。
  */
 esp_err_t board_imu_read(board_imu_sample_t *sample);
+
+#if CONFIG_JULIA_IMU_LOGGER_ENABLE
+#define BOARD_IMU_LOGGER_ACCEL_RANGE_G 16
+#define BOARD_IMU_LOGGER_GYRO_RANGE_DPS 1024
+/* Logger-only profile: +/-16 g, +/-1024 dps, ODR code 6 (~112 Hz in 6DOF), LPF off.
+ * Must be used by the sole IMU owner; production conversion constants remain unchanged. */
+esp_err_t board_imu_logger_configure(void);
+/* Coherent timestamp/raw snapshot; NOT_FINISHED means update overlapped the read.
+ * Counter is a wrapping 24-bit sample count, not microseconds. */
+esp_err_t board_imu_logger_read(uint32_t *counter, int16_t raw[6]);
+#endif

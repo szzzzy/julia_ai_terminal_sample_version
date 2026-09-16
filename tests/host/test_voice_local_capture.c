@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 /* Include the production owner module to inspect only its private test state. */
-#include "../../main/voice/voice_local_capture.c"
+#include "../../main/voice/capture/voice_local_capture.c"
 
 static struct { unsigned count,size; unsigned char data[4][64]; } queue;
 static int64_t now;
