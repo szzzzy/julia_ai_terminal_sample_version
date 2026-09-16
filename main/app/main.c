@@ -23,6 +23,7 @@
 #include "julia_motion.h"
 #include "julia_battery.h"
 #include "julia_power.h"
+#include "julia_quiet_power.h"
 #include "julia_time.h"
 #include "julia_display.h"
 #include "julia_idle_display.h"
@@ -44,6 +45,10 @@
 
 static const char *TAG = "app_main";
 static portMUX_TYPE s_boot_lock = portMUX_INITIALIZER_UNLOCKED;
+/* 交互门槛：置位表示本次启动允许对应服务真正启动。两个位在启动流程末段、RF 关联稳定后
+ * 才一起置位。在此之前 ip_ready 回调返回 ESP_ERR_INVALID_STATE，network_lifecycle 会把它
+ * 当作“本次未启动”并按该槽位自己的退避重试，直到门槛打开；因此这不是失败返回值，
+ * 而是与 network_lifecycle 的跨模块契约。 */
 static bool s_runtime_ready;
 static bool s_voice_ready;
 
@@ -57,6 +62,8 @@ static void battery_status_updated(const julia_battery_status_t *status, void *c
         status->percent);
 }
 
+/* 阶段沉降：先记录一次电压再等待 CONFIG_JULIA_BOOT_STAGE_DELAY_MS，使日志反映各阶段
+ * 负载切换前后的对比。该间隔用于错开显示、音频和 Wi-Fi 的上电瞬态，不是功能等待。 */
 static void boot_stage_settle(const char *stage)
 {
     julia_battery_log_stage(stage);
@@ -65,6 +72,8 @@ static void boot_stage_settle(const char *stage)
     }
 }
 
+/* 取得 IPv4 后由 network_lifecycle 在生命周期 Task 上下文调用；门槛未开时用
+ * ESP_ERR_INVALID_STATE 表示“本次不启动、等待之后重试”。 */
 static esp_err_t boot_mqtt_ip_ready(void *arg)
 {
     portENTER_CRITICAL(&s_boot_lock);
@@ -73,6 +82,8 @@ static esp_err_t boot_mqtt_ip_ready(void *arg)
     return ready ? mqtt_comm_ip_ready(arg) : ESP_ERR_INVALID_STATE;
 }
 
+/* 语音链路还要求唤醒检测就绪（s_voice_ready 与 s_runtime_ready 在启动末段一同置位）；
+ * 任一条件不满足都返回 ESP_ERR_INVALID_STATE，由 network_lifecycle 稍后重试。 */
 static esp_err_t boot_voice_ip_ready(void *arg)
 {
     portENTER_CRITICAL(&s_boot_lock);
@@ -248,11 +259,18 @@ void app_main(void)
         }
 #endif
     }
+    if (fsm_ready) {
+        ESP_ERROR_CHECK(julia_quiet_power_init());
+    }
+    /* 参数是关键应用初始化是否健康，必须在显示、音频、语音、FSM 和唤醒检测都尝试过之后
+     * 才调用一次；此时还没联网，网络可用性不参与确认。传 false 会让待验证镜像立即回滚。 */
     ota_boot_flow_complete(boot_dependencies_ready && fsm_ready && wake_error == ESP_OK);
     if (fsm_ready && wake_error != ESP_OK) {
         (void)julia_fsm_runtime_raise_fault(JULIA_FAULT_VOICE_INIT, wake_error);
     }
     if (fsm_ready && !boot_dependencies_ready) {
+        /* 只记录按下面顺序找到的第一个不可用关键能力：显示 → 音频 → 语音 → 闲置显示；
+         * 四项都可用时理论上不会走到这里，兜底用 CRITICAL_INIT + ESP_FAIL。 */
         julia_fault_reason_t reason = JULIA_FAULT_CRITICAL_INIT;
         esp_err_t fault_error = ESP_FAIL;
         if (!visual_ready) {
@@ -273,7 +291,9 @@ void app_main(void)
             ESP_LOGE(TAG, "Cannot enqueue S7.2 fault: %s", esp_err_to_name(err));
         }
     } else if (!fsm_ready) {
-        /* FSM 无法创建时没有运行队列可进入 S7.2；仍记录同一格式快照后直接复位。 */
+        /* FSM 无法创建时没有运行队列可进入 S7.2；仍记录同一格式快照后直接复位。
+         * julia_fault_reset_allowed() 在快照读不到或未超过上限时返回 true，因此只有同一条
+         * 故障链连续达到上限，才停在下面的死循环里等待售后处理、不再复位。 */
         (void)julia_fault_record(JULIA_FAULT_FSM_RUNTIME_INIT, fsm_error,
                                  JULIA_MAIN_STATE_S0_BOOT,
                                  JULIA_S2_SUB_STATE_NONE);
@@ -292,6 +312,11 @@ void app_main(void)
      * 不可用仍由后台永久重试，不阻断本地应用或 pending 镜像验收。 */
     boot_stage_settle("runtime_ready");
     ESP_LOGI(TAG, "Starting background Wi-Fi lifecycle after local startup");
+    esp_err_t runtime_power_err = julia_power_runtime_profile_enable();
+    if (runtime_power_err != ESP_OK) {
+        ESP_LOGW(TAG, "Runtime CPU profile failed: %s",
+                 esp_err_to_name(runtime_power_err));
+    }
     esp_err_t network_err = network_lifecycle_start();
     err = network_err;
     if (err != ESP_OK) {
@@ -304,11 +329,6 @@ void app_main(void)
     }
     julia_battery_log_stage("wifi_settled");
 
-    esp_err_t runtime_power_err = julia_power_runtime_profile_enable();
-    if (runtime_power_err != ESP_OK) {
-        ESP_LOGW(TAG, "Runtime CPU profile failed: %s",
-                 esp_err_to_name(runtime_power_err));
-    }
     esp_err_t battery_monitor_err = julia_battery_monitor_start(
         battery_status_updated, NULL);
     if (battery_monitor_err != ESP_OK &&

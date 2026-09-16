@@ -13,6 +13,11 @@
  *         背光（LEDC PWM，julia_backlight 模块）与本文件独立，由 main.c 在立绘首帧
  *         渲染成功后才点亮；本函数日志中的 "backlight held off" 即反映这一点。
  *
+ * @note   所有权与同步点：本模块是 SPI2 主机、LCD 相关 GPIO 与 panel IO 的唯一所有者，
+ *         创建后没有反初始化路径（见 julia_display_init 的返回值说明）。panel IO 的
+ *         on_color_trans_done 挂到 lvgl_port_color_trans_done，它是像素 DMA 传输完成的
+ *         唯一同步点：ISR 只 give 信号，真正的等待发生在 LVGL flush 任务里。
+ *
  * @see    main/lvgl_port/lvgl_port.c（LVGL 显示端口与刷新回调）
  * @see    main/display/esp_lcd_st77916.c（通用 ST77916 面板驱动）
  * @see    main/app/main.c（顶层初始化顺序：显示 → 立绘）

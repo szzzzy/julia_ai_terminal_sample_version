@@ -100,17 +100,28 @@ static bool ota_local_health_check(bool include_gpio_diagnostic)
 }
 
 /**
+ * @brief 已完成启动阶段 NVS 可用性判定的标志；就绪后才允许写 S7.2 故障快照。
+ *
+ * 与 s_pending_verify 一样只在 app_main 的启动串行阶段读写，因此不加锁。
+ */
+static bool s_fault_nvs_ready;
+/** 本次启动是否在验收 PENDING_VERIFY 镜像；由 ota_boot_flow_run() 写入，
+ *  ota_boot_flow_complete() 消费后清为 false。 */
+static bool s_pending_verify;
+static void ota_reconcile_boot_state(bool pending_verify);
+
+/**
  * @brief 进入不启动通信客户端的 OTA 安全模式。
  *
+ * @param[in] fault_reason 写入故障快照的原因分类。
+ * @param[in] error 触发安全模式的底层错误码。
  * @param[in] reason 进入安全模式的诊断原因，可为 NULL。
  *
  * @note 本函数不返回、不重启，也不擦除 NVS；通过每秒延时保持任务可调度，等待人工处理
  *       或外部复位。只能在普通任务上下文调用。
+ * @note 只有 NVS 已可用时才落盘 S7.2 故障快照：启动验收早于行为 FSM，此时无法保证
+ *       能写 NVS，因此不在这里反复 reset。
  */
-static bool s_fault_nvs_ready;
-static bool s_pending_verify;
-static void ota_reconcile_boot_state(bool pending_verify);
-
 static void __attribute__((noreturn)) ota_enter_safe_mode(
     julia_fault_reason_t fault_reason, esp_err_t error, const char *reason)
 {
@@ -198,6 +209,10 @@ void ota_boot_flow_run(void)
                                 "rollback unavailable after NVS failure" :
                                 "rollback failed after NVS failure");
         }
+        /* 无待验收镜像时擦除 NVS 是最后手段：ota_report 未确认的关键上报和 ota_resume
+         * 下载断点都保存在 NVS 中，擦除后一起丢失。代价是服务器可能收不到上一次的终态
+         * 事件、设备只能从零重新下载；只有在 NVS 自身不可用（无空闲页/版本不兼容）时
+         * 才接受这个代价。 */
         ESP_LOGW(TAG, "Erasing NVS because no image is pending verification");
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
@@ -244,6 +259,9 @@ void ota_boot_flow_run(void)
                                 "rollback unavailable after self-test" :
                                 "rollback failed after self-test");
         }
+        /* 没有待验收镜像时本地自检失败代表当前固件本身不可继续使用：不尝试回滚（没有
+         * 可拒绝的 pending 镜像），只落盘 S7.2 并停在安全模式等待人工处理。这与上面的
+         * 分支不同——那里会先上报 rolled_back 并请求回滚。 */
         ota_enter_safe_mode(JULIA_FAULT_CRITICAL_INIT, ESP_FAIL,
                             "local health check failed");
     }
@@ -280,14 +298,24 @@ static void ota_reconcile_boot_state(bool pending_verify)
     }
 }
 
+/**
+ * @brief 在关键本地业务初始化完成后确认或回滚 PENDING_VERIFY 镜像。
+ *
+ * @param[in] app_healthy 关键显示/音频/语音/FSM 等本地服务是否已就绪。这个判断只允许
+ *            依赖本地初始化结果：把 Wi-Fi、MQTT、DNS 等远程可用性算进来，会让弱网
+ *            环境下的有效镜像被判定不健康并触发回滚。
+ *
+ * 只有本次启动确实在验收 PENDING_VERIFY 镜像时才起作用，重复调用是空操作。
+ * 漏调的后果：镜像始终保持 PENDING_VERIFY，既不会被标记 VALID，也不会在本次启动产生
+ * succeeded/rolled_back 上报；下一次复位时 bootloader 会把它当作未确认镜像判为无效并
+ * 回滚，同时 READY_TO_COMMIT 断点记录也不会被对账清理。
+ */
 void ota_boot_flow_complete(bool app_healthy)
 {
     bool pending_verify = s_pending_verify;
     if (!pending_verify) return;
     esp_err_t err;
-    /* A product override must finish critical local business initialization before a
-     * PENDING_VERIFY image can become VALID. Remote connectivity is intentionally not
-     * an acceptance condition. */
+    /* 产品验收钩子必须先完成关键本地业务初始化；远程连通性刻意不作为验收条件。 */
     if (!app_healthy || !ota_boot_health_product_check()) {
         native_ota_failure_reason_t rollback_reason =
             esp_ota_check_rollback_is_possible() ?

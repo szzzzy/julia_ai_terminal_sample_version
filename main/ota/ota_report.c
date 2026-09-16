@@ -9,8 +9,9 @@
  * 或写固件分区，因此网络恢复、状态补发和升级执行可以分别处理。
  *
  * 每条关键结果都有稳定事件编号。重连后可能重复发送同一编号，服务器必须按编号
- * 去重。MQTT 的确认处理只快速登记编号，后台任务再删除持久记录，避免在 MQTT
- * 公共事件处理中访问 Flash。
+ * 去重。关键是：编号随事件一起持久化，设备重启后补发仍复用同一 event_id，服务器
+ * 因此不能把某个编号当作“一次性消费”凭证。MQTT 的确认处理只快速登记编号，后台
+ * 任务再删除持久记录，避免在 MQTT 公共事件处理中访问 Flash。
  *
  * 多个升级阶段可能同时提交状态，因此共享记录在短互斥区内更新；网络发送和 Flash
  * 删除均在互斥区外完成，避免长时间阻塞其它状态。
@@ -448,6 +449,8 @@ static void ota_report_ack_task(void *parameter)
                 s_store.count++;
             }
         }
+        /* index < 0 属正常路径：该 event_id 可能已被挤出队列、已由本轮 flush 之外的原因
+         * 清理，或来自上一次启动的残留 PUBACK。查不到就什么都不做，不记为错误。 */
         ota_report_give_lock();
     }
     vTaskDelete(NULL);
@@ -621,7 +624,10 @@ esp_err_t native_ota_report_event(const native_ota_report_context_t *context,
         strncpy(item->event_id, message.event_id, sizeof(item->event_id) - 1U);
         memcpy(item->json, message.json, message.json_len + 1U);
     } else if (ota_report_state_is_terminal(state) || state == NATIVE_OTA_REPORT_REBOOTING) {
-        /* 关键队列满时保留最新终态/重启事件；普通状态不会挤掉旧关键事件。 */
+        /* 关键队列满时保留最新终态/重启事件；普通状态不会挤掉旧关键事件。
+         * 代价是被挤掉的最早一条可能是上一个 artifact 尚未确认的终态（其 PUBACK 一直没到），
+         * 它的 event_id 从此不再重发，服务器会永久缺少那条状态——因此协议要求服务器容忍
+         * 缺失的中间/终态并按 event_id 去重，而不是假定能收到完整序列。 */
         memmove(&s_store.pending[0], &s_store.pending[1],
                 (NATIVE_OTA_REPORT_PENDING_MAX - 1U) * sizeof(s_store.pending[0]));
         ota_report_pending_item_t *item = &s_store.pending[NATIVE_OTA_REPORT_PENDING_MAX - 1U];
@@ -732,6 +738,11 @@ esp_err_t native_ota_report_progress(const native_ota_report_context_t *context,
 
 /**
  * @brief 将 NVS 中的关键事件和 RAM 中最新进度逐条交给 transport。
+ *
+ * 逐条读、逐条发，每条之间都会释放 s_lock，因此与 PUBACK 删除（ota_report_ack_task）
+ * 存在并发：若某条在发送前已被确认删除，数组会整体前移，本轮循环会跳过后一条。本函数
+ * 不保证一次调用覆盖全部记录，漏掉的事件仍留在 NVS 中，由后续 flush/retry 补齐；调用方
+ * 不能把一次返回 ESP_OK 理解为“所有记录都已重发”。
  *
  * @return ESP_OK 当前可发送内容均已提交。
  * @return ESP_ERR_INVALID_STATE 模块尚未初始化或无法取得锁。

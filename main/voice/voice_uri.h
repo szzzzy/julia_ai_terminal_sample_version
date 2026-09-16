@@ -28,6 +28,11 @@ extern "C" {
  * @note 该映射不检查文件是否存在；调用方仍需自行 open。
  * @note 前缀匹配区分大小写；仅做纯字符串变换，无文件 I/O、无阻塞。
  *       path 容量须 ≥ 路径长度 + 1，本项目调用方使用 `VOICE_SERVICE_URI_MAX_LEN + 16`。
+ * @note 不做百分号、URL 或 UTF-8 解码：检查的是调用方传入的原始字节，调用方必须传入
+ *       未解码的原始 URI。若上游先做过解码，`%2e%2e` 会变成 `..` 而被本模块拒绝，
+ *       但也可能把原本受控的路径改写成其它形式，因此不应在上游预先解码。
+ * @note 失败时 path 的内容不可用——snprintf 截断前可能已经写入了部分路径，
+ *       调用方只能依据返回值判断，不能读取或使用 path。
  */
 bool voice_uri_to_path(const char *uri, char *path, size_t path_cap);
 

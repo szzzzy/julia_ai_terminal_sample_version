@@ -1,5 +1,13 @@
-/** Protocol v2: connection-scoped handshake, acknowledged state snapshots and
- * revision-checked requests. No network operations from FSM observers. */
+/** 设备状态同步（control protocol v2）：按连接做握手、带 revision 的状态快照和请求校验。
+ *
+ * 模块边界：所有状态变更都只在 WSS owner 任务里发生；FSM 观察者只投递事件，不得在这里发起
+ * 网络操作。其它任务只能读 is_ready()；session_id 是 owner-only 的，内容会在 start/end 被改写，
+ * 不得跨任务读取或缓存。
+ *
+ * 关闭 CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE 时本文件退化为空实现：is_ready() 恒为 true、
+ * session_id 为空串、handle_text() 恒返回 false，语音链路按无状态同步方式继续工作。
+ */
+#include "julia_power.h"
 #include "voice_state_sync.h"
 #include <inttypes.h>
 #include <stdio.h>
@@ -18,21 +26,30 @@
 #endif
 
 #if CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE
+/* 未收到 ACK 时的重发间隔，单位 us；起始为 2 秒，配合下方 3 次上限约为 6 秒的重试窗口。 */
 #define SYNC_RETRY_US 2000000LL
+/* 同一条待确认报文最多发送次数（含首发的 1 次和 2 次重发）；超限即认为云端不可同步。 */
 #define SYNC_MAX_SENDS 3U
+/* require_wake 响应缓存槽数；命中缓存即重发原响应，保证同一 request_id 幂等。 */
 #define REQUEST_CACHE_SIZE 8U
+/* request_id 与 response 的存储上限，单位字节；超长的 id 作为非法输入直接拒绝。 */
 #define REQUEST_ID_BYTES 64U
 #define STATE_MESSAGE_BYTES 512U
 static const char *TAG = "voice_state_sync";
 static portMUX_TYPE s_sync_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_ready;
 static bool s_active;
+/* 每次 start 重新生成的会话标识，仅 WSS owner 读取，end 时清空；只用于归属比对，
+ * 它不是授权凭据，云端仍须校验设备身份。 */
 static char s_session_id[33];
 static char s_device_id[NATIVE_OTA_DEVICE_ID_SIZE];
 static char s_pending[STATE_MESSAGE_BYTES];
 static char s_pending_request[64];
 static uint32_t s_pending_revision;
 static bool s_waiting_ack;
+/* CPU 升频的配对状态：首个待确认请求时获取一次，ACK／会话结束／发送失败三处各释放一次，
+ * 覆盖全部退出路径；重复获取会破坏配对计数，因此必须先看这个标志。 */
+static bool s_sync_cpu_boost;
 static bool s_have_revision;
 static uint32_t s_last_revision;
 static unsigned s_sends;
@@ -44,6 +61,7 @@ typedef struct {
 static request_result_t s_results[REQUEST_CACHE_SIZE];
 static unsigned s_result_next;
 
+/* owner-only：返回静态缓冲地址，内容在 start/end 被改写，调用方不得保存该指针或跨任务使用。 */
 const char *voice_state_sync_session_id(void) { return s_session_id; }
 
 static void set_ready(bool ready)
@@ -61,6 +79,8 @@ bool voice_state_sync_is_ready(void)
     return ready;
 }
 
+/* 只允许 [A-Za-z0-9_.:-] 且不超过 REQUEST_ID_BYTES 的 id 进入日志、缓存键和 JSON 字段：
+ * 这个白名单同时挡住把引号或换行注入报文的构造。 */
 static bool valid_id(const char *id)
 {
     if (id == NULL || id[0] == '\0' || strlen(id) >= REQUEST_ID_BYTES) return false;
@@ -94,14 +114,19 @@ static bool wake_required(const julia_fsm_snapshot_t *s)
 
 static bool send_text(const char *text)
 {
-    if (wss_transport_send_now(0x1, (const uint8_t *)text, strlen(text)) == ESP_OK)
-        return true;
+    bool boosted = julia_power_boost_begin();
+    esp_err_t err = wss_transport_send_now(0x1, (const uint8_t *)text, strlen(text));
+    if (boosted) julia_power_boost_end();
+    if (err == ESP_OK) return true;
+    /* 发不出去说明连接已经不可用：先复位就绪状态和会话，再由 WSS owner 统一重连。 */
     set_ready(false);
     s_active = false;
     wss_transport_fail_session();
     return false;
 }
 
+/* 生成待确认的状态报文。序列化放不下就放弃本次会话：截断的 JSON 到了云端只会被当成
+ * 非法状态，重发也没有意义，不如让上层重连后重新握手。 */
 static void prepare_state(const char *type, const julia_fsm_snapshot_t *snapshot)
 {
     char envelope[192] = "";
@@ -125,6 +150,7 @@ static void prepare_state(const char *type, const julia_fsm_snapshot_t *snapshot
         return;
     }
     s_pending_revision = snapshot->revision;
+    if (!s_sync_cpu_boost) s_sync_cpu_boost = julia_power_boost_begin();
     s_last_revision = snapshot->revision;
     s_have_revision = true;
     s_waiting_ack = true;
@@ -132,8 +158,11 @@ static void prepare_state(const char *type, const julia_fsm_snapshot_t *snapshot
     s_retry_us = 0;
 }
 
+/* 结束或失败路径的统一清场：先还掉 CPU 升频，再清就绪、待确认、revision 和会话 id，
+ * 使下一条连接必须重新握手，不能复用本会话的任何结论。 */
 void voice_state_sync_end(void)
 {
+    if (s_sync_cpu_boost) { julia_power_boost_end(); s_sync_cpu_boost = false; }
     set_ready(false);
     s_active = false;
     s_waiting_ack = false;
@@ -143,6 +172,9 @@ void voice_state_sync_end(void)
     s_result_next = 0;
 }
 
+/* 新会话入口：先完整复位上一次会话（含 session_id、响应缓存和 CPU 升频），再重新生成身份。
+ * 设备身份不可用时无法向云端证明归属，直接拒绝本次会话而不是发一个无主的 session_sync。
+ * session_id 由 16 字节随机数逐字节转十六进制，只用于归属比对，不能当作授权凭据。 */
 void voice_state_sync_start(void)
 {
     voice_state_sync_end();
@@ -162,6 +194,9 @@ void voice_state_sync_start(void)
     voice_state_sync_poll();
 }
 
+/* 由 WSS owner 每轮调用，负责握手重发和状态快照的变更检测。s_sends 超限说明云端始终没有
+ * 确认状态，会话不能带着不确定的状态继续跑，因此在这里自行结束；多设备模式下额外退避 30 秒，
+ * 避免多台设备对同一个不可用云端同时重连。 */
 void voice_state_sync_poll(void)
 {
     if (!s_active) return;
@@ -202,6 +237,11 @@ static bool json_revision(const cJSON *root, uint32_t *revision)
     return value->valuedouble == (double)*revision;
 }
 
+/* 处理云端的 require_wake 请求。request_id 命中响应缓存时原样重发上一次的响应，保证同一次
+ * 请求重复到达不会产生两次唤醒动作；未命中才真正尝试切换状态。
+ * reason 的取值来自两处判断：stale_state 表示云端依据的 revision 已不是当前快照（含尝试后
+ * 又被其它事件推进的情况），interaction_active 表示设备正处在 S2/S4 的交互中，
+ * state_unavailable 则是运行时不接受该请求。 */
 static void handle_require_wake(const cJSON *root)
 {
     const cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "request_id");
@@ -245,6 +285,9 @@ static void handle_require_wake(const cJSON *root)
     if (n > 0 && (size_t)n < sizeof(result->response)) (void)send_text(result->response);
 }
 
+/* 校验顺序固定为 type →（多设备下）device_id/request_id → control_protocol → session_id：
+ * 前面的字段决定这条报文是不是本模块、本设备、本协议的，最后才确认会话归属。session_id 不符
+ * 时静默忽略但仍返回 true——报文已被本模块认领，不能让别的命令处理器再解释一遍。 */
 bool voice_state_sync_handle_text(const uint8_t *text, size_t len)
 {
     if (len == 0 || text[0] != '{') return false;
@@ -297,7 +340,8 @@ bool voice_state_sync_handle_text(const uint8_t *text, size_t len)
             cJSON_IsTrue(accepted)) {
             s_waiting_ack = false;
             set_ready(true);
-            /* New state may have been committed during the initial handshake. */
+            /* 握手期间可能已经提交过新状态：丢掉缓存的 revision，让 poll 立即补发当前
+             * device_state，而不是等下一次状态变化才同步。 */
             s_have_revision = false;
             if (julia_fsm_runtime_post_sync(EVT_WSS_CONNECTED) != ESP_OK) {
                 set_ready(false);
@@ -312,10 +356,17 @@ bool voice_state_sync_handle_text(const uint8_t *text, size_t len)
         if (json_revision(root, &revision) && s_waiting_ack &&
             revision == s_pending_revision) s_waiting_ack = false;
     }
+    if (!s_waiting_ack && s_sync_cpu_boost) {
+        julia_power_boost_end();
+        s_sync_cpu_boost = false;
+    }
     cJSON_Delete(root);
     return true;
 }
 #else
+/* 关闭状态同步时的占位实现：调用方无需条件编译。is_ready 恒为 true 表示不设门槛，
+ * session_id 为空串使捕获/判决类消息一律无法匹配会话，handle_text 返回 false 把文本交给
+ * 后续处理器。 */
 const char *voice_state_sync_session_id(void) { return ""; }
 void voice_state_sync_start(void) {}
 void voice_state_sync_end(void) {}

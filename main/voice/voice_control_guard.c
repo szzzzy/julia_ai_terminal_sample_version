@@ -2,6 +2,15 @@
 #include <string.h>
 #include <stdio.h>
 
+/* 严格模式控制面的入口自检，分两段执行：
+ * 1) 交给 cJSON 之前先拒绝长度超过 VOICE_CONTROL_MAX_BYTES、含内嵌 NUL（含 "\u0000"
+ *    转义）、{ 与 [ 合计嵌套超过 8 层、引号不闭合或括号个数不配平的输入——这些形态会绕过
+ *    身份与序号校验。该扫描不区分 { 与 }、[ 与 ] 的类型配对，类型错误留给 cJSON 判定；
+ * 2) 解析之后才检查重复 key，且只在根节点是对象时检查根对象的直接子项；嵌套对象内部
+ *    不查。重复 key 的“取值”由解析器决定，不能作为校验依据。
+ * 返回值可能是对象，也可能是数组等其它 JSON 类型，不合法或解析失败时为 NULL：调用方
+ * 必须自行判断类型（如 cJSON_IsObject），本函数不保证只返回对象。
+ */
 cJSON *voice_control_parse(const char *data, size_t len)
 {
     if (!data || !len || len > VOICE_CONTROL_MAX_BYTES || memchr(data, 0, len)) return NULL;
@@ -93,6 +102,9 @@ const char *voice_control_begin(voice_control_guard_t *g, uint32_t seq, const ch
     return NULL;
 }
 
+/* 指纹是 cJSON 紧凑序列化的原样结果，因此对属性顺序敏感：同一请求换一个 key 顺序
+ * 重发会得到不同指纹，被判为 request_id_conflict。发送端必须原样重发原报文。
+ * 这里同时兜底检查重复 key——重复 key 的“取值”由解析器决定，不能作为同一请求的依据。 */
 static bool fingerprint(const cJSON *root, char *out, size_t size)
 {
     const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
@@ -102,7 +114,9 @@ static bool fingerprint(const cJSON *root, char *out, size_t size)
     if (!cJSON_IsString(type) || !cJSON_IsString(business) || strlen(business->valuestring)>139 ||
         !cJSON_IsNumber(expires) || !(expires->valuedouble>=0 && expires->valuedouble<=9007199254740991.0) ||
         expires->valuedouble != (double)(int64_t)expires->valuedouble) return false;
-    /* Duplicate JSON keys are ambiguous even if the parser selects the first. */
+    /* 指纹按 cJSON 紧凑序列化结果做字节比较：这里拒绝重复键只保证“重复键不被当作同一
+     * 请求”，并不规范属性顺序——属性顺序不同仍会算出不同指纹并被判 request_id_conflict，
+     * 因此发送端必须原样重发。 */
     const cJSON *a, *b;
     cJSON_ArrayForEach(a,root) for (b=a->next;b;b=b->next)
         if (a->string && b->string && !strcmp(a->string,b->string)) return false;
@@ -153,12 +167,16 @@ bool voice_control_record(voice_control_guard_t *g, const cJSON *root, const cha
 {
     uint32_t seq;
     char fp[VOICE_CONTROL_MAX_BYTES+1U];
+    /* 未成功保存结果前不提升 high_water：否则该序号既不在缓存里，又会被后续
+     * seq <= high_water 判成 stale_request，等于永久丢掉一次已执行的命令。 */
     if(!voice_control_uint(root,"control_seq",&seq) || !seq || g->high_water==UINT32_MAX ||
        seq!=g->high_water+1U || !fingerprint(root,fp,sizeof(fp)) || strlen(response)>=512U) return false;
     const cJSON *id=cJSON_GetObjectItemCaseSensitive(root,"request_id");
     if(!cJSON_IsString(id) || !valid_id(id->valuestring)) return false;
     voice_control_result_t *r=&g->results[g->next];
     strcpy(r->id,id->valuestring);strcpy(r->fingerprint,fp);strcpy(r->response,response);r->sequence=seq;
+    /* 记录成功后 high_water 只升不降。缓存是 8 项环形覆盖：被覆盖的旧序号不再有
+     * 详细结果，但永远低于 high_water，所以只会被判 stale_request，绝不重执行。 */
     g->high_water=seq;g->next=(g->next+1U)%VOICE_CONTROL_CACHE_SIZE;
     if(g->used<VOICE_CONTROL_CACHE_SIZE)++g->used;
     return true;

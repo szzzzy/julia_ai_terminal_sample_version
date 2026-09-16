@@ -15,7 +15,8 @@
 /** 初始化 panel 与 LVGL port；失败可能留下部分资源，当前不支持反初始化后重试。 */
 esp_err_t julia_display_init(void);
 
-/** 当前没有实现体，现用背光接口为 julia_backlight；新代码不得调用该声明。 */
+/* 仅有声明、没有实现体：调用它只会在链接期失败，不会被编译器提前发现。
+ * 新代码一律使用 julia_backlight 的接口开关背光。 */
 esp_err_t julia_display_set_backlight(bool enabled);
 
 /** true 不代表首帧已完成或用户已经看到画面。 */

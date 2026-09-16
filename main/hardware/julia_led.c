@@ -142,7 +142,8 @@ static esp_err_t new_ws2812_encoder(rmt_encoder_handle_t *result)
  * @param[in] brightness 亮度百分比（0~100），会作用到三个颜色通道上。
  * @param[in] color      颜色 0xRRGGBB。
  * 失败路径：一旦 RMT 发送出错就置 output_failed 并永久停用输出（避免每 80ms 反复
- * 报错刷日志）；此后本函数直接返回。
+ * 报错刷日志）；此后本函数直接返回。该标志是永久闩锁，没有任何清除入口，重新初始化
+ * 本模块也不会复位它——置位后 LED 不再输出，只能复位设备恢复。
  */
 static void output(uint8_t brightness, uint32_t color)
 {
@@ -261,8 +262,9 @@ void julia_led_set_off(void) { configure(LED_OFF,0,0,0,0); }
  * @brief 按情感枚举设置对应常亮配色（内部映射到固定颜色表，亮度固定 70%）。
  *
  * @param[in] emotion 情感枚举，范围 [JULIA_EMOTION_HAPPY, JULIA_EMOTION_WORRIED]，
- *                    超出范围会被忽略（保持当前设定不变）。这是 UI/状态机用来
- *                    表达“当前情绪”的快捷入口，颜色值与字母一一对应。
+ *                    超出范围会被忽略（保持当前设定不变）。颜色表按 emotion_t 顺序
+ *                    排列，改动枚举顺序就必须同步调整该表。这是 UI/状态机表达“当前
+ *                    情绪”的快捷入口，等价于一次 julia_led_set_solid(70, 颜色)。
  */
 void julia_led_set_emotion(emotion_t emotion)
 {

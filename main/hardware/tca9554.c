@@ -4,6 +4,9 @@
  *
  * 写输出时先准备目标电平，再把引脚切成输出，避免方向切换瞬间出现错误脉冲。
  * 寄存器读改写必须串行，防止 LCD 复位和 SD 卡控制同时修改时覆盖彼此位。
+ *
+ * 所有寄存器访问都经 i2c_master_transmit/transmit_receive 完成，单次最多阻塞 100 ms
+ * （超时参数），因此这些接口只能在任务上下文调用。
  */
 
 #include "freertos/FreeRTOS.h"
@@ -34,6 +37,7 @@ static i2c_master_dev_handle_t s_dev = NULL;
 /* 保证一次“读取旧值、修改一位、写回”完整执行，避免另一任务的引脚变化被覆盖。 */
 static SemaphoreHandle_t s_lock = NULL;
 
+/* 两个寄存器 helper 自身不加锁：调用者必须已持有 s_lock；单次传输最多等待 100 ms。 */
 static esp_err_t read_reg(uint8_t reg, uint8_t *val)
 {
     return i2c_master_transmit_receive(s_dev, &reg, 1, val, 1, 100);
@@ -107,8 +111,11 @@ esp_err_t tca9554_init(void)
  * @param[in] pin   引脚号 0~7（>7 或未初始化返回 ESP_ERR_INVALID_ARG）。
  * @param[in] level true 高电平；false 低电平。
  * @return ESP_OK 成功；ESP_ERR_INVALID_ARG 参数非法；其他 esp_err_t 总线读写失败。
- * 注意：I2C 是阻塞式（300ms 级超时），且内部会持有 s_lock，不能在中断里调用；
- * 调用前需已 tca9554_init()。
+ * 注意：I2C 是阻塞式，单次寄存器访问最多等待 100 ms，整个过程持有 s_lock，
+ * 不能在中断里调用；调用前需已 tca9554_init()。
+ *
+ * 调用方依赖"先锁存、后切方向"这一顺序：SD 卡的 D3/CS 必须在第一次 SD clock 之前
+ * 为高，LCD 复位也要在面板初始化前完成，因此不能改成先使能输出再写电平。
  */
 esp_err_t tca9554_write_pin(uint8_t pin, bool level)
 {
@@ -147,7 +154,7 @@ esp_err_t tca9554_write_pin(uint8_t pin, bool level)
  * @param[in]  pin   引脚号 0~7。
  * @param[out] level 读出电平（true 高 / false 低）。仅当传输成功时写入。
  * @return ESP_OK 成功；ESP_ERR_INVALID_ARG 参数非法；其他 esp_err_t 总线读失败。
- * I2C 为阻塞式且内部持锁，非中断上下文调用。
+ * I2C 为阻塞式（单次读取最多 100 ms）且内部持锁，非中断上下文调用。
  */
 esp_err_t tca9554_read_pin(uint8_t pin, bool *level)
 {

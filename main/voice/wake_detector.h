@@ -7,12 +7,15 @@
  * - 检测到唤醒词 -> 自动调用 voice_service_mic_start()（等效服务器下发的
  *   MIC_START 效果），把麦克风流推给服务器，由服务器做 ASR/LLM/TTS，
  *   回推的 PCM 由 voice_service 播报——本模块不参与识别/生成/播放；
- * - 不接 FSM、不做对话相位、不采集音频、不写 NVS。
+ * - 不接 FSM 状态迁移（只读 quiet 判断），也不采集音频、不写 NVS。
  *
  * 线程模型：
- * - wake_afe_feed 由 board_audio 的 mic_task 上下文每 20ms 回调一次（数据源）；
+ * - wake_afe_feed 由 board_audio 的 mic_task 上下文每 20ms 回调一次（数据源），
+ *   必须快速返回、不得阻塞；
  * - wake_detect_task 常驻 core1，从 AFE fetch 结果中找唤醒事件并触发动作；
- * - wake_detector_init 在 app 装配阶段（app_main）调用，做一次性初始化。
+ * - wake_detector_init 在 app 装配阶段（app_main）调用，做一次性初始化；
+ * - 喂数与检测之间没有锁，靠 wake_detector_set_paused() 递增的 capture_epoch
+ *   换代确认：喂数侧先复位 AFE 缓冲，检测侧确认换代后才继续取结果。
  *
  * 依赖：
  * - 必须在 board_audio_init() 与 voice_service_init() 之后调用（wake 需要
@@ -33,7 +36,8 @@ extern "C" {
  * @brief 初始化本地唤醒词检测（WakeNet "你好小智"，wn9_nihaoxiaozhi_tts）。
  *
  * 过程：初始化 AFE/WakeNet 实例 -> 创建 feed 缓冲 -> 挂板级 mic AFE sink ->
- * 创建 wake_detect_task。初始化完成后检测器自动工作，无需再调用。
+ * 创建 wake_detect_task。初始化完成后检测器自动工作，无需再调用；失败时不会置
+ * wake_detector_is_ready()，调用方只能放弃本地唤醒，不能假设资源已被完全回收。
  *
  * @note 必须在 board_audio_init() 与 voice_service_init() 之后调用；
  *       依赖 "model" 分区构建时已烧录 esp-sr 的 srmodels.bin。
@@ -43,8 +47,12 @@ extern "C" {
  */
 esp_err_t wake_detector_init(void);
 
-/** 返回检测器是否就绪（初始化成功且任务已创建）。 */
+/** 返回检测器是否就绪（初始化成功且任务已创建）。非 atomic，只能在启动阶段写入。 */
 bool wake_detector_is_ready(void);
+/** 暂停/恢复喂数与检测事件（模型与实例保留）；调用者必须在停采音和启采音时成对切换。
+ *  两个方向都会递增 capture_epoch：恢复后旧窗口与拼接余量被丢弃，检测侧等到换代确认
+ *  才继续取结果，因此暂停期间积累的音频不会参与唤醒判定。 */
+void wake_detector_set_paused(bool paused);
 
 #ifdef __cplusplus
 }

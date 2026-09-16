@@ -41,7 +41,8 @@ static const char *TAG = "audio_control_plane";
  * 任务中解析（读 s_last_request_id），二者是不同任务，因此用自旋锁短临界区保护
  * 这一个 request_id。锁只包住内存复制/比较，不包住 cJSON 解析等耗时操作。
  * 语义：只有"最近一次"请求的 request_id 才算数——稍慢到达的旧响应、或无关消息，
- * 都会因不匹配被丢弃，防止串包或沿用过期清单。
+ * 都会因不匹配被丢弃，防止串包或沿用过期清单。刷新只发生在请求生成成功、JSON 已写入
+ * 调用方缓冲之后；生成失败不改动它，此时仍以最近一次成功生成的 request_id 为准。
  */
 /** 保护最近 request_id 的短临界区锁。 */
 static portMUX_TYPE s_audio_request_id_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -146,9 +147,11 @@ static bool audio_control_plane_get_i64(const cJSON *item, int64_t *value)
 }
 
 /**
- * @brief 判断 HTTPS URL 主机名是否属于精确允许列表（与 OTA 共用配置）。
+ * @brief 判断 HTTPS URL 主机名是否属于精确允许列表（与 OTA 共用 CONFIG_OTA_ALLOWED_URL_HOSTS）。
  *
- * 允许列表为空仅限开发；主机名比较精确匹配、不允许后缀模糊匹配。
+ * 安全语义：允许列表为空时不做主机校验——任何 https:// URL 都放行（仍拒绝非 HTTPS、
+ * 带 userinfo 或无法解析的 URL），因此空列表只适用于开发环境。列表非空时按逗号分隔逐项
+ * 精确比较主机名（ASCII 不区分大小写），不做后缀或通配匹配。
  */
 static bool audio_control_plane_url_host_allowed(const char *url)
 {
@@ -156,7 +159,9 @@ static bool audio_control_plane_url_host_allowed(const char *url)
 }
 
 /* 实现说明：这里只"构造并关联"，不发送。每次成功生成都会刷新 s_last_request_id，
- * 因此服务器响应必须严格匹配最近一次请求；生成即关联，逻辑与 OTA 检查完全一致。 */
+ * 因此服务器响应必须严格匹配最近一次请求；生成即关联，逻辑与 OTA 检查完全一致。
+ * 现状：本函数在当前构建内没有调用点——MQTT 层只注册了 OTA 的检查/响应主题，
+ * 音频检查请求尚无发送与调度入口（见 audio_service.c 文件头）。 */
 esp_err_t native_audio_build_check_request(const char *current_audio_version,
                                            char *json, size_t json_size, size_t *json_len)
 {
@@ -204,7 +209,9 @@ esp_err_t native_audio_build_check_request(const char *current_audio_version,
 
 /* 实现说明：全有或全无。任何一步校验失败都 goto cleanup，cleanup 里把 manifest
  * 清零、*download_requested 置 false——绝不输出一个字段残缺/可信度不足的清单。
- * 成功路径下 update=false 时也不会写清单（只回 download_requested=false）。 */
+ * 成功路径下 update=false 时也不会写清单（只回 download_requested=false）。
+ * 现状：本函数只有 audio_service_handle_response() 一个调用点，而后者在当前构建内没有
+ * 外部调用方——业务链尚未接通外部触发入口。 */
 esp_err_t audio_control_plane_parse_audio_response(const char *json, size_t json_len,
                                                    native_audio_manifest_t *manifest,
                                                    bool *download_requested)
@@ -310,7 +317,8 @@ esp_err_t audio_control_plane_parse_audio_response(const char *json, size_t json
         goto cleanup;
     }
 
-    /* 设备时间尚未同步时 now 可能不可用；此时跳过过期比较，但不放宽字段格式校验。 */
+    /* 设备时间尚未同步时 now 可能不可用；此时跳过过期比较，但不放宽字段格式校验。
+     * 代价：无有效墙钟时清单的过期语义不可用（已过期与未过期无法区分）。 */
     time_t now = time(NULL);
     if (now > 0 && manifest->expires_at <= (int64_t)now) {
         ESP_LOGW(TAG, "Audio artifact %s has expired", manifest->audio_id);

@@ -39,7 +39,8 @@ esp_err_t native_ota_build_check_request(char *json, size_t json_size, size_t *j
  * @param[out] manifest           接收已校验清单的结构体，不允许为 NULL。
  * @param[out] download_requested 接收是否应创建下载任务的标志，不允许为 NULL。
  * @return ESP_OK 响应有效。
- * @return ESP_ERR_INVALID_ARG JSON、设备身份、清单字段、有效期或 URL 无效。
+ * @return ESP_ERR_INVALID_ARG JSON、设备身份、清单字段、有效期或 URL 无效；只有设备时间
+ *         已同步（time() > 0）时才会因 expires_at 过期而拒绝。
  * @return ESP_ERR_INVALID_STATE request_id 不匹配或 artifact 已被隔离。
  * @return ESP_ERR_NO_MEM cJSON 临时对象创建失败。
  *

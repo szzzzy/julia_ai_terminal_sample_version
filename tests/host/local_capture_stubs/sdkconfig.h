@@ -1,0 +1,2 @@
+#pragma once
+#define CONFIG_JULIA_LOCAL_CAPTURE_ENABLE 1

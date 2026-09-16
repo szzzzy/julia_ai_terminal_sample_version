@@ -34,6 +34,8 @@ BaseType_t xTaskCreatePinnedToCore(void (*fn)(void *), const char *name, unsigne
     return pdPASS;
 }
 
+esp_err_t board_audio_speaker_retain(bool retain) { return ESP_OK; }
+
 esp_err_t board_audio_speaker_start(uint32_t rate)
 {
     assert(rate == 16000 || rate == 24000);
@@ -83,7 +85,7 @@ unsigned ulTaskNotifyTake(int clear, TickType_t wait)
         longjmp(finished, 1);
     }
     now_us += (int64_t)wait * 1000;
-    if (inject_gap && !was_injected && now_us >= 2000000) {
+    if (inject_gap && !was_injected && now_us >= 3500000) {
         was_injected = true;
         assert(voice_playback_is_active()); /* still open after a 1-second gap */
         assert(voice_playback_write((const uint8_t *)new_pcm, sizeof(new_pcm)) == ESP_OK);
@@ -155,7 +157,7 @@ int main(void)
     assert(voice_playback_start(24000, false, &current_generation) == ESP_OK);
     assert(voice_playback_write((const uint8_t *)old_pcm, 320) == ESP_OK);
     run();
-    assert(first_write_us >= 1120000 && first_write_us < 1200000);
+    assert(first_write_us >= 2500000 && first_write_us < 2600000);
     assert(old_samples == 160 && new_samples == 160 && completion_result == ESP_OK);
     puts("PASS: bounded prebuffer wait and recovery after a one-second gap");
 
@@ -169,7 +171,8 @@ int main(void)
     assert(voice_playback_start(16000, false, &current_generation) == ESP_OK);
     unsigned accepted = 0;
     while (voice_playback_write((const uint8_t *)old_pcm, sizeof(old_pcm)) == ESP_OK) ++accepted;
-    assert(accepted == 102 && !voice_playback_is_active());
+    /* 当前播放缓冲为 128 KiB；填满后必须显式中止整轮播放。 */
+    assert(accepted == (128U * 1024U) / sizeof(old_pcm) && !voice_playback_is_active());
     run();
     assert(writes == 0 && completion_result == ESP_ERR_NO_MEM);
     puts("PASS: overflow aborts explicitly without silently dropping a middle packet");

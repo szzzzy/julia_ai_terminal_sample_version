@@ -31,13 +31,18 @@ extern "C" {
 /** 单条状态 JSON 的固定容量，包含末尾 NUL。 */
 #define NATIVE_OTA_STATUS_JSON_SIZE 1024
 
-/** 固定为 8 条的关键事件持久化队列深度；普通进度不写入该队列。 */
+/** 固定为 8 条的关键事件持久化队列深度；普通进度不写入该队列。
+ *  队满时只允许“终态/即将重启”事件挤掉最早一条（见 ota_report.c 的写入分支），
+ *  容量与 mqtt_comm 的 RAM 队列深度（CONFIG_OTA_REPORT_QUEUE_DEPTH）互不联动。 */
 #define NATIVE_OTA_REPORT_PENDING_MAX 8
 
 /**
  * @brief 服务器能够观察到的固件升级阶段。
  *
  * 这些值表示设备已经完成或正在执行的业务步骤，不是设备内部保存下载断点的格式。
+ *
+ * 兼容性约束：枚举值会作为 uint8_t state 写入 ota_report 的 NVS 记录，重启后按该数值
+ * 重建事件，因此只能追加，不得删除或重排已有取值。
  */
 typedef enum {
     NATIVE_OTA_REPORT_ACCEPTED = 0, /**< 清单已校验并已创建 OTA 任务。 */
@@ -142,6 +147,9 @@ const char *native_ota_report_state_name(native_ota_report_state_t state);
  * @brief 报告设备已经进入一个新的升级阶段。
  *
  * 关键阶段先保存再发送；暂时无法上报不会改变下载和校验本身的结果。
+ *
+ * @return ESP_ERR_NO_MEM 持久化队列已满且本条不是终态/重启事件：本条不会写入 NVS
+ *         （仍会尽力交给 transport），因此重启后不保证补发，属于刻意牺牲的中间态。
  */
 esp_err_t native_ota_report_event(const native_ota_report_context_t *context,
                                   native_ota_report_state_t state,
@@ -159,11 +167,13 @@ esp_err_t native_ota_report_progress(const native_ota_report_context_t *context,
 /**
  * @brief MQTT 恢复后，重新发送尚未确认的关键结果和最新进度。
  *
- * @return ESP_OK 全部当前可发送内容已交给 transport，或没有待发送内容。
+ * @return ESP_OK 当前可发送内容均已提交，或没有待发送内容。
  * @return ESP_ERR_NOT_SUPPORTED 尚未注册 transport。
  * @return 其他 esp_err_t transport 或内部锁操作失败。
  *
  * @note 本函数不会执行 NVS 写入；通常由 MQTT 连接/订阅就绪路径调用。
+ * @note 逐条发送期间会与 PUBACK 删除并发，可能跳过个别记录；漏掉的仍留在 NVS 中，
+ *       由下一次 flush/retry 补齐，一次 ESP_OK 不代表“全部记录都已重发”。
  */
 esp_err_t native_ota_report_flush_pending(void);
 /** 定期核对只重投未确认的关键事件，不重放缓存的进度。 */
@@ -176,6 +186,8 @@ esp_err_t native_ota_report_retry_pending(void);
  *                     NATIVE_OTA_EVENT_ID_SIZE。
  *
  * @note 这里只登记确认，后台再删除持久记录；登记失败时保留记录并允许以后重发。
+ * @note 查不到对应记录是正常路径（该事件已被挤出队列、已删除或来自上一次启动），
+ *       后台任务不会为此报错。
  */
 void native_ota_report_ack_event(const char *event_id);
 

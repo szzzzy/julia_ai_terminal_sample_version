@@ -6,11 +6,14 @@
  *   - 资源：嘴型用生成的 avatar_chroma_assets（mouth_closed/half/open/speak3），由 source_for()
  *     按档位映射；这是 L0/L1 “RMS→嘴型”的最终渲染落点。
  *   - 档位语义：IDLE(≤15)、SPEAK1(≤50)、SPEAK2(≤80)、SPEAK3(>80)。阈值为经验值，
- *     用于把连续 RMS 量化成 4 阶开口，避免逐帧抖动。
- *   - 本模块不做笑/抿嘴等表情，也不负责立绘整屏动画（那是 julia_ui.c / avatar_micro_motion.c）。
+ *     用于把连续 RMS 量化成 4 阶开口，避免逐帧抖动；这是 set_rms() 入口的阈值，
+ *     与 julia_avatar.c 使用的 rise/fall 门限是两套独立参数。
+ *   - 本模块不做笑/抿嘴等表情，也不负责立绘整屏动画（那是 julia_ui.c / avatar_micro_motion.c，
+ *     两者都不参与当前构建）。
  *
- * 线程模型：公开 API 由上层（julia_ui / micro_motion / 演示任务）调用；set_shape 内部取
- * lvgl_port_lock(100ms)，超时则放弃本次切换。除 s_shape/s_transition_active 外无跨线程共享态。
+ * 线程模型：公开 API 由上层调用——当前构建里是 julia_avatar.c 的 avatar_l1 任务与相位
+ * 切换路径；set_shape 内部取 lvgl_port_lock(100ms)，超时则放弃本次切换（下一帧会重试）。
+ * 除 s_shape/s_transition_active 外无跨线程共享态。
  */
 #include "avatar_mouth.h"
 
@@ -39,7 +42,8 @@ static const lv_img_dsc_t *source_for(avatar_mouth_shape_t shape)
     return &avatar_asset_mouth_speak3;
 }
 
-/* 创建嘴部对象并置初始闭口。前置：parent 有效、尚未初始化（重复调用直接返回）。 */
+/* 创建嘴部对象并置初始闭口。基准坐标取生成清单里 mouth_* 层的原点 (153,177)。
+ * 前置：parent 有效、尚未初始化（重复调用直接返回）。 */
 void avatar_mouth_init(lv_obj_t *parent)
 {
     if (!parent || s_mouth) return;
@@ -50,7 +54,8 @@ void avatar_mouth_init(lv_obj_t *parent)
 }
 
 /* 直接切到指定档位。前置：对象已建、非转场。首遇条件：档位与当前不同才重设 src。
- * 副作用：内部取 lvgl_port_lock(100ms)；超时则放弃本次切换。
+ * 副作用：内部取 lvgl_port_lock(100ms)——取锁会阻塞等待，最长约 100ms；超时才放弃本次切换
+ * （不重试）。
  * 失败路径：对象未建/转场中/锁超时 → 直接返回；刷新耗时 >12ms 打慢刷警告。 */
 void avatar_mouth_set_shape(avatar_mouth_shape_t shape, uint16_t rms)
 {
@@ -70,7 +75,9 @@ void avatar_mouth_set_shape(avatar_mouth_shape_t shape, uint16_t rms)
 }
 
 /* RMS→档位：按阈值 15/50/80 把连续 RMS 量化成 4 阶开口，再交给 set_shape。
- * 这是语音下行（julia_ui_set_mouth_openness 等）驱动嘴型的换算入口。 */
+ * 这是 L0/L1 的另一条量化入口（julia_ui/avatar_face 参考链使用）；当前构建里
+ * julia_avatar.c 自己按 RMS 门限（rise 300/950/2300、fall 180/650/1650）算档位后
+ * 直接调 set_shape，因此本函数没有调用点。 */
 void avatar_mouth_set_rms(uint16_t rms)
 {
     avatar_mouth_shape_t shape = rms <= 15 ? AVATAR_MOUTH_IDLE :
@@ -91,7 +98,7 @@ void avatar_mouth_set_transition_active(bool active)
     }
 }
 
-/* 直接显示/隐藏嘴部。内部取 lvgl_port_lock(100ms)，超时则放弃。 */
+/* 直接显示/隐藏嘴部。内部取 lvgl_port_lock(100ms)，取锁会阻塞等待，超时才放弃本次调用。 */
 void avatar_mouth_set_visible(bool visible)
 {
     if (!s_mouth || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;

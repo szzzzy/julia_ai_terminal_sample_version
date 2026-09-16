@@ -5,8 +5,12 @@
  * TCA9554 是 I2C bus owner，本模块只向现有总线添加设备。初始化依次探测两个可能的
  * SA0 地址，并在 WHO_AM_I 不匹配时移除临时设备句柄，避免留下半初始化对象。
  *
- * 配置固定为 30 Hz、加速度 ±4 g、陀螺仪每轴 ±64 dps；它服务于 S6 运动诊断，
- * 不是通用姿态解算驱动。初始化保持采样关闭，由运动任务仅在 S6 开启。
+ * 配置固定为 30 Hz、加速度 ±4 g、陀螺仪每轴 ±64 dps；它服务于运动唤醒输入，
+ * 不是通用姿态解算驱动。初始化保持采样关闭，由运动任务在 S3/S5/S6 开启
+ * （S3 是否监测取决于 CONFIG_JULIA_LOCAL_CAPTURE_ENABLE，见 julia_motion.c）。
+ *
+ * 量程与门限的关系：三轴合成角速度的理论上界约 110.9 dps（64×√3），
+ * CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS 当前为 30 dps，落在量程之内，不会被削顶。
  */
 #include "qmi8658_shared.h"
 
@@ -35,6 +39,7 @@
 #define QMI8658_ENABLE_ACC_GYR 0x43
 #define QMI8658_AUTO_INCREMENT 0x40
 
+/* 换算系数由固定量程决定：满量程除以 16 位有符号满刻度，读数的单位分别是 g 和 dps。 */
 #define ACC_G_PER_LSB    (4.0f / 32768.0f)
 #define GYRO_DPS_PER_LSB (64.0f / 32768.0f)
 
@@ -58,6 +63,8 @@ static esp_err_t write_reg(uint8_t reg, uint8_t value)
     return i2c_master_transmit(s_dev, data, sizeof(data), QMI8658_I2C_TIMEOUT_MS);
 }
 
+/* SA0 决定的两个可能地址按 0x6B → 0x6A 顺序探测：探测失败必须摘掉临时设备句柄，
+ * 否则下一次初始化会以为设备已就绪而直接复用错误的地址。 */
 static esp_err_t try_address(i2c_master_bus_handle_t bus, uint8_t address)
 {
     const i2c_device_config_t config = {
@@ -116,6 +123,8 @@ static int16_t le_i16(const uint8_t *data)
     return (int16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8U));
 }
 
+/* 从 AX_L 起一次读 12 字节，依赖 CTRL1 的地址自增；读到的只是寄存器快照，
+ * 与 30 Hz ODR 不对齐，也不带新鲜度标志，采样节拍由调用者负责。 */
 esp_err_t board_imu_read(board_imu_sample_t *sample)
 {
     if (sample == NULL) return ESP_ERR_INVALID_ARG;

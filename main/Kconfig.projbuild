@@ -1,5 +1,13 @@
 menu "Example Configuration"
 
+    config JULIA_LOCAL_CAPTURE_ENABLE
+        bool "Device endpointing with negotiated capture-v1 protocol"
+        depends on JULIA_SERVER_WAKE_ENABLE && JULIA_CLOUD_STATE_SYNC_ENABLE
+        default y
+        help
+            Keep 16 kHz PCM16. Requires the matching cloud capture-v1 receiver.
+            A server without capability acknowledgement cannot receive audio.
+
     orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
 
     config JULIA_BAT_CONTROL_GPIO
@@ -79,7 +87,7 @@ menu "Example Configuration"
         int "Samples per battery diagnostic checkpoint"
         depends on JULIA_BATTERY_DIAGNOSTICS
         range 4 128
-        default 32
+        default 16
 
     config JULIA_BATTERY_MONITOR_INTERVAL_SECONDS
         int "Battery monitor interval (seconds)"
@@ -785,7 +793,7 @@ menu "Example Configuration"
         config JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS
             int "Seconds before far standby"
             range 10 86400
-            default 300
+            default 10
             help
                 Continuous idle time before the companion display closes its eyes,
                 begins backlight breathing, and enters S3. In server wake mode
@@ -805,11 +813,12 @@ menu "Example Configuration"
                 The RTC night schedule remains an independent earlier trigger.
 
         config JULIA_SILENT_STANDBY_TIMEOUT_SECONDS
-            int "Seconds in S5 before standby"
+            int "Seconds in S5 before S6 sleep"
             range 60 86400
             default 1800
             help
-                Continuous time in S5 silent state before returning to S3 standby.
+                Continuous time in S5 before entering S6. Neither state enables
+                the microphone; confirmed motion returns the device to S3.
 
         config JULIA_SERVICE_INIT_TIMEOUT_SECONDS
             int "Seconds to wait for initial cloud services"
@@ -863,7 +872,7 @@ menu "Example Configuration"
         config JULIA_DISPLAY_BREATHE_MIN_PERCENT
             int "S3 standby breathing minimum percentage"
             range 0 100
-            default 5
+            default 0
 
         config JULIA_DISPLAY_BREATHE_MAX_PERCENT
             int "S3 standby breathing maximum percentage"
@@ -919,11 +928,11 @@ menu "Example Configuration"
             depends on JULIA_NIGHT_SLEEP_ENABLE
 
         config JULIA_IMU_MOTION_ENABLE
-            bool "Wake S6 to S3 with QMI8658 motion"
+            bool "Wake S5/S6 to S3 with QMI8658 motion"
             default y
             help
                 Use adjacent-sample acceleration and gyro magnitude detection
-                while in S6. Confirmed motion posts an FSM event that restores
+                while in S5/S6. Confirmed motion posts an FSM event that restores
                 S3 standby; the detector never controls display hardware directly.
 
         config JULIA_IMU_MOTION_SAMPLE_MS
@@ -947,16 +956,16 @@ menu "Example Configuration"
         config JULIA_IMU_ACCEL_DELTA_MG
             int "Adjacent-sample acceleration threshold (mg sum)"
             range 10 4000
-            default 200
+            default 750
             depends on JULIA_IMU_MOTION_ENABLE
             help
                 Sum of absolute X/Y/Z acceleration changes between adjacent
-                samples, expressed in milli-g. 200 means 0.20 g.
+                samples, expressed in milli-g. 750 means 0.75 g.
 
         config JULIA_IMU_GYRO_THRESHOLD_DPS
             int "Gyroscope magnitude threshold (degrees/s)"
             range 1 2000
-            default 25
+            default 90
             depends on JULIA_IMU_MOTION_ENABLE
 
         config JULIA_TIMEZONE

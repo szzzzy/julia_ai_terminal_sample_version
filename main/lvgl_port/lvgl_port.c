@@ -41,6 +41,8 @@ static SemaphoreHandle_t s_lvgl_mutex;
 static lv_disp_draw_buf_t s_draw_buf;
 static lv_disp_drv_t s_disp_drv;
 static esp_timer_handle_t s_tick_timer;
+static TaskHandle_t s_lvgl_task;
+static int64_t s_tick_stopped_us;
 static volatile bool s_display_off;
 static volatile bool s_display_target_off;
 static volatile bool s_display_state_known = true;
@@ -91,6 +93,8 @@ bool IRAM_ATTR lvgl_port_color_trans_done(esp_lcd_panel_io_handle_t panel_io,
  * @param[in] pixels 像素数据（RGB565；内部 DMA RAM 或已同步的 PSRAM）。
  * @return ESP_OK 发送且收到完成；ESP_ERR_TIMEOUT 取锁/等完成超时；
  *         ESP_ERR_INVALID_STATE 未初始化；否则为发送/同步错误。
+ * @note  取 panel mutex 与等待完成各限 1000ms；返回 ESP_ERR_TIMEOUT 时该块 DMA
+ *        未必已经停止，此时复用 pixels 仍有被改写覆盖的风险。
  */
 esp_err_t lvgl_port_draw_bitmap_sync(esp_lcd_panel_handle_t panel, int x1, int y1,
                                      int x2, int y2, const void *pixels)
@@ -122,6 +126,8 @@ esp_err_t lvgl_port_draw_bitmap_sync(esp_lcd_panel_handle_t panel, int x1, int y
  *        与面板闭区间约定一致）提交 DMA 并同步等待完成；完成后用
  *        lv_disp_flush_is_last 记录当前是否为"整帧最后一块"，再 lv_disp_flush_ready
  *        告知 LVGL 这块缓冲可复用。若处于息屏/暂停态，则直接标记完成以保持 LVGL 流程。
+ *        失败（取锁超时、DMA 提交错误、等完成超时）只记录日志，仍调用
+ *        lv_disp_flush_ready，因此错误不会回传给业务层，该块画面可能不完整。
  */
 static void lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
 {
@@ -186,9 +192,12 @@ static void lvgl_tick_cb(void *arg)
     lv_tick_inc(LVGL_TICK_PERIOD_MS);
 }
 
-/* LVGL 主循环任务：周期调用 lv_timer_handler（驱动动画/刷新）。在息屏或刷新暂停时
- * 低频空转（200ms）以保持任务可调度、系统 WDT 正常，不持有 LVGL 锁；正常时取锁后
- * 处理一到多次定时器并释放，之后按 LVGL_HANDLER_PERIOD_MS 节拍。 */
+/* LVGL 主循环任务：正常时取 LVGL 锁后调用 lv_timer_handler（驱动动画/刷新），随后按
+ * LVGL_HANDLER_PERIOD_MS 节拍延时。息屏（显示目标为关或已关）或刷新暂停时不取锁，
+ * 直接阻塞在任务通知上（portMAX_DELAY），由 lvgl_port_set_display_off() /
+ * lvgl_port_set_refresh_paused() 唤醒，因此该状态下任务仍可被调度、不占 CPU。
+ * 只有"显示目标未知或 apply_display_target() 应用失败"这一分支才按 200ms 轮询重试：
+ * 它必须周期性重发 panel 命令，不能无限等待。 */
 static void lvgl_task(void *arg)
 {
     (void)arg;
@@ -196,12 +205,12 @@ static void lvgl_task(void *arg)
     while (1) {
         if ((!s_display_state_known || s_display_target_off != s_display_off) &&
             apply_display_target() != ESP_OK) {
-            vTaskDelay(pdMS_TO_TICKS(200));
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200));
             continue;
         }
         if (s_display_target_off || s_display_off || s_refresh_paused) {
             /* 不持有 LVGL 锁，任务保持可调度；系统 idle/task WDT 均可正常运行。 */
-            vTaskDelay(pdMS_TO_TICKS(200));
+            (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             continue;
         }
         if (lvgl_port_lock(portMAX_DELAY)) {
@@ -227,6 +236,7 @@ esp_err_t lvgl_port_set_display_off(bool off)
 {
     if (!s_panel || !s_panel_mutex) return ESP_ERR_INVALID_STATE;
     s_display_target_off = off;
+    if (s_lvgl_task) xTaskNotifyGive(s_lvgl_task);
     return apply_display_target();
 }
 
@@ -241,6 +251,14 @@ static esp_err_t apply_display_target(void)
         s_display_state_known = err == ESP_OK;
         if (err == ESP_OK) {
             s_display_off = off;
+            if (s_tick_timer && off && !s_tick_stopped_us) {
+                if (esp_timer_stop(s_tick_timer) == ESP_OK)
+                    s_tick_stopped_us = esp_timer_get_time();
+            } else if (s_tick_timer && !off && s_tick_stopped_us) {
+                lv_tick_inc((uint32_t)((esp_timer_get_time() - s_tick_stopped_us) / 1000));
+                if (esp_timer_start_periodic(s_tick_timer, LVGL_TICK_PERIOD_MS * 1000) == ESP_OK)
+                    s_tick_stopped_us = 0;
+            }
             if (!off) s_wake_started_us = esp_timer_get_time();
         }
     }
@@ -250,8 +268,13 @@ static esp_err_t apply_display_target(void)
 
 bool lvgl_port_display_off(void) { return s_display_off; }
 
-/* 暂停不发送 panel power command；背光与 GRAM 状态均由各自 owner 保持。 */
-void lvgl_port_set_refresh_paused(bool paused) { s_refresh_paused = paused; }
+/* 刷新暂停只冻结 lv_timer_handler 的调用：不发 panel power command、不动背光，
+ * 也不停 tick 定时器（tick 照常累加）；需要连 tick 一起停的只有息屏路径。 */
+void lvgl_port_set_refresh_paused(bool paused)
+{
+    s_refresh_paused = paused;
+    if (s_lvgl_task) xTaskNotifyGive(s_lvgl_task);
+}
 bool lvgl_port_refresh_paused(void) { return s_refresh_paused; }
 
 /**
@@ -326,7 +349,7 @@ esp_err_t lvgl_port_init(esp_lcd_panel_handle_t panel_handle)
     ESP_RETURN_ON_ERROR(esp_timer_create(&tick_timer_args, &s_tick_timer), TAG, "lvgl tick timer create failed");
     ESP_RETURN_ON_ERROR(esp_timer_start_periodic(s_tick_timer, LVGL_TICK_PERIOD_MS * 1000), TAG, "lvgl tick timer start failed");
 
-    BaseType_t task_ok = xTaskCreate(lvgl_task, "lvgl", LVGL_TASK_STACK_SIZE, NULL, LVGL_TASK_PRIORITY, NULL);
+    BaseType_t task_ok = xTaskCreate(lvgl_task, "lvgl", LVGL_TASK_STACK_SIZE, NULL, LVGL_TASK_PRIORITY, &s_lvgl_task);
     ESP_RETURN_ON_FALSE(task_ok == pdPASS, ESP_ERR_NO_MEM, TAG, "lvgl task create failed");
 
     ESP_LOGI(TAG, "LVGL initialized with %d-pixel double buffer", LVGL_PORT_BUFFER_PIXELS);

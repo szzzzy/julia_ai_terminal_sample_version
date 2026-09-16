@@ -1,0 +1,10 @@
+{
+  "inspected": "2026-09-15",
+  "production_root": "/opt/julia-runtime/control-v1-20260910/release/api_server",
+  "sha256": {
+    "server/real_engine.py": "73e5abc97deb5e0a038d124a45c9314ced0d5aeab6f59fb46e242430be7e7219",
+    "server/state_sync.py": "a759330c5bcac778f71e05e56de230a4cca69be31c8e563aae6cdda033bf8178",
+    "server/wss_adapter.py": "40e47a799f71a390d5c612455cfd0db51880012ab3e32b1a837f634f1add0069",
+    "engine/board_serial_asr_test.py": "9867818bdab75e2dd2ec73b92cf61b042c8f6a9fb34d019411783f36cefa6421"
+  }
+}

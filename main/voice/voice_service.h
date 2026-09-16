@@ -45,9 +45,13 @@ esp_err_t voice_service_init_board_audio(void);
  * 都就绪后，才会启动语音连接。
  *
  * @return ESP_OK 初始化成功。
- * @return 其他 esp_err_t 通信层 topic 注册失败。
+ * @return ESP_ERR_INVALID_SIZE 多设备模式下 "voice/<device_id>/vcmd" 超出 topic 缓冲。
+ * @return 其他 esp_err_t 设备身份读取或通信层 topic 注册失败。
  *
  * @note 必须在 mqtt_comm_start() 生效前（即网络启动前）调用；幂等。
+ *
+ * @note 本函数把 voice_service_on_fsm_state 注册为 FSM 的唯一状态观察者（会覆盖此前
+ *       的注册者），因此必须在任何状态事件投递之前完成。
  */
 esp_err_t voice_service_init(void);
 
@@ -71,10 +75,12 @@ esp_err_t voice_service_ip_ready(void *arg);
  * @return ESP_OK 命令已入队，由当前 WSS 会话任务执行；断链时队列不重放。
  * @return ESP_ERR_INVALID_ARG uri 为空。
  * @return ESP_ERR_INVALID_SIZE uri 超出上限。
- * @return ESP_ERR_NO_MEM 命令队列已满。
- * @return ESP_ERR_INVALID_STATE WSS 客户端尚未启动。
+ * @return ESP_ERR_NO_MEM 命令队列已满，或已有文件预约；预约被占用时服务器会收到 file_busy。
+ * @return ESP_ERR_INVALID_STATE WSS 客户端尚未启动、状态同步未就绪，或设备处于 S5/S6 静默。
  *
  * @note 本函数只登记请求并立即返回；实际读取和发送由语音连接任务完成。
+ *       服务器 FILE_SEND 与设备演示推送共用同一预约槽，两者会互相拒绝。
+ *       可由 MQTT 事件上下文、唤醒任务或演示任务调用：只入队，不直接操作 TLS 或 SD。
  */
 esp_err_t voice_service_send_file(const char *uri);
 /** 包括已预约入队及正在传输的文件；断线、拒绝、取消和完成均释放预约。 */
@@ -87,13 +93,17 @@ bool voice_service_file_busy(void);
  * 连接断开时丢弃尚未发出的旧声音，避免重连后把过期话语交给服务器。
  *
  * @param[in] buf 音频数据首地址，不允许为 NULL。
- * @param[in] len 数据长度，1～656 字节。
+ * @param[in] len 数据长度，1～656 字节；656 = 16 字节 PCM1 头 + 640 字节 PCM，
+ *                上限来自上行 ring 的单帧容量。
  *
  * @return ESP_OK 数据块已写入ring。
  * @return ESP_ERR_INVALID_ARG buf 为空或 len 为 0。
  * @return ESP_ERR_INVALID_SIZE len 超过 PCM1 最大帧长。
  * @return ESP_ERR_NO_MEM 麦克风待发送缓冲区已满，本轮连接将被安全结束。
- * @return ESP_ERR_INVALID_STATE WSS 客户端尚未启动。
+ * @return ESP_ERR_INVALID_STATE WSS 客户端尚未启动、状态同步未就绪，或设备处于 S5/S6 静默。
+ *
+ * @note 板级 MIC sink 的上行入口。当前 CONFIG_JULIA_LOCAL_CAPTURE_ENABLE=y 时 sink 改为把
+ *       PCM1 交给 voice_local_capture，本函数属于该选项关闭时的兼容路径。
  */
 esp_err_t voice_service_send_chunk(const uint8_t *buf, size_t len);
 
@@ -103,7 +113,7 @@ esp_err_t voice_service_send_chunk(const uint8_t *buf, size_t len);
  * 默认服务器唤醒模式下，麦克风此前可能已经在上传；本命令的业务含义是
  * “唤醒完成，用户现在开始表达”。播放中的唤醒回应或旧回答会先被停止。
  *
- * @return ESP_OK 命令已入队；ESP_ERR_NO_MEM 命令队列已满；ESP_ERR_INVALID_STATE 尚未启动。
+ * @return ESP_OK 命令已入队；ESP_ERR_NO_MEM 命令队列已满；ESP_ERR_INVALID_STATE 尚未启动、状态同步未就绪或处于 S5/S6 静默。
  */
 esp_err_t voice_service_mic_start(void);
 
@@ -113,7 +123,7 @@ esp_err_t voice_service_mic_start(void);
  * 本命令不等于关闭麦克风上传。默认服务器唤醒模式下，只要 WSS 连接仍在，
  * 待机、等待回答和播放回答期间都可以继续上传声音。
  *
- * @return ESP_OK 命令已入队；ESP_ERR_NO_MEM 命令队列已满；ESP_ERR_INVALID_STATE 尚未启动。
+ * @return ESP_OK 命令已入队；ESP_ERR_NO_MEM 命令队列已满；ESP_ERR_INVALID_STATE 尚未启动、状态同步未就绪或处于 S5/S6 静默。
  */
 esp_err_t voice_service_mic_stop(void);
 

@@ -35,8 +35,6 @@ static void verify_disconnect_event(fsm_event_t event)
 
     const julia_main_state_t stable_states[] = {
         JULIA_MAIN_STATE_S3_STANDBY,
-        JULIA_MAIN_STATE_S5_SILENT,
-        JULIA_MAIN_STATE_S6_SLEEP,
     };
     for (size_t i = 0; i < sizeof(stable_states) / sizeof(stable_states[0]); ++i) {
         julia_fsm_t fsm;
@@ -68,6 +66,8 @@ static void verify_disconnect_event(fsm_event_t event)
     }
 
     const julia_main_state_t unaffected_states[] = {
+        JULIA_MAIN_STATE_S5_SILENT,
+        JULIA_MAIN_STATE_S6_SLEEP,
         JULIA_MAIN_STATE_S0_BOOT,
         JULIA_MAIN_STATE_S7_FAULT,
         JULIA_MAIN_STATE_S8_OTA,

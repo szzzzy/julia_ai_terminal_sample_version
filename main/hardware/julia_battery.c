@@ -1,6 +1,13 @@
 /**
  * @file julia_battery.c
  * @brief 读取板载 BAT_ADC，提供启动压降日志和运行期电量估算。
+ *
+ * 采样链：GPIO8=BAT_ADC（ADC1_CH7）经 200K/100K 分压，ADC 校准读数乘 3 还原电池端
+ * 电压；每次测量取 CONFIG_JULIA_BATTERY_SAMPLE_COUNT 个样本求平均，显示值再与上次
+ * 结果做 3:1 低通。所有电压单位为 mV，百分比为 0～100。
+ *
+ * 本模块只产生 UI 提示用的 NORMAL／LOW 状态，不进入行为 FSM，也不推测充电状态：
+ * present 只表示端电压落在合理区间，BAT 节点有电压不等于物理上装着电池。
  */
 #include "julia_battery.h"
 
@@ -19,14 +26,16 @@
 /* 本板 IO8 是 BAT_ADC；ADC 通道从 0 编号，ADC1_CH7 对应 GPIO8。
  * IO9 接 RTC_INT，不能拿它估算电池电压。 */
 #define JULIA_BAT_ADC_CHANNEL     ADC_CHANNEL_7
+/* 6 dB 衰减必须覆盖分压后的端电压：2500～4350 mV 电池对应 ADC 端约 0.83～1.45 V。 */
 #define JULIA_BAT_ADC_ATTEN       ADC_ATTEN_DB_6
+/* 200K/100K 分压使 ADC 端只有电池电压的 1/3，还原端电压时乘 3。 */
 #define JULIA_BAT_DIVIDER_NUM     3U
 
 #ifndef CONFIG_JULIA_BATTERY_DIAGNOSTICS
 #define CONFIG_JULIA_BATTERY_DIAGNOSTICS 0
 #endif
 #ifndef CONFIG_JULIA_BATTERY_SAMPLE_COUNT
-#define CONFIG_JULIA_BATTERY_SAMPLE_COUNT 32
+#define CONFIG_JULIA_BATTERY_SAMPLE_COUNT 16
 #endif
 #ifndef CONFIG_JULIA_BATTERY_MONITOR_INTERVAL_SECONDS
 #define CONFIG_JULIA_BATTERY_MONITOR_INTERVAL_SECONDS 30
@@ -51,6 +60,9 @@ static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static julia_battery_status_t s_status;
 static julia_battery_update_cb_t s_callback;
 static void *s_callback_ctx;
+/* 低电量锁存：进入阈值取 CONFIG_JULIA_BATTERY_LOW_ENTER_PERCENT（当前 15%），退出阈值取
+ * CONFIG_JULIA_BATTERY_LOW_EXIT_PERCENT（当前 25%）。两者分开是为了让百分比在阈值附近
+ * 抖动时不反复切换 NORMAL／LOW；提示语音是一次性标志，退出 LOW 后才会重新武装。 */
 static bool s_low_latched;
 
 typedef struct {
@@ -59,7 +71,10 @@ typedef struct {
 } battery_curve_point_t;
 
 /* 单节锂电池静置电压的保守近似。设备带载时会低估电量，因此该值只适合作为
- * UI 提示和低电量趋势，不作为容量计量或保护阈值。 */
+ * UI 提示和低电量趋势，不作为容量计量或保护阈值。
+ * 3.40 V=0% 与 3.55 V=15% 是保留的低端标定点，4.10 V=90% 与 4.20 V=100% 是高端点；
+ * 相邻点之间线性插值。这些点位在仓库内找不到标定记录，来源未确认。
+ * UI 侧 julia_avatar_set_battery_status() 会把结果取整到 5% 步进（≥98% 显示 100%）。 */
 static const battery_curve_point_t s_curve[] = {
     {3400, 0}, {3550, 15}, {3650, 30}, {3750, 50},
     {3850, 65}, {3950, 80}, {4100, 90}, {4200, 100},
@@ -90,6 +105,8 @@ static const char *battery_state_name(julia_battery_state_t state)
     }
 }
 
+/* 失败样本被跳过并只统计有效个数，全部失败才返回 ESP_FAIL；此时调用方保持上一次
+ * 快照不变，不会因为一次读失败把电量清成 UNKNOWN。min/max 供启动阶段日志判断压降。 */
 static esp_err_t read_voltage(uint16_t *voltage_mv, uint16_t *minimum_mv,
                               uint16_t *maximum_mv)
 {
@@ -125,6 +142,9 @@ static esp_err_t read_voltage(uint16_t *voltage_mv, uint16_t *minimum_mv,
     return ESP_OK;
 }
 
+/* 显示电压是 3:1 一阶低通结果，不等于单次 ADC 读数：负载突变后需要多个测量周期才
+ * 跟得上；present 判定变化或首次测量时直接采用本次原始值。低通权重是模块内固定值，
+ * 仓库里没有相关标定记录，来源未确认。 */
 static julia_battery_status_t update_status(uint16_t raw_mv)
 {
     julia_battery_status_t snapshot;
@@ -141,6 +161,7 @@ static julia_battery_status_t update_status(uint16_t raw_mv)
     s_status.percent = present ? percent_for_voltage(display_mv) : 0U;
 
     if (!present) {
+        /* 电压不可信时清除锁存：present 只表示电压合理，无法据此判断电池是否真被取下。 */
         s_low_latched = false;
         s_status.state = JULIA_BATTERY_STATE_UNKNOWN;
     } else {
@@ -157,6 +178,8 @@ static julia_battery_status_t update_status(uint16_t raw_mv)
     return snapshot;
 }
 
+/* 幂等：已就绪直接返回 ESP_OK。任何一步失败都先释放 ADC unit 再返回，不留下
+ * 半初始化的 s_adc／s_cali 供后续采样使用。关闭诊断配置时返回 NOT_SUPPORTED。 */
 esp_err_t julia_battery_diagnostics_init(void)
 {
 #if !CONFIG_JULIA_BATTERY_DIAGNOSTICS
@@ -248,6 +271,9 @@ static void battery_monitor_task(void *arg)
     }
 }
 
+/* 幂等：重复调用只登记回调，不会创建第二个监测任务。回调在 battery_monitor 任务
+ * 上下文按测量周期执行，实现应快速返回。任务栈 3072、优先级 2 是模块内常量，
+ * 仓库内没有对应配置项，来源未确认。 */
 esp_err_t julia_battery_monitor_start(julia_battery_update_cb_t callback, void *ctx)
 {
 #if !CONFIG_JULIA_BATTERY_DIAGNOSTICS

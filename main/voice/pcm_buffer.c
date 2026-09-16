@@ -2,6 +2,9 @@
 
 #include <string.h>
 
+/* 前置不变量：容量向下取偶（保证 16 位样本不会被拆开），调用方必须保证 storage 不小于
+ * capacity；容量取偶后为 0 时缓冲只是不可用，不会取模除零——write 会因
+ * bytes > capacity - size 直接拒绝，read 也会因 size == 0 提前返回。 */
 void pcm_buffer_init(pcm_buffer_t *buffer, uint8_t *storage, size_t capacity)
 {
     *buffer = (pcm_buffer_t){.data = storage, .capacity = capacity & ~(size_t)1};

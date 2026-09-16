@@ -30,6 +30,7 @@ endif()
 set(srcs
     # 应用入口与顶层编排。
     "app/main.c"
+    "app/julia_quiet_power.c"
 
     # 网络生命周期、MQTT 通信与公共 HTTPS 下载。
     "network/network_lifecycle.c"
@@ -43,6 +44,7 @@ set(srcs
     "voice/voice_uplink_ring.c"
     "voice/voice_uplink_pump.c"
     "voice/voice_service.c"
+    "voice/voice_local_capture.c"
     "voice/voice_state_sync.c"
     "voice/voice_control_guard.c"
     "voice/voice_playback.c"

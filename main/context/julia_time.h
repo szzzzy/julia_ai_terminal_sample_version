@@ -8,7 +8,9 @@
  * 依赖：板级 RTC 接口（board_rtc_*）、SNTP、时区宏 CONFIG_JULIA_TIMEZONE。
  *
  * 使用：app_main 调用 julia_time_init()；网络生命周期调用 julia_time_ip_ready()；
- *       julia_context 等通过 julia_time_valid() 查询墙钟是否已可信。
+ *       当前构建里只有 julia_night_schedule 通过 julia_time_valid() 查询墙钟是否可信。
+ *       时间无效（RTC 从未写过且 SNTP 未同步）时，调用方必须暂停夜间判断，不能按
+ *       系统时钟的默认值推测"现在是几点"。
  */
 #pragma once
 

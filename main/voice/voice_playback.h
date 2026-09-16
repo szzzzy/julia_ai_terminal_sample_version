@@ -12,8 +12,10 @@
  */
 
 /**
- * 创建唯一播放 Task 和 128 KiB PSRAM 缓冲。pcm_sink 在播放 Task 中同步调用，收到
- * 的 PCM 只在回调期间有效；回调不得阻塞或反向调用播放控制接口。
+ * @brief 创建唯一播放 Task 和 128 KiB PSRAM 网络缓冲（PLAYBACK_CAPACITY_BYTES）。
+ *
+ * pcm_sink 在播放 Task 中同步调用，收到的 PCM 只在回调期间有效；回调不得阻塞或
+ * 反向调用播放控制接口，否则会拖住 I2S 输出。重复调用返回 ESP_OK，不创建第二个 Task。
  */
 esp_err_t voice_playback_init(audio_pcm_sink_t pcm_sink, void *ctx);
 /** 开始网络回答或异步自检；新代次会取消旧播放，generation 用于隔离迟到结果。 */
@@ -34,6 +36,13 @@ esp_err_t voice_playback_try_start_local(uint32_t rate, const uint8_t *pcm, size
  */
 esp_err_t voice_playback_start_local_wav(const uint8_t *wav, size_t bytes,
                                          bool only_if_idle, uint32_t *generation);
+/**
+ * 播放下行 PCM 代次约定：每次开始播放 generation 加一，取值永不为 0；0 表示“无播放”，
+ * 也是无条件停止的入参。因此 voice_playback_generation_is_active()、
+ * voice_playback_stop_generation() 和 voice_playback_get_timing() 对 0 一律返回失败，
+ * 调用方不能用 0 表示“任意代次”。
+ */
+
 /** 查询指定播放是否仍在进行；不消费语音服务拥有的完成结果。 */
 bool voice_playback_generation_is_active(uint32_t generation);
 /** 仅取消匹配的播放，返回是否匹配；迟到的提示收尾不能停止新一轮回答。 */
@@ -47,6 +56,15 @@ esp_err_t voice_playback_write(const uint8_t *pcm, size_t bytes);
 void voice_playback_finish(void);
 /** 立即取消尚未播放的声音并停止扬声器，用于用户插话或连接断开。 */
 void voice_playback_stop(void);
+/**
+ * @brief 按主状态保留或释放扬声器资源（由 FSM 观察者调用）。
+ *
+ * @param[in] enabled true 表示处于 S4/S2 交互期，保留 I2S 通道，避免每轮对话反复
+ *                    重建；false 表示退出交互，仅在空闲时删除通道，不打断播放。
+ *
+ * @note 播放任务未初始化时不生效；该调用只改变保留标志，实际创建／删除由播放任务完成。
+ */
+void voice_playback_set_interaction(bool enabled);
 /** 查询是否仍有一轮回答正在准备或播放。 */
 bool voice_playback_is_active(void);
 /**
@@ -55,8 +73,8 @@ bool voice_playback_is_active(void);
  */
 bool voice_playback_take_completion(uint32_t *generation, esp_err_t *result);
 
-/* Fixed-slot diagnostics, esp_timer_get_time() monotonic microseconds since boot.
- * first_output_us records successful I2S submission, not acoustic measurement. */
+/* 固定槽位诊断量，时间基准为 esp_timer_get_time() 的启动后单调微秒。
+ * first_output_us 记录的是成功提交 I2S 的时刻，不是声学测量结果。 */
 typedef struct {
     uint32_t generation;
     int64_t first_output_us;

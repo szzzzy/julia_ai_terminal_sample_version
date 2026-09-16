@@ -36,8 +36,8 @@
 
 /* QSPI 协议 opcode：非 QSPI 模式下，esp_lcd_panel_io_spi 通过 DC 引脚区分命令与数据；
  * 而在 quad_mode（32-bit 命令字）下，命令字的高字节携带这些 opcode，告诉 LCD 控制器
- * 这一事务是"写命令/读命令/写颜色"，从而把指令路由到正确的协议阶段。低字节才放 LCD
- * 命令码（见 tx_param/tx_color）。 */
+ * 这一事务是"写命令/读命令/写颜色"，从而把指令路由到正确的协议阶段；LCD 命令码由
+ * tx_param()/tx_color() 左移 8 位后放在命令字的 [15:8]，与 opcode 拼成同一个 32-bit 字。 */
 #define LCD_OPCODE_WRITE_CMD        (0x02ULL)
 #define LCD_OPCODE_READ_CMD         (0x0BULL)
 #define LCD_OPCODE_WRITE_COLOR      (0x32ULL)
@@ -249,6 +249,8 @@ static esp_err_t panel_st77916_reset(esp_lcd_panel_t *panel)
  *
  * 当前表是本模组实际使用的完整基线；其它模组必须通过 vendor_config.init_cmds
  * 整体替换，不能在同一表内混用不同供应商或调试阶段的寄存器值。
+ * 当前板级 julia_display.c 始终注入自己的 init_cmds，因此本表在本构建中不会被下发，
+ * 仅作为调用方未提供 vendor_config 时的兜底序列。
  *
  * 语义说明（不逐字节展开）：
  *   - 0xF0/0xF1/0xF2 ... 多数是厂商"命令扩展组"入口与电源/时序/伽马配置寄存器；

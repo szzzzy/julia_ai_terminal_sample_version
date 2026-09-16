@@ -9,8 +9,9 @@
  *
  * 兼容性约束：
  * - failure_reason 会以 error_code 序列化进状态事件，也会写入 NVS 断点记录，
- *   因此新增取值只能追加在枚举末尾，不得改变已有数值；
- * - 各 *_SIZE 常量描述含末尾 NUL 的缓冲区容量。
+ *   因此新增取值只能追加在枚举末尾，不得改变已有数值、更不能删除或重排；
+ * - 各 *_SIZE 常量描述含末尾 NUL 的缓冲区容量（sha256 例外，它是原始字节数）；
+ * - NATIVE_OTA_JSON_MAX_LEN 是多个模块共享的顶层上限，见该宏的说明。
  */
 #pragma once
 
@@ -24,7 +25,10 @@
 extern "C" {
 #endif
 
-/** 单条控制面服务器响应允许的最大字节数，不包含接收缓冲区末尾的 NUL。 */
+/** 单条控制面服务器响应允许的最大字节数，不包含接收缓冲区末尾的 NUL。
+ *  该上限被多处共享：MQTT 分片重组缓冲区、mqtt_comm_register_topic() 的
+ *  max_payload_len 上限，以及 ota_control_plane / audio_control_plane 两个解析入口；
+ *  改大它必须同时确认这些缓冲区都跟着变大。 */
 #define NATIVE_OTA_JSON_MAX_LEN 1024
 
 /** 版本检查请求 JSON 的最大长度，包含末尾 NUL。 */
@@ -51,7 +55,9 @@ extern "C" {
 /** OTA URL 最大长度，包含末尾 NUL。 */
 #define NATIVE_OTA_URL_SIZE 256
 
-/** SHA-256 摘要长度，单位为字节。 */
+/** SHA-256 摘要长度，单位为字节（不是字符串长度）。协议 JSON 中以 2 倍长度的小写
+ *  十六进制文本传输，即 NATIVE_OTA_SHA256_SIZE 字节对应 64 个字符；解析时按键值长度
+ *  严格校验，本地只保存原始字节。 */
 #define NATIVE_OTA_SHA256_SIZE 32
 
 /** 音频素材唯一 ID 最大长度，包含末尾 NUL。 */
@@ -72,6 +78,8 @@ extern "C" {
  * 注意：字符串名映射在 ota_stability.c 的 native_ota_failure_reason_name()；
  * 新增枚举值必须在末尾追加并把字符串名同步过去，否则协议层 error_code 会落到 "UNKNOWN"
  * （当前 NATIVE_OTA_FAILURE_STORAGE_UNAVAILABLE 即存在该缺口）。
+ *
+ * 本枚举的数值会写入 NVS 断点记录的 failure_reason 字段，因此不得删除或重排任何取值。
  */
 typedef enum {
     NATIVE_OTA_FAILURE_NONE = 0, /**< 未发生失败。 */
@@ -91,8 +99,8 @@ typedef enum {
     NATIVE_OTA_FAILURE_BOOT_PARTITION_SET_FAILED, /**< 设置下次启动分区失败。 */
     NATIVE_OTA_FAILURE_NVS_WRITE_FAILED, /**< 断点记录写入或提交 NVS 失败。 */
     NATIVE_OTA_FAILURE_STORAGE_UNAVAILABLE, /**< 目标数据/OTA 分区缺失或不可用。 */
-    /* Append only: existing values are persisted in NVS. */
-    NATIVE_OTA_FAILURE_OUT_OF_MEMORY, /**< TLS/HTTP memory allocation failed. */
+    /* 只能追加：已有取值的数值会被持久化到 NVS 断点记录。 */
+    NATIVE_OTA_FAILURE_OUT_OF_MEMORY, /**< TLS/HTTP 分配失败；不因此隔离固件制品。 */
 } native_ota_failure_reason_t;
 
 /**
@@ -107,12 +115,16 @@ typedef struct {
     char artifact_id[NATIVE_OTA_ARTIFACT_ID_SIZE]; /**< 服务端发布物的唯一 ID。 */
     char product[NATIVE_OTA_PRODUCT_ID_SIZE]; /**< 目标产品/型号标识。 */
     char hardware_version[NATIVE_OTA_HARDWARE_VERSION_SIZE]; /**< 目标硬件版本。 */
-    char version[sizeof(((esp_app_desc_t *)0)->version)]; /**< 镜像内的应用版本字符串。 */
+    char version[sizeof(((esp_app_desc_t *)0)->version)]; /**< 镜像内的应用版本字符串。
+                                                            *   必须与镜像内版本一致，且按
+                                                            *   major.minor.patch 三段数字校验。 */
     char url[NATIVE_OTA_URL_SIZE]; /**< 固件 HTTPS 下载地址，包含末尾 NUL。 */
     uint8_t sha256[NATIVE_OTA_SHA256_SIZE]; /**< 固件 bin 的原始 SHA-256 摘要。 */
     uint32_t image_size; /**< 固件 bin 的实际长度，单位为字节。 */
     uint32_t security_version; /**< 镜像允许的最低 secure_version，无单位的单调安全版本号。 */
-    int64_t expires_at; /**< 清单过期时间，Unix 时间戳，单位为秒；当前时间可用时必须晚于它。 */
+    int64_t expires_at; /**< 清单过期时间，Unix 时间戳，单位为秒。设备时间已同步
+                         *   （time() > 0）时必须晚于设备当前时间；未同步时跳过该比较，
+                         *   不能把时钟无效当作清单有效。 */
     bool force_update; /**< 服务器强制更新标志：true 时跳过“目标版本必须更新”检查（紧急回退）。 */
 } native_ota_manifest_t;
 

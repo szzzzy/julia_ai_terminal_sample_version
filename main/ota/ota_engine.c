@@ -16,7 +16,12 @@
  *
  * MQTT 事件处理只负责创建后台任务，实际下载、Flash 写入和持久化均在后台执行，
  * 不会阻塞 MQTT 心跳和其它控制消息。本模块不能从中断中调用。
+ *
+ * 与 http_downloader 的关系：音频素材走 `network/http_downloader.c`，OTA 在这里自带一套
+ * HTTP 循环（状态码、长度、Content-Range、ETag 与 200/416 回退各自实现）。两者只共用
+ * 响应头采集与 Content-Range 解析，策略修改必须同步核对另一侧，不能只改一处。
  */
+#include "julia_power.h"
 #include <errno.h>
 #include <inttypes.h>
 #include <stddef.h>
@@ -90,22 +95,30 @@ static uint32_t ota_cooldown_seconds(uint32_t cooldown_count)
     return MIN(delay, (uint32_t)CONFIG_OTA_DOWNLOAD_COOLDOWN_MAX_SECONDS);
 }
 
-/** 运行期 OTA 只有无法回滚到可用固件时升级 S7.2；其余任务失败保留当前固件。 */
+/** 运行期 OTA 是否升级为 S7.2：只对“无法回滚到可用固件”这一类失败成立。
+ *
+ * 已核对的现状：本文件（ota_engine_task 及其所有失败分支）不会产生
+ * NATIVE_OTA_FAILURE_ROLLBACK_UNAVAILABLE，该取值只在 ota_boot_flow.c 的启动验收路径
+ * 产生，并由它自己上报故障。因此本判定在 OTA 下载任务内恒为 false，任务失败一律走
+ * “保留当前固件、回到 S3”的分支；下面的 S7.2 策略在当前调用链上不可达，仅作为防御保留。 */
 static bool ota_failure_requires_s7(native_ota_failure_reason_t reason)
 {
     return reason == NATIVE_OTA_FAILURE_ROLLBACK_UNAVAILABLE;
 }
 
-/** 链路类失败保留 S8 和断点，等待现有 OTA 检查/下载流程恢复。 */
+/** 构造 S7.2 故障原因。
+ *
+ * 已核对的现状：本函数忽略入参，无条件返回“OTA 无法回滚”；由于调用点
+ * （ota_failure_requires_s7() 为真时）在 OTA 任务内不可达，该实现不会改变现有行为。
+ * 若将来 OTA 任务真的会产生其他严重故障分类，必须改为按 reason 映射。 */
 static julia_fault_reason_t ota_fault_reason(native_ota_failure_reason_t reason)
 {
     (void)reason;
     return JULIA_FAULT_OTA_ROLLBACK_UNAVAILABLE;
 }
 
-/** Preserve a reliable TLS handshake/certificate failure instead of merging it
- * into the generic network bucket. DNS, socket and timeout failures remain
- * NETWORK_TIMEOUT when ESP-IDF does not provide TLS verification evidence. */
+/** 保留可靠的 TLS 握手/证书失败原因，不并入通用网络分类。ESP-IDF 未提供 TLS 校验证据时，
+ *  DNS、socket 和超时失败仍归为 NETWORK_TIMEOUT。 */
 static native_ota_failure_reason_t ota_http_open_failure_reason(
     esp_http_client_handle_t client)
 {
@@ -113,7 +126,7 @@ static native_ota_failure_reason_t ota_http_open_failure_reason(
     int tls_flags = 0;
     esp_err_t tls_err = esp_http_client_get_and_clear_last_tls_error(
         client, &tls_code, &tls_flags);
-    /* ESP-TLS stores the positive magnitude for mbedtls_ssl_setup failures. */
+    /* ESP-TLS 对 mbedtls_ssl_setup 失败保存的是正值量级，因此同时比较正负两种写法。 */
     if (tls_code == MBEDTLS_ERR_SSL_ALLOC_FAILED ||
         tls_code == -MBEDTLS_ERR_SSL_ALLOC_FAILED || tls_err == ESP_ERR_NO_MEM) {
         ESP_LOGE(TAG, "HTTPS allocation failed: esp_err=0x%x tls=0x%x",
@@ -137,7 +150,12 @@ static native_ota_failure_reason_t ota_http_open_failure_reason(
  */
 typedef native_ota_manifest_t ota_request_t;
 
-/** 是否已有 OTA 任务运行；通信事件可能来自不同任务，因此通过临界区访问。 */
+/** 是否已有 OTA 任务运行；通信事件可能来自不同任务，因此通过临界区访问。
+ *  清理位置有两种语义，调用方不能只按“任务是否在跑”理解：
+ *  - 成功提交分支调用 esp_restart()（不返回），因此 ota_clear_in_progress() 不会执行，
+ *    待重启窗口内本标志一直为 true，新清单会被 ota_engine_handle_server_json() 拒绝；
+ *  - 失败/无需升级分支在投递 FSM 事件后清除本标志，此时任务已退出，但 NVS 中可能仍留着
+ *    READY_TO_COMMIT 记录（提交前条件不满足而 DEFERRED），后续仍会继续提交。 */
 static bool s_ota_in_progress;
 /** 保护 s_ota_in_progress 的 FreeRTOS 自旋锁，不保护耗时 OTA 操作。 */
 static portMUX_TYPE s_ota_state_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -258,6 +276,8 @@ esp_err_t ota_engine_handle_server_json(const char *json, size_t json_len)
         /* 本次清单已处理；保持既有检查节奏，不缓存任务也不强行中断当前业务。 */
         return ESP_OK;
     }
+    /* 任务栈 12288 字节与优先级 5 的取值来源未确认：仓库内没有栈高水位记录或调度实测
+     * 依据（HTTPS/TLS 与 cJSON 都在这条任务里运行，改动前应重新测量栈余量）。 */
     if (xTaskCreate(ota_engine_task, "ota_engine_task", 12288, request, 5, NULL) != pdPASS) {
         ota_clear_in_progress();
         free(request);
@@ -497,6 +517,7 @@ static native_ota_report_state_t ota_report_state_for_failure(
  */
 static void ota_engine_task(void *pvParameter)
 {
+    bool boosted = julia_power_boost_begin();
     ota_request_t request = *(ota_request_t *)pvParameter;
     free(pvParameter);
 
@@ -598,6 +619,10 @@ static void ota_engine_task(void *pvParameter)
                      " cooldown_count=%" PRIu32 " delay=%" PRIu32 " s",
                      request.artifact_id, record.retry_count, record.cooldown_count,
                      cooldown_seconds);
+            /* 冷却先落盘再等待：等待期间掉电，下次启动会从持久化的 COOLING_DOWN 继续，
+             * 不会立刻重试。等待发生在 OTA 任务内部，s_ota_in_progress 仍为 true，因此
+             * 这段时间到达的新清单会被 ota_engine_handle_server_json() 以“已有任务”拒绝，
+             * 不会中断冷却或并发写同一分区。 */
             record.phase = OTA_RESUME_PHASE_COOLING_DOWN;
             if (record.cooldown_count != UINT32_MAX) {
                 record.cooldown_count++;
@@ -690,8 +715,8 @@ static void ota_engine_task(void *pvParameter)
         record_active = true;
     }
 
-    /* 最多允许一次“服务器忽略 Range 后从零重试”，避免把完整镜像追加到旧偏移。 */
-    /* 仅允许一次从 Range 退回全量下载；超过后不会无限循环消耗网络和 Flash。 */
+    /* 最多允许一次“服务器忽略 Range 后从零重试”：避免把完整镜像追加到旧偏移，也避免
+     * 无限循环消耗网络与 Flash。第二次仍拿不到合法 206 时按失败退出本任务。 */
     for (unsigned http_attempt = 0; http_attempt < 2; ++http_attempt) {
         memset(&headers, 0, sizeof(headers));
         /* 每次重试都创建新的 HTTP 客户端，确保上一次连接的响应状态不会被复用。 */
@@ -748,13 +773,17 @@ static void ota_engine_task(void *pvParameter)
         }
         /* status_code 与 content_length 共同决定当前响应是完整下载还是可续传响应。 */
         int status_code = esp_http_client_get_status_code(client);
-        /* ETag 用于确认断点对应的服务器对象没有在两次请求之间被替换。 */
+        /* headers.invalid 表示响应头采集阶段遇到超长或自相矛盾的重复头，整条响应不可信。 */
         if (headers.invalid) {
             failure_reason = NATIVE_OTA_FAILURE_HTTP_STATUS_INVALID;
             goto cleanup;
         }
         const char *response_etag = headers.etag[0] != '\0' ? headers.etag : NULL;
 
+        /* ETag 用于确认断点对应的服务器对象没有在两次请求之间被替换；它与 http_downloader
+         * 一样由 HTTP_EVENT_ON_HEADER 采集，不依赖任何 SDK 开关。比较是严格字符串比较：
+         * 服务器换了 ETag 形式（例如加引号或 W/ 前缀）会被当作对象已替换；服务器不返回
+         * ETag 而记录里已有 ETag 时同样重新建连从零下载，只是断点收益丢失，不会误续。 */
         if (resume && record.etag[0] != '\0' &&
             (response_etag == NULL || strcmp(record.etag, response_etag) != 0)) {
             ESP_LOGW(TAG, "HTTP ETag changed while resuming; restarting from zero");
@@ -1070,7 +1099,8 @@ static void ota_engine_task(void *pvParameter)
     reboot = true;
 
 cleanup:
-    /* Keep the originating error even if saving retry diagnostics succeeds. */
+    if (boosted) julia_power_boost_end();
+    /* 保留最初的失败错误码：即使随后的重试诊断写入成功，也不能覆盖它。 */
     operation_err = err;
     /*
      * 统一释放顺序：先关闭 HTTP，再在句柄仍处于活动状态时 abort OTA，最后处理 NVS

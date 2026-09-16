@@ -34,6 +34,10 @@
 #include "voice_uri.h"
 #include "voice_uplink_pump.h"
 #include "voice_uplink_ring.h"
+#include "voice_local_capture.h"
+#include "julia_quiet_power.h"
+#include "julia_night_schedule.h"
+#include "julia_motion.h"
 #include "voice_playback.h"
 #include "voice_state_sync.h"
 #include "voice_control_guard.h"
@@ -58,12 +62,17 @@ static void post_fsm_event(fsm_event_t event)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "FSM event %s rejected: %s", julia_fsm_event_name(event),
                  esp_err_to_name(err));
-        /* These callers run on the WSS owner. Do not leave a consumed MIC_STOP
-         * or playback completion with no committed transition or retry path. */
+        /* 调用方都在 WSS owner 上下文；已消费的 MIC_STOP 或播放完成结果不能停在
+         * “事件已被取走但状态未提交”的中间态，否则本轮对话再也不会收尾。 */
         if (event != EVT_WSS_DISCONNECTED) wss_transport_fail_session();
     }
 }
 
+/* PSRAM MIC 上行 ring：格数 256，单帧 656 字节。正常每轮只发送 1 帧；积压达到
+ * 2 帧才启动追赶，每轮最多 8 帧，并在帧与帧之间检查 8ms（VOICE_UPLINK_RUN_BUDGET_US
+ * 微秒）的时间预算（见 docs/PROTOCOL.md §2）。预算只是帧间检查：已进入的 TLS 写调用
+ * 无法被中断，且每轮至少推进 1 帧，因此单轮实际耗时可能超过 8ms，它不是硬上界。
+ * 扩大这两个上限会直接压缩控制队列和接收数据的执行机会。 */
 #define VOICE_TRANSPORT_QUEUE_DEPTH 1
 #define VOICE_INTERACTION_ID_MAX_LEN 64
 #define VOICE_UPLINK_FRAME_CAPACITY 256U
@@ -82,7 +91,7 @@ typedef enum {
     VOICE_JOB_SEND_FILE = 0, /**< FILE_SEND：推送一个音频文件。 */
     VOICE_JOB_MIC_START,     /**< MIC_START：确认用户开始一轮说话。 */
     VOICE_JOB_MIC_STOP,      /**< MIC_STOP：确认本轮用户说话结束。 */
-    VOICE_JOB_SEND_TEXT,     /**< FSM 已提交状态后的 WSS 文本通知。 */
+    VOICE_JOB_SEND_TEXT,     /**< 向 WSS 直接发一条文本控制帧；当前全仓无生产者，未接通。 */
     VOICE_JOB_INTENT_GOODNIGHT, /**< MQTT 晚安语义，转交 WSS 任务串行收尾。 */
     VOICE_JOB_INTENT_DISMISS,   /**< MQTT 结束沟通语义，转交 WSS 任务串行收尾。 */
     VOICE_JOB_SCOPED_CONTROL,  /**< 原始封装留到 WSS owner 校验，避免排队期间换轮。 */
@@ -95,6 +104,10 @@ typedef struct {
 } voice_job_t;
 
 /** 分别记录“是否向服务器发送声音”和“是否正在等待用户完成本轮话语”。 */
+/* s_mic_state_lock 是关中断的 portMUX：进入临界区后只剩本核高优先级中断，任何
+ * 阻塞调用、日志或等待其他锁的调用都会拖住整个核。因此锁内只允许两件事：读写
+ * 上述标志与时限，以及调用 board_audio_enable_wss_mic()/mic_wake() 这类只写
+ * volatile 标志、不会阻塞的函数（见 board_audio.c）。 */
 static portMUX_TYPE s_mic_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_mic_streaming;
 static bool s_dialog_listening;
@@ -103,7 +116,7 @@ static julia_main_state_t s_interaction_origin = JULIA_MAIN_STATE_S1_COMPANION;
 static bool s_s4_ready_pending;
 static bool s_s4_ready_committed;
 static bool s_wake_reply_expected;
-/* FSM observer writes under s_mic_state_lock; WSS owner enforces the deadline. */
+/* 期限由 FSM 观察者写入，过期判定与清除只在 WSS owner 中完成。 */
 static int64_t s_reply_deadline_us;
 static int64_t s_listen_deadline_us;
 
@@ -135,8 +148,8 @@ extern const uint8_t goodnight_wav_end[]
 static uint32_t s_playback_generation;
 static voice_playback_role_t s_playback_role;
 static bool s_session_activated;
-/* MIC producer only stores a timestamp under the existing short critical section.
- * WSS owner emits diagnostics; neither capture nor I2S tasks log telemetry. */
+/* 该时间戳由 MIC producer 在临界区内存入、会话开始时清零；诊断日志统一由 WSS owner
+ * 输出，采音任务和 I2S 任务都不做 telemetry 打印。 */
 static int64_t s_last_capture_us;
 static struct {
     uint32_t generation;
@@ -251,6 +264,8 @@ static esp_err_t voice_service_uplink_ring_init(void)
     return ESP_OK;
 }
 
+/* ring 和 pump 把 0 当作“无代次／无条件停止”，因此 generation 从 1 起发放，
+ * 递增后若回绕到 0 就跳过。 */
 static uint32_t voice_service_next_uplink_generation(void)
 {
     s_uplink_generation++;
@@ -365,6 +380,23 @@ static void voice_service_arm_companion_timer(void)
 static void voice_service_on_board_audio_frame(const uint8_t *frame, size_t bytes, void *ctx)
 {
     (void)ctx;
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+    /* 本轮先验证半双工边界：板级没有 AEC，不能由扬声器回声直接触发本地停播。 */
+    static int64_t playback_guard_until_us;
+    int64_t now_us = esp_timer_get_time();
+    if (voice_playback_is_active()) playback_guard_until_us = now_us + 600000;
+    julia_main_state_t state = julia_fsm_runtime_get_state();
+    lc_mode_t mode = LC_OFF;
+    if (state == JULIA_MAIN_STATE_S3_STANDBY || state == JULIA_MAIN_STATE_S5_SILENT ||
+        state == JULIA_MAIN_STATE_S6_SLEEP) mode = LC_WAKE;
+    else if (state == JULIA_MAIN_STATE_S1_COMPANION || state == JULIA_MAIN_STATE_S4_INTERACTION ||
+             (state == JULIA_MAIN_STATE_S2_DIALOG &&
+              julia_fsm_runtime_get_s2_sub_state() == JULIA_S2_SUB_STATE_S2_1_LISTENING)) mode = LC_DIALOG;
+    if (now_us < playback_guard_until_us) mode = LC_OFF;
+    voice_local_capture_mode(mode);
+    voice_local_capture_frame(frame, bytes);
+    return;
+#endif
     esp_err_t err = voice_service_send_chunk(frame, bytes);
     if (err == ESP_ERR_NO_MEM) {
         /* 只有缓冲确实装满才记录容量故障；发送文件或连接切换造成的主动暂停不算丢帧。 */
@@ -375,7 +407,8 @@ static void voice_service_on_board_audio_frame(const uint8_t *frame, size_t byte
     }
 }
 
-/** 是否为允许外发的文件扩展名（当前仅 .wav）。 */
+/* 扩展名用 strcasecmp 比较，因此 ".WAV" 也放行；这与 voice_uri.c 中区分大小写的
+ * URI 前缀匹配不同（"sd:/x.wav" 会先被 voice_uri_to_path() 拒绝）。 */
 static bool voice_service_path_is_allowed(const char *path)
 {
     size_t len = strlen(path);
@@ -428,7 +461,8 @@ static esp_err_t voice_service_push_file(const char *uri, bool queued)
         return ESP_OK;
     }
 
-    /* 文件访问必须持有 SD 锁（融合方案 §9.6）。 */
+    /* 文件访问必须在 SD 锁内完成。本文件只提供默认弱实现，它不加锁、恒返回 true；
+     * 产品必须覆盖这两个符号接入真实互斥，否则这里等同无保护访问 SD。 */
     if (!julia_wireless_sd_lock(0)) {
         (void)voice_service_send_error("ERROR sd_busy");
         ESP_LOGW(TAG, "FILE_SEND rejected: SD lock busy");
@@ -478,6 +512,10 @@ static esp_err_t voice_service_push_file(const char *uri, bool queued)
     }
     ESP_LOGI(TAG, "Pushing %s (%ld bytes)", path, size);
 
+    /* s_file 只在 BEGIN 帧发送成功后才赋值；由 weak julia_wireless_sd_lock()
+     * 取得的 SD 锁随它一起持有，唯一释放点是 voice_service_close_file()。
+     * 因此 s_file != NULL 与“持有 SD 锁”互为充要条件，其他路径不得单独解锁。
+     * s_file 本身不在临界区内读写，靠“打开、推进、关闭都在 WSS 会话任务”串行保护。 */
     s_file = f;
     portENTER_CRITICAL(&s_mic_state_lock);
     s_file_active = true;
@@ -590,7 +628,7 @@ static bool voice_service_send_uplink_frame(void *ctx, const uint8_t *data,
                                             size_t len)
 {
     (void)ctx;
-    if (wss_transport_send_now(0x2, data, len) != ESP_OK) {
+    if (wss_transport_send_now(data[0] == '{' ? 0x1 : 0x2, data, len) != ESP_OK) {
         ESP_LOGW(TAG, "Failed to send %u-byte MIC ring frame", (unsigned)len);
         return false;
     }
@@ -678,9 +716,8 @@ static bool voice_service_reply_timeout_poll(void)
              expired ? "S2.2 reply" : "S4/S2.1 listening",
              expired ? CONFIG_JULIA_DIALOG_REPLY_TIMEOUT_SECONDS
                      : CONFIG_JULIA_DIALOG_LISTEN_TIMEOUT_SECONDS);
-    /* The protocol has no reply/turn ID. Reconnect rather than allow a late
-     * SPKS from this turn to be accepted as the next turn's response.
-     * Normal session teardown clears busy/listening/playback and exits S2. */
+    /* 协议没有 reply/turn ID：与其让本轮迟到的 SPKS 被当成下一轮回答，不如重建会话。
+     * 正常 teardown 会清 busy/listening/播放状态并退出 S2。 */
     wss_transport_fail_session();
     return true;
 }
@@ -688,6 +725,9 @@ static bool voice_service_reply_timeout_poll(void)
 static bool voice_service_busy_wait(void)
 {
 #if CONFIG_JULIA_MULTI_DEVICE_ENABLE
+    /* 服务器 busy(voice_capacity) 是资源拒绝，不是断链：冷却期内新命令一律丢弃，
+     * 不排队、不补发，也不伪造设备状态变化。到期后换新代次并丢弃旧连接残留帧，
+     * 从空 ring 恢复实时上传。 */
     if (s_busy_until_us) {
         if (esp_timer_get_time()<s_busy_until_us) return true;
         s_busy_until_us=0;
@@ -699,8 +739,15 @@ static bool voice_service_busy_wait(void)
 
 static void voice_service_poll(void)
 {
+    if (!CONFIG_JULIA_LOCAL_CAPTURE_ENABLE && julia_fsm_is_quiet(julia_fsm_runtime_get_state())) {
+        voice_service_pause_uplink_for_file();
+        return;
+    }
     voice_state_sync_poll();
     if (!voice_state_sync_is_ready()) return;
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+    if (!voice_local_capture_poll()) return;
+#endif
     if (voice_service_busy_wait()) return;
     if (!s_session_activated) {
         s_session_activated = true;
@@ -726,6 +773,8 @@ static void voice_service_poll(void)
     }
     uint32_t generation;
     esp_err_t result;
+    /* 完成槽每轮最多取走一个结果。槽里可能是被取消或已被替换的旧代次，此时只丢弃，
+     * 不补播、也不拿它收尾当前这一轮，避免旧回答的结束动作打断新回答。 */
     if (voice_playback_take_completion(&generation, &result) &&
         generation == s_playback_generation) {
         voice_service_timing_poll(true);
@@ -756,8 +805,12 @@ static void voice_service_played_pcm(const int16_t *pcm, size_t samples, void *c
 /** “开始说话”确认用户已经进入本轮表达；必要时同时开始上传麦克风。 */
 static void voice_service_apply_mic_start(void)
 {
-    /* Terminal intent is already committed. A VAD echo or queued MIC_START
-     * must not erase the pending S5/S6 transition while its local prompt plays. */
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+    /* 本地收音版本不接受云端起音，包括能力协商尚未完成时。 */
+    return;
+#else
+    /* 终止语义已提交：本地提示播放期间，VAD 回声或已入队的 MIC_START 都不能
+     * 取消待执行的 S5/S6 迁移。 */
     if (playback_role_is_terminal(s_playback_role)) {
         ESP_LOGI(TAG, "MIC_START ignored: terminal reply must finish before another interaction");
         return;
@@ -830,11 +883,16 @@ static void voice_service_apply_mic_start(void)
              julia_fsm_s2_sub_state_name(s2_sub_state),
              started_streaming ? ", PCM upload started" : ", PCM upload already active",
              interrupted_speaker ? ", speaker interrupted" : "");
+#endif
 }
 
 /** “结束说话”只结束本轮听音；免唤醒陪伴期间仍可继续上传环境声音。 */
 static void voice_service_apply_mic_stop(void)
 {
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+    /* 结束由本地采音事件驱动，旧停麦命令不改变状态。 */
+    return;
+#else
     julia_idle_display_note_activity();
 
     bool was_listening;
@@ -855,6 +913,7 @@ static void voice_service_apply_mic_stop(void)
         post_fsm_event(EVT_START_DIALOG);
     }
     ESP_LOGI(TAG, "MIC_STOP: utterance ended; PCM upload retained");
+#endif
 }
 
 static bool interaction_id_is_valid(const char *value)
@@ -953,16 +1012,20 @@ static bool voice_service_handle_wake_json(const uint8_t *text, size_t len)
  */
 static void voice_service_on_server_text(const uint8_t *text, size_t len)
 {
+    if (!CONFIG_JULIA_LOCAL_CAPTURE_ENABLE && julia_fsm_is_quiet(julia_fsm_runtime_get_state())) return;
 #if CONFIG_JULIA_MULTI_DEVICE_ENABLE
     if(len && text[0]=='{') {
-        /* Reject malformed strict envelopes before any legacy JSON parser can
-         * bypass the bounded depth/NUL/duplicate-field checks. */
+        /* 严格的 WSS 封装必须在任何旧 JSON 解析器之前自检，否则超出长度上限、
+         * 嵌套过深、含内嵌 NUL 或重复字段的载荷会被 cJSON 直接接受并绕过检查。 */
         cJSON *envelope=voice_control_parse((const char *)text,len);
         bool valid=cJSON_IsObject(envelope);cJSON_Delete(envelope);
         if(!valid){ESP_LOGW(TAG,"Ignoring malformed strict WSS envelope");return;}
     }
 #endif
     if (voice_state_sync_handle_text(text, len)) return;
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+    if (voice_local_capture_text(text, len)) return;
+#endif
     if (!voice_state_sync_is_ready()) {
         ESP_LOGW(TAG, "Ignoring business command before session_sync_ack");
         return;
@@ -970,11 +1033,16 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
 #if CONFIG_JULIA_MULTI_DEVICE_ENABLE
     if (voice_service_handle_control_json(text,len)) return;
     if (s_busy_until_us) return;
+#if !CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
     bool mic_start=len==9 && !memcmp(text,"MIC_START",9);
     if (mic_start && (!s_round_pending || !s_round_speech)) {
         ESP_LOGW(TAG,"MIC_START ignored: round_sync_required");return;
     }
     if (s_round_pending && !mic_start && (len==0 || text[0]!='{')) return;
+#else
+    /* capture-v1 的语音轮次在 interaction_sync 时就绪；唤醒仍等待 wake_detected。 */
+    if (s_round_pending && (len==0 || text[0]!='{')) return;
+#endif
 #endif
     ESP_LOGD(TAG, "Server command received (%u bytes)", (unsigned)len);
     if (voice_service_handle_wake_json(text, len)) return;
@@ -992,14 +1060,18 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
     }
 
     if (len == strlen("MIC_START") && memcmp(text, "MIC_START", len) == 0) {
+#if !CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
         voice_service_apply_mic_start();
 #if CONFIG_JULIA_MULTI_DEVICE_ENABLE
         s_round_pending=false;
 #endif
+#endif
         return;
     }
     if (len == strlen("MIC_STOP") && memcmp(text, "MIC_STOP", len) == 0) {
+#if !CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
         voice_service_apply_mic_stop();
+#endif
         return;
     }
 
@@ -1102,6 +1174,7 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
  */
 static void voice_service_on_binary(const uint8_t *data, size_t len)
 {
+    if (!CONFIG_JULIA_LOCAL_CAPTURE_ENABLE && julia_fsm_is_quiet(julia_fsm_runtime_get_state())) return;
 #if CONFIG_JULIA_MULTI_DEVICE_ENABLE
     if (s_round_pending || !s_control_guard.active || s_busy_until_us) return;
 #endif
@@ -1133,6 +1206,7 @@ static void voice_service_on_binary(const uint8_t *data, size_t len)
  */
 static void voice_service_on_queue_item(void *item, size_t item_size)
 {
+    if (!CONFIG_JULIA_LOCAL_CAPTURE_ENABLE && julia_fsm_is_quiet(julia_fsm_runtime_get_state())) return;
     if (!voice_state_sync_is_ready()) return;
     if (item == NULL || item_size != sizeof(voice_job_t)) {
         ESP_LOGW(TAG, "Malformed queued voice job");
@@ -1178,6 +1252,9 @@ static void voice_service_on_queue_item(void *item, size_t item_size)
 /** 新语音连接从空的麦克风缓冲开始，断线前未发出的声音绝不在重连后补发。 */
 static void voice_service_on_session_start(void)
 {
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+    voice_local_capture_connection(0);
+#endif
     memset(&s_audio_timing, 0, sizeof(s_audio_timing));
     portENTER_CRITICAL(&s_mic_state_lock);
     s_last_capture_us = 0;
@@ -1188,8 +1265,8 @@ static void voice_service_on_session_start(void)
     s_round_pending=false;s_round_ack[0]=0;s_round_request[0]=0;s_busy_until_us=0;
 #endif
     s_session_activated = false;
-    /* A new socket starts in the server's wake-required mode. This is independent
-     * of MQTT availability and must complete before accepting new voice commands. */
+    /* 新 socket 一律先回到服务器唤醒模式，与 MQTT 是否可用无关；必须在该状态
+     * 提交成功后才允许接受新的语音命令。 */
     if (julia_fsm_runtime_post_sync(EVT_VOICE_SESSION_RESET) != ESP_OK) {
         wss_transport_fail_session();
         return;
@@ -1202,7 +1279,13 @@ static void voice_service_on_session_start(void)
         return;
     }
     voice_uplink_pump_start_generation(&s_uplink_pump, generation);
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+    voice_local_capture_connection(generation);
+#endif
 #if CONFIG_JULIA_SERVER_WAKE_ENABLE
+    #if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+    voice_local_capture_connection(generation);
+    #endif
     portENTER_CRITICAL(&s_mic_state_lock);
     s_mic_streaming = false;
     s_dialog_listening = false;
@@ -1232,6 +1315,9 @@ static void voice_service_on_session_start(void)
  */
 static void voice_service_on_session_end(wss_transport_end_reason_t reason)
 {
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+    voice_local_capture_connection(0);
+#endif
     voice_state_sync_end();
     s_session_activated = false;
     voice_service_disarm_companion_timer();
@@ -1254,7 +1340,7 @@ static void voice_service_on_session_end(wss_transport_end_reason_t reason)
     board_audio_enable_wss_mic(false);
     portEXIT_CRITICAL(&s_mic_state_lock);
     voice_service_close_file();
-    /* A transport disconnect must not cancel the FSM-owned OTA notice. */
+    /* 传输层断链不取消 FSM 自己持有的 OTA 提示，因此这里只按代次停当前播放。 */
     bool stopped = voice_playback_stop_generation(s_playback_generation);
     s_playback_generation = 0;
     s_playback_role = VOICE_PLAYBACK_ROLE_NONE;
@@ -1272,6 +1358,7 @@ static void voice_service_on_session_end(wss_transport_end_reason_t reason)
  * 不表示 WSS 已发送或业务状态已经生效。 */
 static esp_err_t voice_service_enqueue(voice_job_type_t type, const uint8_t *data, size_t len)
 {
+    if (julia_fsm_is_quiet(julia_fsm_runtime_get_state())) return ESP_ERR_INVALID_STATE;
     if (!voice_state_sync_is_ready()) return ESP_ERR_INVALID_STATE;
     if (len > WSS_TRANSPORT_MAX_PAYLOAD) {
         return ESP_ERR_INVALID_SIZE;
@@ -1305,6 +1392,16 @@ static void voice_service_on_fsm_state(julia_main_state_t main_state,
                                        fsm_event_t event, void *ctx)
 {
     (void)ctx;
+    julia_quiet_power_notify();
+    julia_night_schedule_notify();
+    julia_motion_notify();
+    julia_avatar_set_suspended(main_state == JULIA_MAIN_STATE_S6_SLEEP);
+    voice_playback_set_interaction(main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
+                                   main_state == JULIA_MAIN_STATE_S2_DIALOG);
+    if (!CONFIG_JULIA_LOCAL_CAPTURE_ENABLE && julia_fsm_is_quiet(main_state)) {
+        board_audio_mic_set_enabled(false);
+        board_audio_enable_wss_mic(false);
+    }
     portENTER_CRITICAL(&s_mic_state_lock);
     s_reply_deadline_us =
         main_state == JULIA_MAIN_STATE_S2_DIALOG &&
@@ -1465,8 +1562,8 @@ static bool voice_service_handle_control_json(const uint8_t *data, size_t len)
         uint32_t delay;
         if(cJSON_IsString(code) && !strcmp(code->valuestring,"voice_capacity") &&
            voice_control_uint(root,"retry_after_ms",&delay) && delay>=1000 && delay<=30000) {
-            /* Resource refusal is not a network disconnect. No fake revision or
-             * replay: end the actual dialog and reopen only fresh capture. */
+            /* 资源拒绝不等于断链：不伪造轮次结果、不重放旧命令，只结束本轮实际对话，
+             * 冷却到期后由 voice_service_busy_wait() 换新代次重开采集。 */
             s_busy_until_us=esp_timer_get_time()+(int64_t)delay*1000;
             s_control_guard.active=false;s_round_pending=false;
             voice_playback_stop_generation(s_playback_generation);s_playback_generation=0;
@@ -1503,7 +1600,9 @@ static bool voice_service_handle_control_json(const uint8_t *data, size_t len)
                             state==JULIA_MAIN_STATE_S5_SILENT || state==JULIA_MAIN_STATE_S6_SLEEP) :
                             (state==JULIA_MAIN_STATE_S1_COMPANION || state==JULIA_MAIN_STATE_S4_INTERACTION ||
                              (state==JULIA_MAIN_STATE_S2_DIALOG &&
-                              (sub==JULIA_S2_SUB_STATE_S2_1_LISTENING || sub==JULIA_S2_SUB_STATE_S2_3_SPEAKING)));
+                              (sub==JULIA_S2_SUB_STATE_S2_1_LISTENING || sub==JULIA_S2_SUB_STATE_S2_3_SPEAKING ||
+                               (CONFIG_JULIA_LOCAL_CAPTURE_ENABLE && voice_local_capture_ready() &&
+                                sub==JULIA_S2_SUB_STATE_S2_2_THINKING))));
         error=allowed ? voice_control_begin(&s_control_guard,seq,id) : "state_unavailable";
         if(error && !strcmp(error,"duplicate_round")) error="request_id_conflict";
     }
@@ -1514,7 +1613,9 @@ static bool voice_service_handle_control_json(const uint8_t *data, size_t len)
         s_voice_device_id,voice_state_sync_session_id(),id,request,(unsigned long)seq,
         error?"false":"true",error?error:"applied",esp_timer_get_time()/1000LL);
     if(!error) {
-        s_round_pending=true;s_round_speech=speech;
+        /* 本地收音不再等待旧 MIC_START；wake 仍由 wake_detected 完成状态迁移。 */
+        s_round_pending=!(CONFIG_JULIA_LOCAL_CAPTURE_ENABLE && speech);
+        s_round_speech=speech;
         portENTER_CRITICAL(&s_mic_state_lock);
         snprintf(s_interaction_id,sizeof(s_interaction_id),"%s",id);
         portEXIT_CRITICAL(&s_mic_state_lock);
@@ -1557,17 +1658,25 @@ static void voice_service_apply_scoped_control(const uint8_t *data, size_t len)
             }
         } else if(!strcmp(type,"command")) {
             const char *command=cJSON_GetObjectItemCaseSensitive(root,"command")->valuestring;
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+            if(!strcmp(command,"MIC_START") || !strcmp(command,"MIC_STOP")) {
+                error="unsupported_operation";
+            } else
+#else
             if(!strcmp(command,"MIC_START")) {
                 if(terminal)error="terminal_reply";
                 else if(!s_round_pending || !s_round_speech)error="round_sync_required";
-                else {voice_service_apply_mic_start();s_round_pending=false;accepted=s_dialog_listening;}
+                else {voice_service_apply_mic_start();s_round_pending=false;
+                      accepted=s_dialog_listening;}
             } else if(!strcmp(command,"MIC_STOP")) {
                 bool listening=s_dialog_listening;
                 voice_service_apply_mic_stop();
                 accepted=!listening || (julia_fsm_runtime_get_state()==JULIA_MAIN_STATE_S2_DIALOG &&
                     julia_fsm_runtime_get_s2_sub_state()==JULIA_S2_SUB_STATE_S2_2_THINKING);
             }
-            else if(!strncmp(command,"FILE_SEND ",10)) {
+            else
+#endif
+            if(!strncmp(command,"FILE_SEND ",10)) {
                 if(voice_playback_is_active() || s_dialog_listening || s_file)error="state_unavailable";
                 else {esp_err_t err=voice_service_push_file(command+10,true);accepted=err==ESP_OK && s_file!=NULL;}
             } else error="unsupported_operation";
@@ -1586,6 +1695,8 @@ static void voice_service_apply_scoped_control(const uint8_t *data, size_t len)
         cJSON_GetObjectItemCaseSensitive(root,"request_id")->valuestring,(unsigned long)round,(unsigned long)seq,
         accepted?"true":"false",error?error:accepted?"applied":"state_unavailable",(unsigned long)state.revision);
     if(n>0 && (size_t)n<sizeof(ack)) {
+        /* record 返回 false 表示结果无法保存。此时既不能补发未记录的 ACK，也不能让
+         * 序号水位前进，只能结束会话，让服务器在重连后按新的会话重新发起控制。 */
         if(record && !voice_control_record(&s_control_guard,root,ack)) wss_transport_fail_session();
         (void)mqtt_comm_publish_voice_status(s_voice_device_id,ack,(size_t)n);
     }
@@ -1693,10 +1804,32 @@ esp_err_t voice_service_init(void)
 #endif
 }
 
+static esp_err_t voice_service_send_capture_record(const uint8_t *, size_t, uint32_t);
+
+static void voice_service_local_capture_event(lc_event_t event, lc_mode_t mode)
+{
+    /* 本函数由采音任务在产出 LC_START/LC_END 记录后回调，运行在采音任务上下文；
+     * LC_START 等价于云端 MIC_START：先停掉正在播放的声音，再把本轮标记为“正在处理”。 */
+    if (mode != LC_DIALOG) return;
+    if (event == LC_START) voice_playback_stop();
+    julia_idle_display_note_activity();
+    julia_idle_display_set_busy(true);
+    portENTER_CRITICAL(&s_mic_state_lock);
+    s_dialog_listening = event == LC_START;
+    if (event == LC_START) s_wake_reply_expected = false;
+    portEXIT_CRITICAL(&s_mic_state_lock);
+    if (julia_fsm_runtime_post(event == LC_START ? EVT_LOCAL_SPEECH_START :
+                                EVT_START_DIALOG) != ESP_OK) wss_transport_fail_session();
+}
+
 esp_err_t voice_service_init_board_audio(void)
 {
     ESP_RETURN_ON_ERROR(voice_service_uplink_ring_init(), TAG,
                         "init MIC uplink ring");
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+    ESP_RETURN_ON_ERROR(voice_local_capture_init(voice_service_send_capture_record,
+                        voice_service_local_capture_event), TAG, "init local capture");
+#endif
     ESP_RETURN_ON_ERROR(voice_playback_init(voice_service_played_pcm, NULL),
                         TAG, "init playback worker");
     /* 板级MIC把PCM1帧路由到WSS。服务器唤醒模式在WSS认证完成时立即打开
@@ -1710,6 +1843,7 @@ esp_err_t voice_service_init_board_audio(void)
 esp_err_t voice_service_ip_ready(void *arg)
 {
     (void)arg;
+    wss_transport_set_paused(false);
     static const wss_transport_config_t transport_cfg = {
         .on_text = voice_service_on_server_text,
         .on_binary = voice_service_on_binary,
@@ -1739,6 +1873,14 @@ esp_err_t voice_service_send_file(const char *uri)
 
 esp_err_t voice_service_send_chunk(const uint8_t *buf, size_t len)
 {
+    return voice_service_send_capture_record(buf, len, 0);
+}
+
+/* generation 必须由采集侧在采集当时取得并原样携带；ring 收到不匹配的值会按
+ * INACTIVE 拒绝，禁止把旧预录标成刚重连的新连接数据。0 是保留值，表示“不校验代次”，
+ * 只用于 voice_service_send_chunk() 这条兼容路径。 */
+static esp_err_t voice_service_send_capture_record(const uint8_t *buf, size_t len, uint32_t generation)
+{
     if (!voice_state_sync_is_ready()) return ESP_ERR_INVALID_STATE;
     if (buf == NULL || len == 0U) {
         return ESP_ERR_INVALID_ARG;
@@ -1747,8 +1889,8 @@ esp_err_t voice_service_send_chunk(const uint8_t *buf, size_t len)
         return ESP_ERR_INVALID_SIZE;
     }
     if (!s_uplink_ring_ready) return ESP_ERR_INVALID_STATE;
-    voice_uplink_push_result_t result = voice_uplink_ring_push(
-        &s_uplink_ring, buf, len);
+    voice_uplink_push_result_t result = voice_uplink_ring_push_generation(
+        &s_uplink_ring, buf, len, generation);
     switch (result) {
     case VOICE_UPLINK_PUSH_OK:
         portENTER_CRITICAL(&s_mic_state_lock);

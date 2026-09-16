@@ -25,7 +25,9 @@ extern "C" {
 /** 当前状态结构的版本；改变布局时必须递增。 */
 #define OTA_STATE_STORE_SCHEMA_VERSION 2U
 
-/** NVS 状态检查点之间的最小写入间隔，单位为字节。 */
+/** NVS 状态检查点之间的最小写入间隔，单位为字节（不是时间间隔）。
+ *  取值的具体来源未确认：没有找到 Flash 擦写寿命或掉电窗口的量化依据，当前只被
+ *  ota_stability_save_checkpoint() 用作下载检查点的间隔判断。 */
 #define OTA_STATE_STORE_CHECKPOINT_BYTES (16U * 1024U)
 
 /** 下载恢复最多允许的网络类失败次数；达到后由 OTA 任务隔离 artifact。 */
@@ -39,7 +41,9 @@ void ota_state_store_log_nvs_usage(const char *tag, const char *operation,
 typedef enum {
     OTA_RESUME_PHASE_EMPTY = 0, /**< 未建立有效恢复记录，仅作为保留值。 */
     OTA_RESUME_PHASE_DOWNLOADING = 1, /**< 已写入部分镜像，可按检查点尝试续传。 */
-    OTA_RESUME_PHASE_READY_TO_COMMIT = 2, /**< 镜像已完整校验，等待切换启动分区。 */
+    OTA_RESUME_PHASE_READY_TO_COMMIT = 2, /**< 镜像已完整校验，等待切换启动分区。
+                                           *   只有 verified_offset == expected_size 的记录
+                                           *   才会被直接提交，否则按“重新下载”处理。 */
     OTA_RESUME_PHASE_QUARANTINED = 3, /**< 终端校验失败，禁止同一 artifact 自动重试。 */
 } ota_resume_phase_t;
 
@@ -78,13 +82,20 @@ typedef enum {
 typedef struct {
     uint32_t schema_version; /**< 记录布局版本，必须等于 OTA_STATE_STORE_SCHEMA_VERSION。 */
     uint32_t expected_size; /**< 清单声明的完整镜像长度，单位为字节。 */
-    uint32_t verified_offset; /**< 已写入并持久化检查点的镜像前缀长度，单位为字节。 */
+    uint32_t verified_offset; /**< 已写入检查点的镜像前缀长度，单位为字节。
+                               *   除 record_init 清零、READY_TO_COMMIT 直接置为
+                               *   expected_size 外只会前移，因此进程内单调不降；该值在
+                               *   ota_state_store_save() 之前就已写入 RAM，能否当作已落盘
+                               *   取决于本次保存是否返回 ESP_OK。掉电后该值之后的数据
+                               *   一律视为不可信。 */
     uint32_t retry_count; /**< 网络类失败后的重试次数，不包含终端校验失败。 */
     uint8_t sha256[NATIVE_OTA_SHA256_SIZE]; /**< 清单中的原始 SHA-256 摘要。 */
     char artifact_id[NATIVE_OTA_ARTIFACT_ID_SIZE]; /**< 服务端发布物唯一 ID。 */
     char version[sizeof(((esp_app_desc_t *)0)->version)]; /**< 目标应用版本字符串。 */
     char url[NATIVE_OTA_URL_SIZE]; /**< 目标固件 HTTPS URL。 */
-    char etag[128]; /**< 服务器 ETag，用于确认续传内容仍是同一版本。 */
+    char etag[128]; /**< 服务器 ETag，用于确认续传内容仍是同一版本。
+                     *   刻意不参与 matches_manifest()：服务器可能不返回或不稳定地
+                     *   返回 ETag，若把它算作对象身份会让断点反复作废。 */
     uint8_t target_partition_subtype; /**< 目标 OTA 分区 subtype，防止恢复到错误槽位。 */
     uint8_t phase; /**< ota_resume_phase_t 的持久化值（见上方合法迁移表）。
                     *   记录校验允许的范围是 DOWNLOADING～COOLING_DOWN，含冷却、隔离阶段。 */
@@ -102,6 +113,10 @@ typedef struct {
  * @return 其他 esp_err_t NVS 读取或 schema 校验失败。
  *
  * @note 失败时会清零输出结构体；必须在 nvs_flash_init() 成功后、普通任务上下文调用。
+ * @note 损坏或 schema 不兼容的记录不会被擦除，只返回 ESP_ERR_INVALID_VERSION；调用方一律
+ *       把它当作“没有记录”处理（重新下载）。递增 OTA_STATE_STORE_SCHEMA_VERSION 后，旧布局
+ *       记录会因版本或 blob 尺寸不符被判为不兼容并拒绝使用，等于丢弃断点而不是报错；相反，
+ *       改了布局却不递增版本时，旧 blob 可能仍通过尺寸与字段校验而被当作当前记录误读。
  */
 esp_err_t ota_state_store_load(ota_resume_record_t *record);
 
@@ -134,7 +149,7 @@ esp_err_t ota_state_store_clear(void);
  * @return true artifact_id、版本、大小、URL 和 SHA-256 全部一致。
  * @return false 任一字段不同或参数无效。
  *
- * @note 不比较 job_id、安全版本或过期时间；这些字段不参与断点对象身份判定。
+ * @note 不比较 job_id、安全版本、过期时间和 etag；这些字段不参与断点对象身份判定。
  */
 bool ota_state_store_matches_manifest(const ota_resume_record_t *record,
                                       const native_ota_manifest_t *manifest);

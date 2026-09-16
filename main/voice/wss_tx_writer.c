@@ -19,7 +19,7 @@ wss_tx_write_result_t wss_tx_write_all(const wss_tx_writer_ops_t *ops,
 {
     if (stats == NULL) return WSS_TX_WRITE_FATAL;
     memset(stats, 0, sizeof(*stats));
-    stats->first_transient_us = -1;
+    stats->first_transient_us = -1; /* 哨兵：表示本次调用尚未出现暂时错误。 */
 
     if (ops == NULL || ops->write == NULL || ops->now_us == NULL ||
         ops->wait_once == NULL || ops->is_transient == NULL ||
@@ -33,8 +33,7 @@ wss_tx_write_result_t wss_tx_write_all(const wss_tx_writer_ops_t *ops,
             finish_stats(ops, stats);
             return WSS_TX_WRITE_ABORTED;
         }
-        /* 帧头与载荷可以分两次调用本函数，但共享同一个绝对截止时间；因此即使
-         * 每次都有少量正向进展，也不能把一个 WebSocket 帧无限拖长。 */
+        /* deadline_us 是绝对时刻：帧头与载荷分两次调用时共享同一截止时间。 */
         if (ops->now_us(ops->ctx) >= deadline_us) {
             finish_stats(ops, stats);
             return WSS_TX_WRITE_TIMEOUT;
@@ -49,18 +48,23 @@ wss_tx_write_result_t wss_tx_write_all(const wss_tx_writer_ops_t *ops,
 
         if (result > 0) {
             if ((size_t)result > remaining) {
+                /* 写出字节数超过请求长度说明底层 I/O 契约已被破坏，offset 不再可信，
+                 * 因此直接判 FATAL，而不是当作可重试的异常继续推进。 */
                 finish_stats(ops, stats);
                 return WSS_TX_WRITE_FATAL;
             }
             stats->bytes_sent += (size_t)result;
+            /* 每段进展之后都回到期限判断，避免"每步都有进展"把一帧无限拖长。 */
             continue;
         }
 
         if (!ops->is_transient(ops->ctx, result, system_error)) {
+            /* 调用方判定的永久错误立即失败，不进入让出重试；上层据此把会话判为故障并重连。 */
             finish_stats(ops, stats);
             return WSS_TX_WRITE_FATAL;
         }
 
+        /* 暂时错误先记账再判期限，超时返回时 stats 仍能反映真实重试过程。 */
         stats->last_transient_result = result;
         stats->last_transient_system_error = system_error;
         int64_t now_us = ops->now_us(ops->ctx);

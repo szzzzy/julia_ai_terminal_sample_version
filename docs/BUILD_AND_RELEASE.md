@@ -50,6 +50,7 @@ idf.py -B build build
 | `CONFIG_WSS_SERVER_HOST`／`PORT`／`PATH` | WSS 主机、端口、路径，端口 9443、路径 `/voice` |
 | `CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE`／`CONFIG_WSS_TOKEN` | WSS 优先使用前者，空值时使用后者，与 MQTT 认证模式分开理解 |
 | `CONFIG_OTA_ALLOWED_URL_HOSTS` | OTA HTTPS 主机允许列表；空值会放行非空主机，不是默认白名单 |
+| `CONFIG_JULIA_LOCAL_CAPTURE_ENABLE` | 默认开发配置启用；需要 capture-v1 云端能力 ACK，首轮固定 16kHz；尚未部署 |
 | `CONFIG_JULIA_SERVER_WAKE_ENABLE` | 默认启用服务器唤醒；本地唤醒需要另行构建和验证模型分区 |
 | `CONFIG_JULIA_MIC_GAIN_PERCENT` | 麦克风送入 AFE 与 WSS 前的统一数字增益，默认 70% |
 | `CONFIG_JULIA_SPEAKER_VOLUME_PERCENT` | 扬声器固定音量 50%；回答与本地提示共用，忽略运行时 `SPKV` |
@@ -61,8 +62,8 @@ idf.py -B build build
 | `CONFIG_JULIA_BATTERY_MONITOR_INTERVAL_SECONDS` | 运行期电压与近似电量刷新周期，默认10秒 |
 | `CONFIG_JULIA_BATTERY_PRESENT_MIN_MV`／`MAX_MV` | BAT节点有效电池电压窗口，默认2500～4350mV |
 | `CONFIG_JULIA_BATTERY_LOW_ENTER_PERCENT`／`LOW_EXIT_PERCENT` | 低电量进入／恢复回差，默认15%／25% |
-| `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS` | S1→S3 驻留阈值，默认 300 秒（5 分钟） |
-| `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS`／`CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS` | S3→S6、S5→S3 驻留阈值，默认分别为 300 秒、1800 秒 |
+| `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS` | S1→S3 驻留阈值，本轮验证值 10 秒 |
+| `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS`／`CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS` | S3→S6、S5→S6 驻留阈值，默认分别为 300 秒、1800 秒 |
 | `CONFIG_JULIA_SERVICE_INIT_TIMEOUT_SECONDS` | 启动后等待 MQTT关键订阅与 WSS认证会话全部就绪的期限，默认 30 秒；超时进入一次 S7.1并保持 `offline` 标签 |
 | `CONFIG_NETWORK_WIFI_RETRY_BASE_MS`／`MAX_MS`／`JITTER_PERCENT` | Wi-Fi重连从约1秒指数退避到最多60秒，并减去最多20%的随机抖动；取得 IP 后计数清零 |
 | `CONFIG_NETWORK_WIFI_CONNECT_TIMEOUT_MS` | 单次 `esp_wifi_connect()` 等待 GOT_IP或断开事件的看门狗，默认20秒；超时会取消本次尝试并继续退避重连 |

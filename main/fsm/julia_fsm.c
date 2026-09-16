@@ -4,12 +4,23 @@
  *
  * 每个外部事件先按当前业务状态确定去向，再由统一入口执行变化。这样可以拒绝
  * 不符合产品流程的跳转，例如设备尚未被唤醒时直接进入播放回答。
+ *
+ * 状态表不变量：
+ *   - S2 子状态只在 S2 下非 NONE，S7 子状态只在 S7 下非 NONE，其余主状态两者都必须为 NONE；
+ *   - S7.1 是一次性断联提示：进入时记录 s7_return_state，退出只能回到该落点或升级为 S7.2；
+ *   - S7 不是可驻留状态，S7.2 只能通过复位离开。
+ *
+ * 校验与迁移判定分开：julia_fsm_state_is_valid* 回答“这个状态组合是否自洽”，
+ * julia_fsm_can_transition* 回答“产品流程是否允许这次变化”。
  */
 #include "julia_fsm.h"
 
 #include <stddef.h>
 
 #include "esp_log.h"
+#ifdef ESP_PLATFORM
+#include "sdkconfig.h"
+#endif
 
 #define TAG "JULIA_FSM"
 
@@ -45,6 +56,7 @@ static const char *const s_event_names[EVT_COUNT] = {
     [EVT_NONE] = "EVT_NONE",
     [EVT_USER_LEAVE] = "EVT_USER_LEAVE",
     [EVT_USER_CALL] = "EVT_USER_CALL",
+    [EVT_LOCAL_SPEECH_START] = "EVT_LOCAL_SPEECH_START",
     [EVT_SILENCE_TIMEOUT] = "EVT_SILENCE_TIMEOUT",
     [EVT_NIGHT_TIME] = "EVT_NIGHT_TIME",
     [EVT_STANDBY_TIMEOUT] = "EVT_STANDBY_TIMEOUT",
@@ -55,6 +67,7 @@ static const char *const s_event_names[EVT_COUNT] = {
     [EVT_INTERRUPT] = "EVT_INTERRUPT",
     [EVT_WAKEUP] = "EVT_WAKEUP",
     [EVT_MOTION_WAKE] = "EVT_MOTION_WAKE",
+    [EVT_IMU_UNAVAILABLE] = "EVT_IMU_UNAVAILABLE",
     [EVT_INTENT_GOODNIGHT] = "EVT_INTENT_GOODNIGHT",
     [EVT_INTENT_DISMISS] = "EVT_INTENT_DISMISS",
     [EVT_MQTT_DISCONNECTED] = "EVT_MQTT_DISCONNECTED",
@@ -89,6 +102,11 @@ static void default_on_exit(julia_fsm_t *fsm, julia_main_state_t main_state,
              julia_fsm_event_name(event));
 }
 
+/**
+ * 只区分“S7 即 S7.2”的两参数版本，供只关心主状态与 S2 子状态的调用方使用
+ * （故障快照的参数校验）。它把任何 S7 都当作 S7.2，因此不能用来判断 S7.1 断联提示
+ * 是否合法，那类判断必须使用 _full 版本。
+ */
 bool julia_fsm_state_is_valid(julia_main_state_t main_state,
                               julia_s2_sub_state_t s2_sub_state)
 {
@@ -98,6 +116,11 @@ bool julia_fsm_state_is_valid(julia_main_state_t main_state,
             : JULIA_S7_SUB_STATE_NONE);
 }
 
+/**
+ * 状态自洽性的唯一定义：越界枚举、S2 子状态离开 S2、S7 子状态离开 S7，以及 S2 同时带
+ * S7 子状态都算非法。运行时的周期巡检和故障快照写入都依赖这套判定，新增状态组合前必须
+ * 先在这里成立，否则会被判为损坏或直接拒收。
+ */
 bool julia_fsm_state_is_valid_full(julia_main_state_t main_state,
                                    julia_s2_sub_state_t s2_sub_state,
                                    julia_s7_sub_state_t s7_sub_state)
@@ -117,6 +140,7 @@ bool julia_fsm_state_is_valid_full(julia_main_state_t main_state,
            s7_sub_state == JULIA_S7_SUB_STATE_NONE;
 }
 
+/* 下面的判定都要求目标没有任何子状态，普通迁移不能顺手把 S2/S7 子状态带过去。 */
 static bool target_is(julia_main_state_t to_main_state,
                       julia_s2_sub_state_t to_s2_sub_state,
                       julia_s7_sub_state_t to_s7_sub_state,
@@ -145,6 +169,13 @@ static bool target_is_fault(julia_main_state_t to_main_state,
            to_s7_sub_state == JULIA_S7_SUB_STATE_S7_2_FAULT;
 }
 
+/**
+ * 完整迁移判定：只回答“产品流程是否允许这次变化”，既不修改状态也不涉及呈现。
+ * 与状态校验的分工是——校验回答“组合是否自洽”，这里回答“两个自洽的组合之间能否走”。
+ *
+ * S7 落点规则集中在这里：S7.2 只能以复位（回 S0）离开，S7.1 只能回到预先记录的稳定
+ * 落点或升级为 S7.2；主动安静（S5/S6）不接受断联提示。
+ */
 bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
                                    julia_s2_sub_state_t from_s2_sub_state,
                                    julia_s7_sub_state_t from_s7_sub_state,
@@ -183,17 +214,13 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
         return from_main_state == JULIA_MAIN_STATE_S1_COMPANION ||
                from_main_state == JULIA_MAIN_STATE_S2_DIALOG ||
                from_main_state == JULIA_MAIN_STATE_S3_STANDBY ||
-               from_main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
-               from_main_state == JULIA_MAIN_STATE_S5_SILENT ||
-               from_main_state == JULIA_MAIN_STATE_S6_SLEEP;
+               from_main_state == JULIA_MAIN_STATE_S4_INTERACTION;
     }
 
     switch (from_main_state) {
     case JULIA_MAIN_STATE_S0_BOOT:
         return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
-                         JULIA_MAIN_STATE_S3_STANDBY) ||
-               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
-                         JULIA_MAIN_STATE_S8_OTA);
+                         JULIA_MAIN_STATE_S3_STANDBY);
 
     case JULIA_MAIN_STATE_S1_COMPANION:
         return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
@@ -203,9 +230,7 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
                target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S3_STANDBY) ||
                target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
-                          JULIA_MAIN_STATE_S6_SLEEP) ||
-               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
-                          JULIA_MAIN_STATE_S8_OTA);
+                          JULIA_MAIN_STATE_S6_SLEEP);
 
     case JULIA_MAIN_STATE_S2_DIALOG:
         if (from_s2_sub_state == JULIA_S2_SUB_STATE_S2_3_SPEAKING &&
@@ -245,19 +270,25 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
                target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S6_SLEEP) ||
                (to_main_state == JULIA_MAIN_STATE_S2_DIALOG &&
-                to_s2_sub_state == JULIA_S2_SUB_STATE_S2_2_THINKING);
+                (to_s2_sub_state == JULIA_S2_SUB_STATE_S2_2_THINKING ||
+                 to_s2_sub_state == JULIA_S2_SUB_STATE_S2_1_LISTENING));
 
     case JULIA_MAIN_STATE_S5_SILENT:
         return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
-                         JULIA_MAIN_STATE_S4_INTERACTION) ||
-               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                           JULIA_MAIN_STATE_S3_STANDBY) ||
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
+                          JULIA_MAIN_STATE_S4_INTERACTION) ||
+#endif
                target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                           JULIA_MAIN_STATE_S6_SLEEP);
 
     case JULIA_MAIN_STATE_S6_SLEEP:
-        return target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
+        return
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+               target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S4_INTERACTION) ||
+#endif
                target_is(to_main_state, to_s2_sub_state, to_s7_sub_state,
                          JULIA_MAIN_STATE_S3_STANDBY);
 
@@ -273,6 +304,10 @@ bool julia_fsm_can_transition_full(julia_main_state_t from_main_state,
     }
 }
 
+/**
+ * 不区分 S7 子状态的兼容入口：查询时把 S7 一律视为 S7.2，因此它无法表达 S7.1 的历史
+ * 落点规则。真正的落点校验在 julia_fsm_transition_to_full 内完成。
+ */
 bool julia_fsm_can_transition(julia_main_state_t from_main_state,
                               julia_s2_sub_state_t from_s2_sub_state,
                               julia_main_state_t to_main_state,
@@ -288,6 +323,9 @@ bool julia_fsm_can_transition(julia_main_state_t from_main_state,
                                              : JULIA_S7_SUB_STATE_NONE);
 }
 
+/* 唯一允许改写状态字段的入口：先 on_exit 旧状态、再写字段、最后 on_enter 新状态，
+ * 因此 observer 看到的永远是已经生效的状态。S7.1 的落点检查与 s7_return_state 记录
+ * 同样在这里完成，调用方不得自行改写字段。 */
 bool julia_fsm_transition_to_full(julia_fsm_t *fsm,
                                   julia_main_state_t to_main_state,
                                   julia_s2_sub_state_t to_s2_sub_state,
@@ -371,10 +409,29 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
         event <= EVT_NONE || event >= EVT_COUNT) return false;
 
     julia_main_state_t target_main_state = JULIA_MAIN_STATE_COUNT;
+    /* 主动静默不因连接关闭/旧唤醒词而退出，也不能被远程检查触发升级。
+     * EVT_WAKEUP 只在未启用 capture-v1 时被拒绝：capture-v1 下安静状态仍接受唤醒词。 */
+    if (julia_fsm_is_quiet(fsm->main_state) &&
+        (
+#if !CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+         event == EVT_WAKEUP ||
+#endif
+         event == EVT_MQTT_DISCONNECTED ||
+         event == EVT_WSS_DISCONNECTED || event == EVT_SERVICE_CONNECT_TIMEOUT ||
+         event == EVT_OTA_AVAILABLE)) return false;
     julia_s2_sub_state_t target_s2_sub_state = JULIA_S2_SUB_STATE_COUNT;
     julia_s7_sub_state_t target_s7_sub_state = JULIA_S7_SUB_STATE_NONE;
 
-    if ((event == EVT_VOICE_SESSION_RESET || event == EVT_VOICE_BUSY) &&
+    /* 播放中被本地语音打断与新一轮听音共用同一落点，避免播放阶段的旧子状态残留。 */
+    if (event == EVT_LOCAL_SPEECH_START &&
+        (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
+         fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
+         (fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG &&
+          fsm->s2_sub_state == JULIA_S2_SUB_STATE_S2_3_SPEAKING))) {
+        target_main_state = JULIA_MAIN_STATE_S2_DIALOG;
+        target_s2_sub_state = JULIA_S2_SUB_STATE_S2_1_LISTENING;
+    /* 云端声明旧会话不可继续：S1 的免唤醒资格与 S2/S4 的交互上下文一并作废。 */
+    } else if ((event == EVT_VOICE_SESSION_RESET || event == EVT_VOICE_BUSY) &&
         (fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
          fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG ||
          fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION)) {
@@ -404,16 +461,23 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
         /* 对话结束后的连续交流窗口已超时，重新要求唤醒词。 */
         target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
-    } else if ((fsm->main_state == JULIA_MAIN_STATE_S0_BOOT ||
-                fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION ||
-                fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY) &&
+    /* 仅 S3 准入升级：S5/S6 静默期间由上面的静默拒绝分支拦下 EVT_OTA_AVAILABLE，
+     * 远程检查不会在用户主动休眠时触发升级。 */
+    } else if (fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY &&
                event == EVT_OTA_AVAILABLE) {
         target_main_state = JULIA_MAIN_STATE_S8_OTA;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
-    } else if ((fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY ||
+    } else if (
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+               (((fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY ||
+                   julia_fsm_is_quiet(fsm->main_state)) && event == EVT_MOTION_WAKE) ||
+                (julia_fsm_is_quiet(fsm->main_state) && event == EVT_WAKEUP)) ||
+#endif
+               ((fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY ||
                 fsm->main_state == JULIA_MAIN_STATE_S1_COMPANION) &&
-               event == EVT_WAKEUP) {
-        /* 只有已经确认的唤醒词才能让待机设备开始一轮交流。 */
+               event == EVT_WAKEUP)) {
+        /* 唤醒词，或 capture-v1 下 S3/S5/S6 的明显搬动，均进入 S4 发起交互；
+         * 未启用 capture-v1 时搬动不走进本分支，只由下面的兼容分支恢复待机。 */
         target_main_state = JULIA_MAIN_STATE_S4_INTERACTION;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if ((fsm->main_state == JULIA_MAIN_STATE_S3_STANDBY &&
@@ -424,15 +488,11 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
         /* 夜间窗口或 S3 驻留超时都进入睡眠态。 */
         target_main_state = JULIA_MAIN_STATE_S6_SLEEP;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
-    } else if ((fsm->main_state == JULIA_MAIN_STATE_S5_SILENT ||
-                fsm->main_state == JULIA_MAIN_STATE_S6_SLEEP) &&
-               event == EVT_WAKEUP) {
-        /* 静默态和睡眠态同样只响应唤醒词进入发起交互态。 */
-        target_main_state = JULIA_MAIN_STATE_S4_INTERACTION;
-        target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
-    } else if (fsm->main_state == JULIA_MAIN_STATE_S6_SLEEP &&
-               event == EVT_MOTION_WAKE) {
-        /* 搬动只恢复可见待机，不等同于用户已经发起一轮语音交流。 */
+    } else if (julia_fsm_is_quiet(fsm->main_state) &&
+               (event == EVT_MOTION_WAKE || event == EVT_IMU_UNAVAILABLE)) {
+        /* 仅兼容路径（未启用 capture-v1）到达此处：搬动只恢复可见待机，不等同于用户已经
+         * 发起一轮语音交流；capture-v1 下安静状态的 EVT_MOTION_WAKE 已由上面的分支送往 S4，
+         * 这里实际兜住的是 EVT_IMU_UNAVAILABLE。 */
         target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION &&
@@ -453,12 +513,12 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
     } else if ((fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
                 fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG) &&
                event == EVT_INTENT_DISMISS) {
-        /* 明确结束沟通进入静默，仍按 S5 的独立计时策略返回 S3。 */
+        /* 明确结束沟通进入静默，S5 的独立计时到期后进入 S6。 */
         target_main_state = JULIA_MAIN_STATE_S5_SILENT;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S5_SILENT &&
                event == EVT_SILENT_TIMEOUT) {
-        target_main_state = JULIA_MAIN_STATE_S3_STANDBY;
+        target_main_state = JULIA_MAIN_STATE_S6_SLEEP;
         target_s2_sub_state = JULIA_S2_SUB_STATE_NONE;
     } else if (fsm->main_state == JULIA_MAIN_STATE_S8_OTA &&
                event == EVT_OTA_SUCCEEDED) {

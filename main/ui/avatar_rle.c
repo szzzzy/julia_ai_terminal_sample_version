@@ -11,6 +11,10 @@
  *
  * 数据流：嵌入的 LISTEN/THINK/SPEAK bin → 本解码器 → PSRAM 360x360 帧 → 校验 CRC。
  *
+ * 现状：julia_avatar.c 的相位选图 avatar_source_for_phase() 直接返回静态立绘资源，
+ * 使用本解码器的 RLE 相位帧路径（avatar_phase_frame_ensure）被标记为未使用，因此本
+ * 解码器当前不在运行时链路上；保留它是为已嵌入的 LISTEN/THINK/SPEAK 帧。
+ *
  * 错误路径：参数为空(INVALID_ARG)、输出越界(INVALID_SIZE)、输入越界(INVALID_SIZE)、
  * 结尾尺寸不符(INVALID_SIZE)。任何错误即返回，不写越界内存。
  */

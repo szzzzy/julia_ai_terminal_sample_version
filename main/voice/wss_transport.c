@@ -28,55 +28,35 @@
  *   链路存活）就取消待定探测并重置保活计时，只有该窗口内完全没有下行帧才判定
  *   链路死亡并重连自愈；
  *   写方向的 WANT_READ/WANT_WRITE/EAGAIN 在同一帧可配置预算内保持原参数
- *   重试；期限耗尽或永久错误才结束会话，既容忍短时背压也避免永久卡死；
+ *   重试；期限耗尽或永久错误才结束会话，既容忍短时背压也避免永久卡死。
+ *   上述超时与预算都以毫秒或秒计，取自 esp_timer_get_time() 的微秒单调时钟与
+ *   RTOS tick，不使用挂钟；已进入的单次写调用无法被中断，预算只约束后续重试。
  * - Bearer token 优先取 COMM_DEVICE_AUTH_TOKEN_VALUE，为空时回退 CONFIG_WSS_TOKEN；
- * - 服务器证书仍由 server_certs/ca_cert.pem 内嵌信任锚校验，不引入新证书。
+ * - 服务器证书由 server_certs/ca_cert.pem 内嵌信任锚校验，不引入新证书。当前配置
+ *   skip_common_name=true，不核对服务器主机名，见 wss_transport_start()。
  *
  * 本文件不知道收到的内容代表回答声音还是文件；语音服务负责解释消息并决定
  * 何时开始上传、播放或发送文件。
  *
- * ------------------------------------------------------------------
- * 连接流程（只由负责连接的任务执行）
- * ------------------------------------------------------------------
- * 其它任务只能提交请求，不能直接改变连接：
+ * 失败与恢复（只由负责连接的任务执行）：wss_run_session() 内任一失败路径——帧写失败
+ * （含 PING/应答/CLOSE 应答）、非法或超长帧、对端 CLOSE、发出 PING 后窗口内无任何下行帧、
+ * 外部任务请求结束——都会退出会话循环，并在销毁 TLS 句柄之后才进入重连等待，不保留半开句柄。
+ * 重连等待的秒数取 wss_auth_retry_seconds()（认证被拒即 HTTP 401/403 或 WS 4401 时下限 60 s）
+ * 与 s_retry_floor_s（wss_transport_defer_retry() 只抬高不降低，上限 300 s；对端 CLOSE 码
+ * 4001/4401/4404 抬到 60 s、4408/4410/4411 抬到 30 s）的较大者。重连次数不累加、没有放弃
+ * 分支，因此链路中断无需外部干预即可自愈；等待期间收到任务通知会提前结束等待。
  *
- *   [未连接] --wss_connect() 成功--> [已连接/会话中]
- *       ^                              |
- *       | wss_connect() 失败          wss_run_session() 内任一失败路径：
- *       |                              · 帧写失败（含 PING/应答/CLOSE 应答）
- *       |                              · 非法/超长/掩码/UTF-8/CLOSE 帧（1002/1007）
- *       |                              · 对端 CLOSE（回送后退出）
- *       |                              · PING 后 CONFIG_WSS_PONG_TIMEOUT_SECONDS
- *       |                                内无任何下行帧（判死）
- *       |                              · 外部任务请求 owner 以明确原因结束会话
- *       |                              v
- *       +-----[重连等待 vTaskDelay(RECONNECT_INTERVAL)]---→ 重新 wss_connect()
- *
- * 状态归属：
- * - 未连接：wss_transport_start() 刚创建任务，或上一次会话销毁句柄之后。
- * - 连接中：wss_connect() 内执行 esp_tls 同步握手 + HTTP 升级；失败会销毁
- *   会话句柄并落到重连等待，绝不留半开句柄。
- * - 已连接：进入 wss_run_session()，循环"收一帧 → 保活/分派 → 有界处理上行"。
- * - 重连等待：固定 CONFIG_WSS_RECONNECT_INTERVAL_SECONDS 退避后无条件重试；
- *   计数永不累加、永不放弃，因此链路中断无需外部干预即可自愈。
- *
- * 数据去向（这里只保证消息传输，不解释业务含义）：
- * - 上行：外部任务 wss_transport_enqueue() → s_cmd_queue → 会话任务
- *   wss_drain_queue() → 上层的 on_queue_item 回调；上层决定发送何种帧，再在
- *   回调内调用 wss_transport_send_now() → wss_ws_send()。会话任务还可能在
- *   空闲时主动发 PING（0x9），并应答服务端 PING（PONG 0xA）与 CLOSE。
- * - 下行：wss_ws_recv() 收帧 → 跨帧重组（FIN=0 续帧）→ on_text / on_binary
- *   回调交给上层。上层不返回前，会话循环暂停，期间仍可再发帧。
- * - FILE_SEND（上行推送）：BEGIN FILE/Binary/END 的字节含义在上层
- *   voice_service.c；本模块只保证"作为若干连续且不超限的 WebSocket 帧写出去"，
- *   不解释 URI、不分块文件。
- * - MIC PCM 位于上层 PSRAM ring，由 on_poll 在会话任务内调用 send_now 发送；
- *   ring overflow 只跨任务提交结束请求，TLS 仍由本任务独占 teardown。
+ * 数据归属：其它任务只能提交请求，不能直接改变连接。MIC PCM 位于上层 PSRAM ring，由
+ * on_poll 在会话任务内调用 send_now 发送；ring 溢出只跨任务提交结束请求，TLS 仍由本任务
+ * 独占 teardown。
  *
  * 多任务协作要求：
- * - s_tls、s_rx_extra*、s_msg_*（分片重组）、s_session_failed 只在会话任务
- *   上下文中读写，天然无需锁。mbedTLS 会话句柄绝不跨任务共享，是"收发全部
- *   收敛到会话任务"的根本原因。
+ * - 除 s_session_failed 外，s_tls、s_rx_extra*、s_msg_*（分片重组）只在会话任务
+ *   上下文中读写，天然无需锁。s_session_failed 是单向闩锁：任意任务都可通过
+ *   wss_transport_fail_session() 置位（例如板级采音任务判定音频处理失败），
+ *   会话任务在会话开始时清除、在每轮分派后检查。它只表达"本轮不再继续"这一个布尔
+ *   意图、不携带数据，因此不加锁；晚一拍被看到只会推迟关闭，不会破坏所有权。
+ *   mbedTLS 会话句柄绝不跨任务共享，是"收发全部收敛到会话任务"的根本原因。
  * - s_started / s_starting / s_session_ready / s_requested_end_reason 由
  *   s_start_lock 保护，允许普通任务提交结束请求但不直接修改 owner 状态。
  * - s_cmd_queue 是跨任务的有界通道：外部任务入队（非阻塞），会话任务出队。
@@ -84,6 +64,7 @@
  *   控制分派和上层 on_poll 也必须保持有界。
  */
 
+#include "julia_power.h"
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -126,11 +107,12 @@ static const char *TAG = "wss_transport";
 /** HTTP 升级响应的读取超时。握手不能使用会话级的短超时。 */
 #define WSS_HANDSHAKE_READ_TIMEOUT_MS 1000
 /**
- * 会话空闲读取超时：同时是排队命令的最长处理延迟。
+ * 会话空闲读取超时：与板级 MIC 的一帧周期（20 ms）同源，使会话循环每帧至少获得
+ * 一次处理命令与上行数据的窗口。它只是会话循环 recv 的空闲超时，不是命令的最长
+ * 等待时间：一条命令的实际延迟还要叠加发送耗时、回调执行和任务调度。
  *
- * 板级 MIC 每 20 ms 产生一帧 PCM1；命令队列深度只有 4。若在一次空闲
- * recv 上阻塞 1 s，队列会在 80 ms 内写满并丢掉几乎全部上行音频。因此
- * 会话超时必须不大于一帧周期。
+ * 普通命令队列深度 1、控制队列固定 4 槽，而 MIC 数据走上层 ring、不经过这两个
+ * 队列，因此放大该超时换不到更大的上行缓冲，只会推迟命令分派。
  */
 #define WSS_READ_TIMEOUT_MS 20
 /** 单次会话写调用的 SO_SNDTIMEO；暂时错误仍由帧级绝对期限约束重试。 */
@@ -140,9 +122,10 @@ static const char *TAG = "wss_transport";
 #define CONFIG_WSS_FRAME_WRITE_BUDGET_MS 3500
 #endif
 #define WSS_FRAME_WRITE_DEADLINE_MS CONFIG_WSS_FRAME_WRITE_BUDGET_MS
-/** 帧内读取允许的连续空闲超时次数，超过即判定链路故障，防止中途死亡挂死。 */
+/** 帧内读取允许的连续空闲超时次数，超过即判定链路故障，防止中途死亡挂死。
+ * 语义是"连续次数"上限而不是总时长：一旦读到字节就重新计数。取值依据未确认。 */
 #define WSS_READ_EAGAIN_BUDGET 5
-/** HTTP 升级响应读取允许的连续空闲超时次数。 */
+/** HTTP 升级响应读取允许的连续空闲超时次数；与帧内预算取不同值的依据未确认。 */
 #define WSS_HANDSHAKE_EAGAIN_BUDGET 10
 
 /**
@@ -173,11 +156,19 @@ static wss_transport_config_t s_config;
 static void *s_queue_item;
 /** 表示当前连接已经不能安全继续；本轮处理结束后统一关闭并重连。 */
 static bool s_session_failed;
-/* Only the connection owner changes this latch. Clear after successful auth,
- * not after an intervening network failure, to avoid credential retry storms. */
+/* 只有连接 owner 修改本闩锁，且只在认证成功后清除：中间穿插的网络故障不清，
+ * 否则会退化成对同一份无效凭据的反复重试。 */
 static bool s_auth_rejected;
 static unsigned s_retry_floor_s;
 
+/**
+ * @brief 抬高下一次重连等待的下限。
+ *
+ * @param[in] seconds 下限，单位秒；超过 300 时按 300 截断。
+ *
+ * 只抬高不降低（取当前值与参数的较大者），认证成功后由会话任务清零；当前的调用点
+ * 传入 wss_close_retry_floor() 的返回值 30/60。没有锁：只允许 owner 调用。
+ */
 void wss_transport_defer_retry(unsigned seconds)
 {
     if(seconds>300U) seconds=300U;
@@ -196,6 +187,10 @@ static size_t s_msg_len;
 static uint8_t s_msg_opcode;
 static bool s_msg_active;
 /** 当前结束原因和跨任务请求；前者仅 owner 写，后者由 s_start_lock 保护。 */
+#include <stdatomic.h>
+#include "julia_fsm_runtime.h"
+static atomic_bool s_power_paused;
+static atomic_bool s_power_stopped = true;
 static wss_transport_end_reason_t s_session_end_reason;
 static wss_transport_end_reason_t s_last_write_end_reason;
 static wss_transport_end_reason_t s_requested_end_reason;
@@ -208,6 +203,9 @@ static uint64_t s_tx_frames;
 static uint64_t s_tx_payload_bytes;
 static uint64_t s_rx_frames;
 
+/** 记录本轮会话的结束原因：只有第一个非 NONE 的有效原因会被保留，后续原因静默丢弃，
+ * 因此它反映的是"最先出问题的环节"。该值决定断链归因日志与 wss_transport_end_reason_name()
+ * 对外返回的名称。只在会话任务内写。 */
 static void wss_set_owner_end_reason(wss_transport_end_reason_t reason)
 {
     if (s_session_end_reason == WSS_TRANSPORT_END_NONE &&
@@ -1057,7 +1055,7 @@ static esp_err_t wss_ws_handshake(void)
     }
     if (!wss_ws_validate_response(buf, header_len, (const char *)keyb64)) {
         if (wss_auth_response_rejected(buf, header_len)) s_auth_rejected = true;
-        /* Response headers may contain cookies or reflected credentials. */
+        /* 升级响应头里可能带 cookie 或反射回来的凭据，因此只打印归类结果，不打印原文。 */
         ESP_LOGE(TAG, "WSS upgrade rejected: %s",
                  s_auth_rejected ? "authentication; retry cooldown" : "invalid upgrade response");
         return ESP_FAIL;
@@ -1065,8 +1063,23 @@ static esp_err_t wss_ws_handshake(void)
     return ESP_OK;
 }
 
+/** 安静状态是否阻断连接：会话任务在安静期间既不建链也不维持会话，已建立的会话会
+ * 在下一轮循环退出。打开 CONFIG_JULIA_LOCAL_CAPTURE_ENABLE 时端点判定由设备侧
+ * 采音配合云端 capture-v1 协议完成，不依赖传输层按 quiet 停连，因此恒返回 false。 */
+static bool wss_quiet_blocks(void)
+{
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+    return false;
+#else
+    return julia_fsm_is_quiet(julia_fsm_runtime_get_state());
+#endif
+}
+
 /**
  * @brief 建立 TLS 连接并完成 WebSocket 升级握手。
+ *
+ * 凭据非法时在 esp_tls_init() 之前就返回 false，不向服务器发起任何连接；成功返回时
+ * 接收超时已收紧到会话用的 WSS_READ_TIMEOUT_MS，可开始收发业务消息。
  *
  * @return true 连接并升级成功，s_tls 已指向有效会话；
  * @return false 连接、握手或升级失败，资源已释放。
@@ -1141,7 +1154,8 @@ static bool wss_connect(void)
  */
 static void wss_drain_queue(void)
 {
-    /* Bounded batches leave receive/ping/poll a turn even under PCM pressure. */
+    /* 控制队列先于数据队列，且每个队列每轮最多 4 条：超出部分留待下一轮，
+     * 保证持续 PCM 压力下 recv、保活与 on_poll 仍能轮转。 */
     QueueHandle_t queues[] = {s_control_queue, s_cmd_queue};
     for (size_t q = 0; q < 2 && !s_session_failed; ++q) {
         for (unsigned n = 0; n < 4; ++n) {
@@ -1280,7 +1294,9 @@ static void wss_run_session(void)
     s_tx_payload_bytes = 0;
     s_rx_frames = 0;
 
-    /* Do not replay audio or control requests left by a disconnected session. */
+    /* 会话开始时清空两个队列并复位请求原因：断线前积压的音频与控制请求属于旧连接，
+     * 重放会让服务器把过期内容当成新一轮输入。这是 generation 隔离在传输层的落点，
+     * 会话结束处（本函数末尾）会再做一次同样的清理。 */
     xQueueReset(s_cmd_queue);
     xQueueReset(s_control_queue);
     portENTER_CRITICAL(&s_start_lock);
@@ -1292,7 +1308,8 @@ static void wss_run_session(void)
         s_config.on_session_start();
     }
 
-    while (s_tls != NULL && !s_session_failed) {
+    while (s_tls != NULL && !s_session_failed && !atomic_load(&s_power_paused) &&
+           !wss_quiet_blocks()) {
         (void)ulTaskNotifyTake(pdTRUE, 0);
         if (wss_apply_requested_end()) break;
         /* 先收一帧再处理上行：持续 MIC 上传时也要优先看到服务端 CLOSE，避免服务端
@@ -1496,6 +1513,7 @@ static void wss_run_session(void)
     if (s_config.on_session_end != NULL) {
         s_config.on_session_end(s_session_end_reason);
     }
+    /* 会话结束同样清空两个队列：其中的条目只属于刚结束的连接，重连后不得补发。 */
     xQueueReset(s_cmd_queue);
     xQueueReset(s_control_queue);
     ESP_LOGW(TAG, "WSS session ended reason=%s; reconnecting in %d s",
@@ -1517,14 +1535,36 @@ static void wss_session_task(void *parameter)
 {
     (void)parameter;
     for (;;) {
-        if (wss_connect()) {
+        if (atomic_load(&s_power_paused)) {
+            atomic_store(&s_power_stopped, true);
+            (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+        if (wss_quiet_blocks()) {
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+            continue;
+        }
+        atomic_store(&s_power_stopped, false);
+        /* CPU boost 只包住建连阶段（TLS 握手 + HTTP 升级），不覆盖整个会话：
+         * begin/end 必须成对，因此失败路径也要在本行之后立即 end，再决定是否进会话。 */
+        bool boosted = julia_power_boost_begin();
+        bool connected = wss_connect();
+        if (boosted) julia_power_boost_end();
+        if (connected) {
+            if (atomic_load(&s_power_paused) ||
+                wss_quiet_blocks()) {
+                (void)esp_tls_conn_destroy(s_tls);
+                s_tls = NULL;
+                continue;
+            }
             s_auth_rejected = false;
             s_retry_floor_s=0;
             wss_run_session();
         }
         uint32_t delay_s = wss_auth_retry_seconds(s_auth_rejected, CONFIG_WSS_RECONNECT_INTERVAL_SECONDS);
         if(delay_s<s_retry_floor_s) delay_s=s_retry_floor_s;
-        vTaskDelay(pdMS_TO_TICKS(delay_s * 1000U));
+        if (!atomic_load(&s_power_paused))
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(delay_s * 1000U));
     }
 }
 
@@ -1567,10 +1607,9 @@ esp_err_t wss_transport_start(const wss_transport_config_t *config)
     portEXIT_CRITICAL(&s_start_lock);
 
     /* 信任锚与超时配置只需填充一次；每次重连复用同一配置。
-     * 自签服务器（如 172.20.10.2）：证书链由 ca_cert.pem 校验，
-     * 服务器证书 CN 是 "Voice Robot Local CA"，与主机名不匹配，
-     * 跳过 CN（Identity)检查——身份已由信任锚链绑定。
-     * 若服务器证书含该 IP 的 SAN，可移除本行。 */
+     * skip_common_name=true 是当前的开发期配置选择：TLS 只校验证书链能否由
+     * ca_cert.pem 信任锚验证，不再核对服务器主机名／CN，因此不构成完整的服务器
+     * 身份校验。若要按主机名校验，服务器证书需带有匹配的 SAN 或 CN，届时可去掉本行。 */
     s_tls_cfg.cacert_buf = ca_cert_pem_start;
     s_tls_cfg.cacert_bytes = (unsigned int)(ca_cert_pem_end - ca_cert_pem_start);
     s_tls_cfg.skip_common_name = true;
@@ -1614,6 +1653,17 @@ finish:
     s_started = (err == ESP_OK);
     portEXIT_CRITICAL(&s_start_lock);
     return err;
+}
+
+void wss_transport_set_paused(bool paused)
+{
+    atomic_store(&s_power_paused, paused);
+    if (s_session_task != NULL) xTaskNotifyGive(s_session_task);
+}
+
+bool wss_transport_is_paused(void)
+{
+    return atomic_load(&s_power_paused) && atomic_load(&s_power_stopped);
 }
 
 /**
@@ -1660,6 +1710,9 @@ esp_err_t wss_transport_enqueue_control(const void *item, size_t item_size)
     return xQueueSend(s_control_queue, item, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
+/** 置位会话闩锁：任意任务（普通任务、板级采音任务）都可调用，不需要持有任何锁。
+ * 它不立即关闭链路，只让 owner 在本轮分派结束后走统一的 teardown；TLS 释放仍然只由
+ * owner 执行，避免跨任务销毁句柄。 */
 void wss_transport_fail_session(void)
 {
     wss_set_owner_end_reason(WSS_TRANSPORT_END_APPLICATION_ERROR);
@@ -1678,6 +1731,8 @@ esp_err_t wss_transport_request_session_end(wss_transport_end_reason_t reason)
         portEXIT_CRITICAL(&s_start_lock);
         return ESP_ERR_INVALID_STATE;
     }
+    /* 首个请求优先：已有待处理原因时保留原值，后来的请求被静默忽略，
+     * 使结束原因仍归因于最先发现问题的调用方。 */
     if (s_requested_end_reason == WSS_TRANSPORT_END_NONE) {
         s_requested_end_reason = reason;
     }
@@ -1691,6 +1746,8 @@ esp_err_t wss_transport_request_session_end(wss_transport_end_reason_t reason)
 
 bool wss_transport_is_ready(void)
 {
+    if (atomic_load(&s_power_paused) ||
+        wss_quiet_blocks()) return false;
     portENTER_CRITICAL(&s_start_lock);
     bool ready = s_session_ready;
     portEXIT_CRITICAL(&s_start_lock);

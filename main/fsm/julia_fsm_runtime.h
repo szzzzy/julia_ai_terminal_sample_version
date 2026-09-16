@@ -25,16 +25,25 @@ typedef enum {
     JULIA_SERVICE_OFFLINE,        /**< 已确认不可用；全部链路恢复前保持锁存。 */
 } julia_service_state_t;
 
-/** Atomic committed behavior snapshot for cloud synchronization. */
+/**
+ * 供云端同步读取的行为快照。字段在 s_state_lock 内整体拷贝，因此读到的是“已提交”
+ * 状态（FSM Task 已经生效的状态），不是调用瞬间正在呈现的画面。
+ */
 typedef struct {
     julia_main_state_t main_state;
     julia_s2_sub_state_t s2_sub_state;
     julia_s7_sub_state_t s7_sub_state;
     fsm_event_t reason;
+    /** 每次生效迁移自增的单调编号，跳过 0；云端用它判断自己读到的是否仍是最新状态。 */
     uint32_t revision;
+    /** 距 S1 陪伴窗口到期的剩余时间，单位 ms（向上取整）；不在 S1 或已到期时为 0。 */
     uint32_t companion_remaining_ms;
 } julia_fsm_snapshot_t;
 
+/**
+ * 读取上述快照。可在任意 Task 上下文调用，不等待网络或 LVGL；整体读取保证各字段
+ * 属于同一次状态提交，不会出现主状态与子状态来自不同版本。
+ */
 void julia_fsm_runtime_get_snapshot(julia_fsm_snapshot_t *snapshot);
 
 /**
@@ -59,7 +68,10 @@ esp_err_t julia_fsm_runtime_post(fsm_event_t event);
  * timer callback 或状态 observer 调用。入队后一直等待消费，保证确认对象生命周期。
  */
 esp_err_t julia_fsm_runtime_post_sync(fsm_event_t event);
-/** Execute require_wake only if the cloud still refers to the current revision. */
+/**
+ * 仅当云端仍指向当前 revision 时才执行 require_wake。revision 已经变化说明设备在云端
+ * 读取快照之后又迁移过，此时返回 ESP_ERR_INVALID_STATE 且不改变状态。
+ */
 esp_err_t julia_fsm_runtime_require_wake(uint32_t expected_revision);
 /**
  * 优先报告严重故障。设备会保存故障记录、显示故障状态并按配置尝试复位；

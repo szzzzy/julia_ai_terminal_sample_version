@@ -95,7 +95,9 @@ esp_err_t ota_boot_health_reject(const char *reason)
 }
 
 /**
- * @brief Default product acceptance hook, replaceable by product code.
+ * @brief 示例工程提供的默认产品验收钩子，产品代码可用强符号替换。
+ *
+ * @return 默认 true；启用 CONFIG_OTA_TEST_FORCE_BOOT_HEALTH_FAIL 时恒为 false。
  */
 bool __attribute__((weak)) ota_boot_health_product_check(void)
 {

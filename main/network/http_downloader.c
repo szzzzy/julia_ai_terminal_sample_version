@@ -2,20 +2,23 @@
  * @file    http_downloader.c
  * @brief   公共 HTTPS 数据面下载器实现。
  *
- * 固件 OTA 与音频素材通过本模块共用以下传输约束：
+ * 当前唯一调用方是音频素材下载（`main/audio/audio_engine.c`）；OTA 下载仍在
+ * `ota_engine.c` 内自带一套 HTTP 循环，两者各写一份状态码/长度/ETag/Range 策略，
+ * 只共用响应头采集与 Content-Range 解析。改这里时必须同步核对 OTA 侧，反之亦然。
+ *
+ * 本模块负责的连接与校验：
  * - 连接建立与 TLS 失败分类；
  * - Range 断点续传与 200/416 回退、ETag 一致性校验；
  * - HTTP 状态码、Content-Length、Content-Range 校验；
  * - 带空读超时的读取循环与完整 body 判定。
  *
- * 业务差异（写入目标、镜像头/素材校验、断点检查点、进度上报）通过 sink
- * 回调注入；断点被重置（ETag 变化或服务器忽略 Range）时通过 restart 回调
- * 通知调用方重建持久化记录。
+ * 业务差异（写入目标、素材校验、断点检查点、进度上报）通过 sink 回调注入；断点被
+ * 重置（ETag 变化或服务器忽略 Range）时通过 restart 回调通知调用方重建持久化记录。
  *
  * 模块关系：
  * - 依赖 esp_http_client 完成传输与 chunked 解码（传输编码对上层透明）；
- * - 依赖 ota_stability 的 Content-Range 头解析；
- * - 不解析 JSON、不访问 OTA/数据分区、不写 NVS。
+ * - 依赖 ota_stability 的 Content-Range 解析（下载器再校验区间与清单长度一致）；
+ * - 不解析 JSON、不访问 OTA/数据分区、不写 NVS；不重入（见 http_downloader_run）。
  */
 #include "http_downloader.h"
 
@@ -43,7 +46,10 @@ static const char *TAG = "http_downloader";
 /** 连续空读的上限；每次空读间隔 10 ms，达到后视为网络无响应（约 6 秒）。 */
 #define HTTP_DOWNLOADER_MAX_EMPTY_READS 600U
 
-/** 下载缓冲区，由下载器独占使用；sink 返回后不得再引用其中的数据。 */
+/**
+ * 下载缓冲区，单实例：本模块不支持并发或重入，同一时刻只有一个下载任务。
+ * sink 返回后其中的数据可能被下一次读取覆盖，回调不得保留该指针。
+ */
 static char s_buffer[HTTP_DOWNLOADER_BUFFER_SIZE];
 
 esp_err_t http_downloader_collect_headers(esp_http_client_event_t *event)
@@ -171,23 +177,26 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
         }
         /* status_code 与 content_length 共同决定当前响应是完整下载还是可续传响应。 */
         int status_code = esp_http_client_get_status_code(client);
-        /* ETag 用于确认断点对应的服务器对象没有在两次请求之间被替换。
-         * NOTE：读取 ETag（以及下方 Content-Range）依赖编译开关
-         * CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS；关闭时 response_etag 恒为 NULL，
-         * 带 expected_etag 的续传会因“识别不到 ETag”被强制从零重试，Range 校验也会走
-         * RANGE_MISMATCH 失败路径。需用断点续传时请确认该开关已开启。 */
+        /* ETag 与下方 Content-Range 都由 HTTP_EVENT_ON_HEADER 在本次响应内采集
+         * （http_downloader_collect_headers），不依赖任何 SDK 编译开关。
+         * 服务器不返回 ETag 时 response_etag 为 NULL：带 expected_etag 的续传会比对
+         * 不到，于是退化为从零重试；无法确认断点对应的对象是否仍是同一份内容。 */
         if (headers.invalid) {
             result->failure_reason = NATIVE_OTA_FAILURE_HTTP_STATUS_INVALID;
             err_out = ESP_FAIL;
             goto cleanup;
         }
         const char *response_etag = headers.etag[0] != '\0' ? headers.etag : NULL;
+        /* 两侧 ETag 容量相同（均为 128 字节），拷贝不会截断，只补一个显式终止符。 */
         if (response_etag != NULL && response_etag[0] != '\0') {
             strncpy(result->etag, response_etag, sizeof(result->etag) - 1U);
             result->etag[sizeof(result->etag) - 1U] = '\0';
         }
 
-        /* 断点对象身份变化或服务器无法续传时，通知调用方重置后全量重试。 */
+        /* 断点对象身份变化或服务器无法续传时，通知调用方重置后全量重试。
+         * expected_etag 与响应 ETag 做严格字符串比较，不做弱比较归一化：服务器换了
+         * ETag 形式（例如加了 W/ 前缀或引号变化）会被当作对象已替换并重下。
+         * expected_etag 为 NULL 或空串表示本次不校验断点对象身份。 */
         bool restart_required = false;
         if (resume && config->expected_etag != NULL && config->expected_etag[0] != '\0' &&
             (response_etag == NULL || strcmp(config->expected_etag, response_etag) != 0)) {
@@ -204,6 +213,8 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
             client = NULL;
             client_open = false;
             result->restarted = true;
+            /* restart_cb 必须在开始新的全量会话之前把持久化断点清零，否则写入偏移仍
+             * 指向上一次的部分镜像。回调失败时客户端已释放，可直接返回而不经过 cleanup。 */
             if (config->restart_cb != NULL) {
                 esp_err_t restart_err = config->restart_cb(config->restart_ctx);
                 if (restart_err != ESP_OK) {
@@ -231,7 +242,8 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
                 err_out = ESP_FAIL;
                 goto cleanup;
             }
-            /* Content-Range 进一步确认响应覆盖的区间和完整对象大小。 */
+            /* Content-Range 进一步确认响应覆盖的区间和完整对象大小。只接受“终点正好是
+             * 完整对象末字节”的单区间：多区间或尾部截断的 206 无法直接追加到断点。 */
             const char *content_range = headers.content_range;
             size_t range_start = 0;
             size_t range_end = 0;
@@ -254,6 +266,8 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
                 err_out = ESP_FAIL;
                 goto cleanup;
             }
+            /* content_length 为 0 表示 chunked：长度校验被跳过，完整性只能靠 complete
+             * 标志和调用方对总长度/摘要的核对。 */
             if (config->expected_size > 0 && content_length > 0 &&
                 content_length != (int64_t)config->expected_size) {
                 ESP_LOGE(TAG, "Full download response invalid: status=%d length=%" PRId64

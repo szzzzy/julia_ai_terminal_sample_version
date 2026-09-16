@@ -68,14 +68,14 @@ int main(void)
                                      JULIA_MAIN_STATE_S1_COMPANION, JULIA_S2_SUB_STATE_NONE));
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S0_BOOT, JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE));
-    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S0_BOOT, JULIA_S2_SUB_STATE_NONE,
+    assert(!julia_fsm_can_transition(JULIA_MAIN_STATE_S0_BOOT, JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S8_OTA, JULIA_S2_SUB_STATE_NONE));
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S1_COMPANION, JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S2_DIALOG,
                                     JULIA_S2_SUB_STATE_S2_1_LISTENING));
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S1_COMPANION, JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE));
-    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S1_COMPANION, JULIA_S2_SUB_STATE_NONE,
+    assert(!julia_fsm_can_transition(JULIA_MAIN_STATE_S1_COMPANION, JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S8_OTA, JULIA_S2_SUB_STATE_NONE));
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S2_DIALOG,
                                     JULIA_S2_SUB_STATE_S2_3_SPEAKING,
@@ -108,15 +108,15 @@ int main(void)
                                     JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S2_DIALOG,
                                     JULIA_S2_SUB_STATE_S2_2_THINKING));
-    assert(!julia_fsm_can_transition(JULIA_MAIN_STATE_S4_INTERACTION,
+    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S4_INTERACTION,
                                      JULIA_S2_SUB_STATE_NONE,
                                      JULIA_MAIN_STATE_S2_DIALOG,
                                      JULIA_S2_SUB_STATE_S2_1_LISTENING));
-    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S5_SILENT, JULIA_S2_SUB_STATE_NONE,
+    assert(!julia_fsm_can_transition(JULIA_MAIN_STATE_S5_SILENT, JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S4_INTERACTION, JULIA_S2_SUB_STATE_NONE));
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S5_SILENT, JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE));
-    assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S6_SLEEP, JULIA_S2_SUB_STATE_NONE,
+    assert(!julia_fsm_can_transition(JULIA_MAIN_STATE_S6_SLEEP, JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S4_INTERACTION, JULIA_S2_SUB_STATE_NONE));
     assert(julia_fsm_can_transition(JULIA_MAIN_STATE_S6_SLEEP, JULIA_S2_SUB_STATE_NONE,
                                     JULIA_MAIN_STATE_S3_STANDBY, JULIA_S2_SUB_STATE_NONE));
@@ -237,7 +237,29 @@ int main(void)
     assert(fsm.main_state == JULIA_MAIN_STATE_S1_COMPANION);
     assert(fsm.s2_sub_state == JULIA_S2_SUB_STATE_NONE);
 
-    /* 唤醒词仍从 S3/S5/S6 进入 S4；运动只把 S6 恢复到 S3。 */
+    /* S5/S6 只允许运动恢复 S3，再由唤醒词进入交互。 */
+    const julia_main_state_t quiet_states[] = {
+        JULIA_MAIN_STATE_S5_SILENT, JULIA_MAIN_STATE_S6_SLEEP,
+    };
+    const fsm_event_t blocked_events[] = {
+        EVT_WAKEUP, EVT_MQTT_DISCONNECTED, EVT_WSS_DISCONNECTED,
+        EVT_SERVICE_CONNECT_TIMEOUT, EVT_OTA_AVAILABLE, EVT_USER_CALL,
+    };
+    for (unsigned i = 0; i < 2; ++i) {
+        julia_fsm_t quiet;
+        enter_standby(&quiet);
+        assert(julia_fsm_handle_event(&quiet, EVT_WAKEUP, NULL));
+        assert(julia_fsm_handle_event(&quiet, i == 0 ? EVT_INTENT_DISMISS : EVT_INTENT_GOODNIGHT, NULL));
+        for (unsigned j = 0; j < sizeof(blocked_events)/sizeof(blocked_events[0]); ++j) {
+            assert(!julia_fsm_handle_event(&quiet, blocked_events[j], NULL));
+            assert(quiet.main_state == quiet_states[i]);
+        }
+        assert(julia_fsm_handle_event(&quiet, EVT_MOTION_WAKE, NULL));
+        assert(quiet.main_state == JULIA_MAIN_STATE_S3_STANDBY);
+        assert(julia_fsm_handle_event(&quiet, EVT_STANDBY_TIMEOUT, NULL));
+        assert(julia_fsm_handle_event(&quiet, EVT_IMU_UNAVAILABLE, NULL));
+        assert(quiet.main_state == JULIA_MAIN_STATE_S3_STANDBY);
+    }
     julia_fsm_t motion_fsm;
     enter_standby(&motion_fsm);
     assert(julia_fsm_handle_event(&motion_fsm, EVT_NIGHT_TIME, NULL));
@@ -252,6 +274,8 @@ int main(void)
     assert(julia_fsm_handle_event(&wake_fsm, EVT_NIGHT_TIME, NULL));
     assert(wake_fsm.main_state == JULIA_MAIN_STATE_S6_SLEEP);
     assert(!julia_fsm_handle_event(&wake_fsm, EVT_BEDTIME, NULL));
+    assert(!julia_fsm_handle_event(&wake_fsm, EVT_WAKEUP, NULL));
+    assert(julia_fsm_handle_event(&wake_fsm, EVT_MOTION_WAKE, NULL));
     assert(julia_fsm_handle_event(&wake_fsm, EVT_WAKEUP, NULL));
     assert(wake_fsm.main_state == JULIA_MAIN_STATE_S4_INTERACTION);
     assert(!julia_fsm_handle_event(&wake_fsm, EVT_USER_CALL, NULL));
@@ -265,12 +289,14 @@ int main(void)
     assert(julia_fsm_handle_event(&dismiss_fsm, EVT_WAKEUP, NULL));
     assert(julia_fsm_handle_event(&dismiss_fsm, EVT_INTENT_GOODNIGHT, NULL));
     assert(dismiss_fsm.main_state == JULIA_MAIN_STATE_S6_SLEEP);
+    assert(!julia_fsm_handle_event(&dismiss_fsm, EVT_WAKEUP, NULL));
+    assert(julia_fsm_handle_event(&dismiss_fsm, EVT_MOTION_WAKE, NULL));
     assert(julia_fsm_handle_event(&dismiss_fsm, EVT_WAKEUP, NULL));
     assert(dismiss_fsm.main_state == JULIA_MAIN_STATE_S4_INTERACTION);
     assert(julia_fsm_handle_event(&dismiss_fsm, EVT_INTENT_DISMISS, NULL));
     assert(dismiss_fsm.main_state == JULIA_MAIN_STATE_S5_SILENT);
     assert(julia_fsm_handle_event(&dismiss_fsm, EVT_SILENT_TIMEOUT, NULL));
-    assert(dismiss_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY);
+    assert(dismiss_fsm.main_state == JULIA_MAIN_STATE_S6_SLEEP);
 
     /* 从 S1 发起的普通听音位于 S2.1，晚安也必须直接进入 S6。 */
     julia_fsm_t dialog_goodnight_fsm;
@@ -368,6 +394,9 @@ int main(void)
     /* OTA 接受、普通失败和成功复位分别对应 S8、S3、S0。 */
     julia_fsm_t ota_fsm;
     julia_fsm_init(&ota_fsm);
+    assert(!julia_fsm_handle_event(&ota_fsm, EVT_OTA_AVAILABLE, NULL));
+    assert(julia_fsm_transition_to(&ota_fsm, JULIA_MAIN_STATE_S3_STANDBY,
+                                   JULIA_S2_SUB_STATE_NONE, EVT_NONE));
     assert(julia_fsm_handle_event(&ota_fsm, EVT_OTA_AVAILABLE, NULL));
     assert(ota_fsm.main_state == JULIA_MAIN_STATE_S8_OTA);
     assert(julia_fsm_handle_event(&ota_fsm, EVT_OTA_SUCCEEDED, NULL));

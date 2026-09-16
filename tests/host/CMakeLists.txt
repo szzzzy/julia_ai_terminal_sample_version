@@ -1,12 +1,28 @@
 cmake_minimum_required(VERSION 3.16)
 project(julia_host_tests C)
 enable_testing()
+add_executable(test_local_capture test_local_capture.c
+    ../../components/julia_board_audio/local_capture.c)
+target_include_directories(test_local_capture PRIVATE ../../components/julia_board_audio/include)
+if(NOT WIN32)
+    target_link_libraries(test_local_capture PRIVATE m)
+endif()
+add_test(NAME local_capture COMMAND test_local_capture)
 add_executable(test_wss_auth_policy test_wss_auth_policy.c)
 target_include_directories(test_wss_auth_policy PRIVATE ../../main/voice)
 add_test(NAME wss_auth_policy COMMAND test_wss_auth_policy)
 find_path(CJSON_DIR cJSON.h
     HINTS "${IDF_PATH}/components/json/cJSON" "$ENV{IDF_PATH}/components/json/cJSON")
 if(CJSON_DIR)
+    add_executable(test_voice_local_capture test_voice_local_capture.c
+        ../../main/voice/voice_control_guard.c ../../components/julia_board_audio/local_capture.c
+        "${CJSON_DIR}/cJSON.c")
+    target_include_directories(test_voice_local_capture PRIVATE local_capture_stubs stubs
+        ../../main/voice ../../components/julia_board_audio/include "${CJSON_DIR}")
+    if(NOT WIN32)
+        target_link_libraries(test_voice_local_capture PRIVATE m)
+    endif()
+    add_test(NAME voice_local_capture COMMAND test_voice_local_capture)
     add_executable(test_voice_control_guard test_voice_control_guard.c
         ../../main/voice/voice_control_guard.c "${CJSON_DIR}/cJSON.c")
     target_include_directories(test_voice_control_guard PRIVATE ../../main/voice "${CJSON_DIR}")
@@ -88,6 +104,20 @@ add_executable(test_julia_fsm test_julia_fsm.c ../../main/fsm/julia_fsm.c)
 target_include_directories(test_julia_fsm PRIVATE stubs ../../main/fsm)
 set_property(TARGET test_julia_fsm PROPERTY C_STANDARD 99)
 add_test(NAME julia_fsm COMMAND test_julia_fsm)
+
+foreach(mode IN ITEMS server local capture)
+    add_executable(test_quiet_power_${mode} test_quiet_power.c)
+    target_include_directories(test_quiet_power_${mode} PRIVATE quiet_power_stubs stubs
+        ../../main/fsm ../../main/context ../../main/network ../../main/voice
+        ../../components/julia_board_audio/include)
+    if(mode STREQUAL "local")
+        target_compile_definitions(test_quiet_power_${mode} PRIVATE CONFIG_JULIA_SERVER_WAKE_ENABLE=0)
+    endif()
+    if(mode STREQUAL "capture")
+        target_compile_definitions(test_quiet_power_${mode} PRIVATE CONFIG_JULIA_LOCAL_CAPTURE_ENABLE=1)
+    endif()
+    add_test(NAME quiet_power_${mode} COMMAND test_quiet_power_${mode})
+endforeach()
 
 add_executable(test_transport_disconnect_fsm test_transport_disconnect_fsm.c
     ../../main/fsm/julia_fsm.c)

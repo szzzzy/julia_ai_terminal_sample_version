@@ -15,6 +15,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/**
+ * 主状态集合。S7 的具体语义由 julia_s7_sub_state_t 补充，S7 本身不是可驻留状态。
+ *
+ * 成员序号会被强转成 uint8_t 写入 NVS 故障快照（见 julia_fault_record_t），
+ * 重排或插入成员会静默改变历史快照的含义，必须与 FAULT_SCHEMA_VERSION 一起调整。
+ */
 typedef enum {
     JULIA_MAIN_STATE_S0_BOOT = 0,       /**< 开机初始化。 */
     JULIA_MAIN_STATE_S1_COMPANION,     /**< 对话结束后的免唤醒陪伴。 */
@@ -28,7 +34,10 @@ typedef enum {
     JULIA_MAIN_STATE_COUNT,
 } julia_main_state_t;
 
-/** 仅归 JULIA_MAIN_STATE_S2_DIALOG 所有的子状态集合。 */
+/**
+ * 仅归 JULIA_MAIN_STATE_S2_DIALOG 所有的子状态集合。序号同样直接进入 NVS 故障快照，
+ * 重排或插入成员时按主状态集合的规则同步快照版本。
+ */
 typedef enum {
     JULIA_S2_SUB_STATE_NONE = 0,           /**< 当前不在 S2。 */
     JULIA_S2_SUB_STATE_S2_1_LISTENING,     /**< 听。 */
@@ -50,16 +59,18 @@ typedef enum {
     EVT_NONE = 0,                 /**< 表示没有外部原因，仅用于初始化。 */
     EVT_USER_LEAVE,
     EVT_USER_CALL,
+    EVT_LOCAL_SPEECH_START,
     EVT_SILENCE_TIMEOUT,
     EVT_NIGHT_TIME,
     EVT_STANDBY_TIMEOUT,          /**< 等待唤醒超过设定时长，准备进入睡眠。 */
-    EVT_SILENT_TIMEOUT,           /**< 保持静默超过设定时长，返回普通待机。 */
+    EVT_SILENT_TIMEOUT,           /**< 静默超时进入 S6，不恢复采音。 */
     EVT_BEDTIME,                  /**< 到达睡前提醒时间；当前只记录，不改变状态。 */
     EVT_START_DIALOG,
     EVT_MULTI_TURN_DETECTED,
     EVT_INTERRUPT,
     EVT_WAKEUP,                   /**< 本地或服务器已经确认用户说出唤醒词。 */
-    EVT_MOTION_WAKE,              /**< S6 中确认明显搬动，恢复到 S3 等待唤醒词。 */
+    EVT_MOTION_WAKE,              /**< S3/S5/S6 中确认明显搬动。capture-v1 下进入 S4 发起交互；
+                                   *   该选项关闭的兼容路径只恢复到 S3 等待唤醒词。 */
     EVT_INTENT_GOODNIGHT,         /**< 用户表达晚安，结束交流并进入睡眠。 */
     EVT_INTENT_DISMISS,           /**< 用户明确结束交流，进入静默状态。 */
     EVT_MQTT_DISCONNECTED,        /**< 控制消息连接断开，当前交流无法完整继续。 */
@@ -75,8 +86,14 @@ typedef enum {
     EVT_VOICE_SESSION_RESET,     /**< 新语音会话不继承旧 S1/S2/S4，重新等待唤醒。 */
     EVT_REQUIRE_WAKE,            /**< 云端请求结束 S1 陪伴；活动交互期间拒绝。 */
     EVT_VOICE_BUSY,              /**< 云端资源忙碌，结束当前交互并回到等待唤醒。 */
+    EVT_IMU_UNAVAILABLE,          /**< 无法可靠检测搬动，退出静默以免无法唤醒。 */
     EVT_COUNT,
 } fsm_event_t;
+
+static inline bool julia_fsm_is_quiet(julia_main_state_t state)
+{
+    return state == JULIA_MAIN_STATE_S5_SILENT || state == JULIA_MAIN_STATE_S6_SLEEP;
+}
 
 typedef struct julia_fsm julia_fsm_t;
 /** enter/exit 在迁移调用栈内同步执行，不得阻塞或递归修改同一 FSM。 */

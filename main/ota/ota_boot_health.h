@@ -6,6 +6,9 @@
  * 镜像前检查分区、物理 Flash、应用描述、堆和基础 FreeRTOS 队列。网络可用性
  * 不属于镜像健康条件，因此不在本模块中检查。
  *
+ * 不变量：本模块只读取本地资源与 OTA 状态，任何检查都不得以联网为前提；后续增加
+ * 验收项时必须保持这一点，否则弱网会把有效镜像判为不健康并触发回滚。
+ *
  * 调用时序（由 ota_boot_flow.c 的 ota_boot_flow_run 在其它业务服务启动前驱动）：
  *   1. ota_boot_health_begin()  读取运行分区是否为 ESP_OTA_IMG_PENDING_VERIFY；
  *   2. ota_boot_health_check()   执行不依赖网络的本地健康检查；
@@ -51,15 +54,15 @@ esp_err_t ota_boot_health_confirm(void);
 esp_err_t ota_boot_health_reject(const char *reason);
 
 /**
- * @brief Product acceptance hook for a PENDING_VERIFY image.
+ * @brief PENDING_VERIFY 镜像的产品验收钩子。
  *
- * Product code may provide a non-weak definition of this function to initialize and
- * verify its critical local services. Return true only after those services are ready;
- * returning false prevents the image from being marked VALID and requests rollback.
- * The hook must not depend on Wi-Fi, DNS, MQTT, or other remote availability.
+ * 产品代码可提供非弱定义版本，用于初始化并校验自己的关键本地服务：只有这些服务
+ * 确实就绪后才返回 true；返回 false 会阻止镜像被标记为 VALID 并请求回滚。
+ * 该钩子不得依赖 Wi-Fi、DNS、MQTT 或其他远程可用性——网络暂时不可达不代表新镜像
+ * 不健康，把联网当作验收条件会让正常固件在弱网环境下被回滚。
  *
- * The example supplies a weak default that succeeds. Test builds can enable
- * CONFIG_OTA_TEST_FORCE_BOOT_HEALTH_FAIL to force this hook to fail.
+ * 示例工程提供“直接成功”的弱默认实现；测试构建可用
+ * CONFIG_OTA_TEST_FORCE_BOOT_HEALTH_FAIL 强制该钩子失败。
  */
 bool ota_boot_health_product_check(void);
 
@@ -74,6 +77,8 @@ bool ota_boot_health_product_check(void);
  * @note 若启用 GPIO 诊断，函数可阻塞；只能在普通任务上下文调用。
  * @note 检查顺序为运行/目标分区、物理 Flash、应用描述、产品配置、堆、FreeRTOS
  *       队列，最后执行可选 GPIO 诊断；不会检查 Wi-Fi、DNS 或 MQTT。
+ * @note 堆门槛 CONFIG_OTA_MIN_FREE_HEAP 与 ota_stability.c 的提交前检查共用同一个
+ *       Kconfig 值，改动会同时影响提交和启动验收。
  */
 bool ota_boot_health_check(bool include_gpio_diagnostic,
                            ota_boot_health_gpio_diagnostic_t gpio_diagnostic);

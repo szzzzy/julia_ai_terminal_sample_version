@@ -12,6 +12,7 @@
  * GOT_IP/STA_DISCONNECTED 丢失后永久停止重试。
  */
 
+#include "julia_power.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -61,13 +62,35 @@ static esp_event_handler_instance_t s_got_ip_handler;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_started;
 static bool s_wifi_driver_started;
+#include <stdatomic.h>
+#include "mqtt_comm.h"
+#include "wss_transport.h"
+static atomic_bool s_power_paused;
+static bool s_services_suspended;
+
+/* 暂停只是请求：置位后由本 Task 通知 WSS/MQTT owner 断开并清理，两者都确认
+ * （wss_transport_is_paused() 与 mqtt_comm_is_paused()）才停射频。恢复时重新启动
+ * 驱动，但服务保持暂停直到重新取得地址后由 IP-ready 回调解除。
+ * 只允许在普通任务上下文调用，ISR 需改用 vTaskNotifyGiveFromISR 变体。 */
+void network_lifecycle_set_paused(bool paused)
+{
+    if (atomic_exchange(&s_power_paused, paused) != paused && s_network_task != NULL)
+        xTaskNotifyGive(s_network_task);
+}
+
+/* 返回暂停请求本身，不代表射频已停或连接已清理；需要判断实际静默应查询各 owner。 */
+bool network_lifecycle_is_paused(void) { return atomic_load(&s_power_paused); }
 /* 下列连接进度只在持有 s_state_lock 时修改；截止时间使用 esp_timer 单调微秒。 */
 static bool s_ip_ready;
 static bool s_connect_attempt_pending;
 static uint32_t s_retry_attempt;
+/* 同一字段承载两种截止时间：s_connect_attempt_pending 为真时是本次 esp_wifi_connect()
+ * 的看门狗截止点，为假时是下一次重连的退避截止点。INT64_MAX 表示当前没有需要唤醒的
+ * 截止时间，Task 因此无限期等待通知（见 network_wait_ticks_until）。 */
 static int64_t s_next_retry_us = INT64_MAX;
 static wifi_config_t s_primary_wifi_config;
-/* Only lifecycle task changes the selected profile; events request rotation. */
+/* 当前 Wi-Fi profile 只由生命周期 Task 改写；事件回调仅置 s_rotate_wifi_profile
+ * 请求轮换，避免事件上下文与 Task 同时修改选择结果。 */
 static unsigned s_wifi_profile;
 static bool s_rotate_wifi_profile;
 static bool s_backup_wifi_available;
@@ -76,7 +99,9 @@ static bool s_third_wifi_available;
 static bool s_initial_scan_logged;
 #endif
 
-/** IP 就绪服务启动回调注册表；注册只发生在 network_lifecycle_start() 之前。 */
+/* IP 就绪服务启动回调注册表。注册只允许发生在 network_lifecycle_start() 之前；
+ * 启动后 s_slot_count、callback 与 arg 不再变化，Task 直接使用表中指针，因此调用方
+ * 必须保证回调与 arg 的生命周期覆盖整个网络运行期。 */
 static network_service_slot_t s_slots[NETWORK_MAX_IP_READY_CALLBACKS];
 static size_t s_slot_count;
 
@@ -88,7 +113,8 @@ static size_t s_slot_count;
 /**
  * @brief 网络模块启动到一半失败时，撤销已经创建的资源，使后续可以重新启动。
  *
- * 按创建顺序的反方向撤销事件监听、后台任务和 Wi-Fi 驱动，避免遗留半启动状态。
+ * 顺序不是简单的创建反序：必须先注销事件监听，再删除 Task，否则已删除的 TaskHandle
+ * 仍可能被事件回调用于 xTaskNotifyGive；随后停 Wi-Fi 驱动、反初始化并销毁 netif。
  * 正常运行不会调用这里。
  */
 static void network_lifecycle_cleanup(void)
@@ -138,9 +164,18 @@ static void network_lifecycle_cleanup(void)
 }
 
 /**
- * 负向抖动保证实际等待永不超过配置上限；attempt 由调用方分别持有，使 Wi-Fi 和
- * 各服务槽位的失败次数互不影响。达到上限后的计算保持 O(1)，长期离线不会让一次
- * 退避计算随历史失败次数增长。
+ * @brief 计算第 attempt 次失败后的等待时间，并推进调用方的失败计数。
+ *
+ * 起点、上限与抖动比例分别取 CONFIG_NETWORK_WIFI_RETRY_BASE_MS/MAX_MS/JITTER_PERCENT
+ * （见 main/Kconfig.projbuild，默认 1000ms、60000ms、20%）；这些取值的测量依据未确认，
+ * 属工程整定值，不是协议要求。抖动为负向随机量，实际等待永不超过配置上限，用于避免
+ * 多台设备同时重试。
+ *
+ * attempt 由调用方分别持有，使 Wi-Fi 与各服务槽位的失败次数互不影响。移位次数封顶 31
+ * 后计算保持 O(1)，长期离线不会让一次退避计算随历史失败次数增长。
+ *
+ * @param[in,out] attempt 调用前的连续失败次数；返回时递增（UINT32_MAX 时保持饱和）。
+ * @return 本次等待时间，单位 ms。
  */
 static uint32_t network_backoff_delay_ms(uint32_t *attempt)
 {
@@ -151,9 +186,8 @@ static uint32_t network_backoff_delay_ms(uint32_t *attempt)
     }
 
     uint32_t delay_ms = base_ms;
-    /* Once the cap is reached, later retries must remain O(1) rather than
-     * looping once per historical outage attempt.  31 shifts covers every
-     * supported base/max ratio with ample margin. */
+    /* 达到上限后仍须保持 O(1)：不能按历史失败次数逐次循环。31 次移位足以覆盖
+     * 所有受支持的 base/max 比例，并留有余量。 */
     uint32_t shifts = *attempt > 31U ? 31U : *attempt;
     while (shifts-- > 0U && delay_ms < max_ms) {
         if (delay_ms > max_ms / 2U) {
@@ -166,6 +200,7 @@ static uint32_t network_backoff_delay_ms(uint32_t *attempt)
         (*attempt)++;
     }
 
+    /* 抖动在上限内侧扣减：设备间错峰，同时保证实际等待不超过 MAX_MS。 */
 #if CONFIG_NETWORK_WIFI_RETRY_JITTER_PERCENT > 0
     uint32_t jitter_range = (delay_ms * CONFIG_NETWORK_WIFI_RETRY_JITTER_PERCENT) / 100U;
     if (jitter_range > 0U) {
@@ -175,6 +210,7 @@ static uint32_t network_backoff_delay_ms(uint32_t *attempt)
     return delay_ms;
 }
 
+/* @return Wi-Fi 重连等待时间，单位 ms（不是 tick）；同时推进 Wi-Fi 自己的失败计数。 */
 static uint32_t network_next_retry_delay_ms(void)
 {
     return network_backoff_delay_ms(&s_retry_attempt);
@@ -306,19 +342,26 @@ static void network_wifi_event_handler(void *arg, esp_event_base_t event_base,
     }
 
     if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (atomic_load(&s_power_paused)) {
+            portENTER_CRITICAL(&s_state_lock);
+            s_ip_ready = false;
+            s_connect_attempt_pending = false;
+            s_next_retry_us = INT64_MAX;
+            portEXIT_CRITICAL(&s_state_lock);
+            return;
+        }
         const wifi_event_sta_disconnected_t *disconnected = event_data;
         int reason = disconnected != NULL ? disconnected->reason : -1;
         uint32_t delay_ms;
         uint32_t retry_attempt;
         portENTER_CRITICAL(&s_state_lock);
-        /* Retry an established network once; rotate after a failed association.
-         * A watchdog and its later DISCONNECTED event coalesce into one flag. */
+        /* 已连上过的网络先原地重试，只有尚未取得地址的关联失败才轮换 profile。
+         * 连接看门狗与其后到达的 DISCONNECTED 会先后置位同一标志，重复置位无副作用。 */
         if (!s_ip_ready) s_rotate_wifi_profile = true;
         s_ip_ready = false;
         s_connect_attempt_pending = false;
-        /* Every disconnect closes the previous association attempt. Schedule
-         * the next one through the capped backoff, whether the failed attempt
-         * was initiated at startup or after an online connection. */
+        /* 每次断开都关闭上一次关联尝试，并用同一条有上限的退避序列安排下一次；
+         * 无论失败来自启动首次关联还是曾经在线之后的掉线。 */
         delay_ms = network_schedule_retry_locked();
         retry_attempt = s_retry_attempt;
         portEXIT_CRITICAL(&s_state_lock);
@@ -342,6 +385,7 @@ static void network_got_ip_handler(void *arg, esp_event_base_t event_base,
     (void)event_id;
 
     const ip_event_got_ip_t *got_ip = event_data;
+    if (atomic_load(&s_power_paused)) return;
     if (got_ip == NULL || got_ip->esp_netif != s_wifi_netif) {
         return;
     }
@@ -366,7 +410,8 @@ static void network_got_ip_handler(void *arg, esp_event_base_t event_base,
  *
  * @param[in] next_retry_us     下一次 Wi-Fi 重连截止时间。
  * @param[in] service_retry_us  最近的服务回调重试截止时间；无则为 INT64_MAX。
- * @return FreeRTOS 等待 tick；无任何截止时间时为 portMAX_DELAY。
+ * @return FreeRTOS 等待 tick（不是 ms）；两个截止时间都是 INT64_MAX 时返回
+ *         portMAX_DELAY，表示只由 Task 通知唤醒，没有时间驱动的唤醒源。
  */
 static TickType_t network_wait_ticks_until(int64_t next_retry_us, int64_t service_retry_us)
 {
@@ -383,14 +428,8 @@ static TickType_t network_wait_ticks_until(int64_t next_retry_us, int64_t servic
     return ticks == 0 ? 1 : ticks;
 }
 
-/**
- * @brief 在 IP 就绪窗口内推进所有服务启动槽位。
- *
- * 对每个"到期且未成功"的槽位调用其回调：成功标记完成，失败按独立退避调度
- * 下一次重试。回调在生命周期任务上下文中执行（不在中断/事件回调中）。
- *
- * @return true 本轮至少调用了一个回调；false 没有可调用的回调。
- */
+/* 使所有尚未成功的槽位立即重新到期，并唤醒 Task。这里不直接调用回调：
+ * 服务启动始终在 network_lifecycle_task 上下文中串行执行。 */
 void network_lifecycle_retry_services(void)
 {
     portENTER_CRITICAL(&s_state_lock);
@@ -404,10 +443,19 @@ void network_lifecycle_retry_services(void)
     if (s_network_task != NULL) xTaskNotifyGive(s_network_task);
 }
 
+/**
+ * @brief 在 IP 就绪窗口内推进所有服务启动槽位。
+ *
+ * 对每个「到期且未成功」的槽位调用其回调：成功标记完成，失败按该槽位独立的退避
+ * 调度下一次重试。回调在生命周期 Task 上下文中执行，不在中断或事件回调中。
+ *
+ * @return true 本轮至少调用了一个回调；false 没有可调用的回调。
+ */
 static bool network_dispatch_service_slots(void)
 {
     bool invoked_any = false;
     for (size_t i = 0; i < s_slot_count; i++) {
+        if (atomic_load(&s_power_paused)) break;
         bool invoke = false;
         network_ip_ready_cb_t callback;
         void *arg;
@@ -481,8 +529,51 @@ static int64_t network_service_retry_deadline(bool ip_ready)
 static void network_lifecycle_task(void *parameter)
 {
     (void)parameter;
+    bool boosted = false;
 
     while (true) {
+        if (atomic_load(&s_power_paused)) {
+            if (boosted) { julia_power_boost_end(); boosted = false; }
+            if (!s_services_suspended) {
+                wss_transport_set_paused(true);
+                mqtt_comm_set_paused(true);
+                s_services_suspended = true;
+            }
+            /* 等待各自 owner 清理连接，再停射频；不跨任务销毁 TLS/MQTT。 */
+            if (wss_transport_is_paused() && mqtt_comm_is_paused() && s_wifi_driver_started) {
+                esp_err_t err = esp_wifi_stop();
+                if (err == ESP_OK) {
+                    s_wifi_driver_started = false;
+                    portENTER_CRITICAL(&s_state_lock);
+                    s_ip_ready = false;
+                    s_connect_attempt_pending = false;
+                    s_next_retry_us = INT64_MAX;
+                    network_reset_service_slots_locked();
+                    portEXIT_CRITICAL(&s_state_lock);
+                    ESP_LOGI(TAG, "Wi-Fi stopped for intentional quiet state");
+                }
+            }
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200));
+            continue;
+        }
+        if (s_services_suspended) {
+            if (!s_wifi_driver_started) {
+                esp_err_t err = esp_wifi_start();
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "Wi-Fi resume failed: %s", esp_err_to_name(err));
+                    (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+                    continue;
+                }
+                s_wifi_driver_started = true;
+            }
+            portENTER_CRITICAL(&s_state_lock);
+            network_reset_service_slots_locked();
+            if (!s_ip_ready) s_next_retry_us = esp_timer_get_time();
+            portEXIT_CRITICAL(&s_state_lock);
+            s_services_suspended = false;
+            /* 服务保持暂停直到取得 IP 后，由注册回调恢复。 */
+            ESP_LOGI(TAG, "Wi-Fi resuming after motion wake");
+        }
         bool ip_ready;
         bool connect_attempt_pending;
         int64_t next_retry_us;
@@ -493,6 +584,9 @@ static void network_lifecycle_task(void *parameter)
         next_retry_us = s_next_retry_us;
         portEXIT_CRITICAL(&s_state_lock);
 
+        if (boosted && (!connect_attempt_pending || ip_ready)) {
+            julia_power_boost_end(); boosted = false;
+        }
         if (ip_ready) {
             if (network_dispatch_service_slots()) {
                 /* 回调可能重新调度了自己或后续槽位；立即回到循环重算截止时间。 */
@@ -532,6 +626,7 @@ static void network_lifecycle_task(void *parameter)
             }
             portEXIT_CRITICAL(&s_state_lock);
             if (!can_connect) continue;
+            boosted = julia_power_boost_begin();
             esp_err_t err = network_apply_wifi_profile();
             if (err == ESP_OK) err = esp_wifi_connect();
             if (err != ESP_OK) {
@@ -574,7 +669,7 @@ esp_err_t network_lifecycle_register_ip_ready(network_ip_ready_cb_t callback, vo
     return result;
 }
 
-esp_err_t network_lifecycle_start(void)
+static esp_err_t network_lifecycle_start_impl(void)
 {
 #if !CONFIG_EXAMPLE_CONNECT_WIFI
     ESP_LOGW(TAG, "Wi-Fi lifecycle is disabled by configuration");
@@ -632,10 +727,9 @@ esp_err_t network_lifecycle_start(void)
             /* Windows 移动热点可能广播 WPA2/WPA3 过渡模式；扫描阶段允许发现 OPEN
              * 阈值以上的 AP，实际加密方式仍由非空密码和 AP 的 RSN IE 协商。 */
             .threshold.authmode = WIFI_AUTH_OPEN,
-            /* Windows Mobile Hotspot advertises WPA2/WPA3 transition mode.
-             * Zero-initializing these fields leaves SAE in hunt-and-peck-only
-             * mode and does not advertise PMF capability; use the ESP-IDF
-             * station example defaults so either WPA2 or WPA3 can negotiate. */
+            /* 这些字段保持 ESP-IDF station 示例的默认值：全部清零会让 SAE 退化为
+             * hunt-and-peck-only 且不声明 PMF 能力，WPA2/WPA3 过渡模式的 AP 可能
+             * 无法完成协商。 */
             .pmf_cfg = {
                 .capable = true,
                 .required = false,
@@ -664,8 +758,9 @@ esp_err_t network_lifecycle_start(void)
         err = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
     }
     if (err == ESP_OK) {
-        /* Global modem sleep keeps continuous voice upload active; the driver
-         * wakes for traffic and sleeps only when the link is idle. */
+        /* 实验配置：全局 MIN_MODEM 省电（覆盖 S2/S4），仅在链路空闲时关闭 RF/PHY，
+         * 不停止 MIC 采集与音频上传。取值与两个计时参数见 docs/WIFI_MODEM_SLEEP_TRIAL.md；
+         * 该文档的实机功耗与交互对比尚未执行，因此这属于实验配置而非既定产品策略。 */
         err = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     }
     if (err != ESP_OK) {
@@ -696,11 +791,18 @@ esp_err_t network_lifecycle_start(void)
     return ESP_OK;
 
 failed:
-    /* Startup failures are logged to the caller and do not abort app_main.
-     * Tear down the partial singleton so a deliberate later call can retry
-     * initialization without leaking a task, netif, or event registration. */
+    /* 启动失败只向调用方报错，不终止 app_main；这里拆掉半初始化的单例，
+     * 使后续一次刻意的重试不会再创建第二套 Task、netif 或事件监听。 */
     ESP_LOGE(TAG, "Unable to start Wi-Fi lifecycle: %s", esp_err_to_name(err));
     network_lifecycle_cleanup();
     return err;
 #endif
+}
+
+esp_err_t network_lifecycle_start(void)
+{
+    bool boosted = julia_power_boost_begin();
+    esp_err_t err = network_lifecycle_start_impl();
+    if (boosted) julia_power_boost_end();
+    return err;
 }

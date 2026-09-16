@@ -51,10 +51,10 @@ static const char *TAG = "ota_control_plane";
 /** SHA-256 文本采用两个十六进制字符表示一个字节。 */
 #define OTA_CONTROL_PLANE_SHA256_HEX_LEN (NATIVE_OTA_SHA256_SIZE * 2U)
 
-/** OTA application versions use exactly three numeric components: major.minor.patch. */
+/** 应用版本必须恰好由三段数字组成：major.minor.patch（例如 1.0.0）。 */
 #define OTA_CONTROL_PLANE_VERSION_PARTS 3U
 
-/** Parsed numeric application version used for precedence comparison. */
+/** 解析后的数值版本，用于逐段比较新旧顺序。 */
 typedef struct {
     uint32_t part[OTA_CONTROL_PLANE_VERSION_PARTS];
 } ota_control_plane_version_t;
@@ -233,10 +233,12 @@ static bool ota_control_plane_get_i64(const cJSON *item, int64_t *value)
  * 结果对“应不应该下载”的判断是确定性的。
  * ------------------------------------------------------------------------- */
 /**
- * @brief Parse an exact three-part numeric version such as 1.0.0.
+ * @brief 解析恰好三段的纯数字版本号，例如 1.0.0。
  *
- * Each component is parsed independently as uint32_t. Empty components,
- * signs, suffixes, extra components and integer overflow are rejected.
+ * 每段独立按 uint32 解析；空段、正负号、后缀、多余段和整数溢出都被拒绝，因此比较结果
+ * 对“是否下载”的判断是确定的。
+ *
+ * @return true 文本为合法三段数字版本并已写入 version；false 格式不符。
  */
 static bool ota_control_plane_parse_version(const char *text,
                                             ota_control_plane_version_t *version)
@@ -274,7 +276,7 @@ static bool ota_control_plane_parse_version(const char *text,
     return true;
 }
 
-/** Return -1, 0 or 1 by major, then minor, then patch precedence. */
+/** 依次比较 major、minor、patch；返回 -1/0/1 表示左侧低于/等于/高于右侧。 */
 static int ota_control_plane_compare_version(const ota_control_plane_version_t *left,
                                              const ota_control_plane_version_t *right)
 {
@@ -552,7 +554,8 @@ esp_err_t ota_control_plane_parse_server_response(const char *json, size_t json_
     manifest->force_update = (force_update != NULL) && cJSON_IsTrue(force_update);
 
     /* 设备时间尚未同步时 now 可能不可用；此时跳过过期比较，但不放宽字段格式校验。 */
-    /* now 的单位为 Unix 秒；时间无效/尚未同步时通常返回非正值。 */
+    /* now 的单位为 Unix 秒；未同步/无效时通常返回非正值，因此 expires_at 的合法性
+     * 无法在这里判定——跳过比较意味着“时钟不可信阶段仍可能接受已过期清单”。 */
     time_t now = time(NULL);
     if (now > 0 && manifest->expires_at <= (int64_t)now) {
         ESP_LOGW(TAG, "OTA artifact %s has expired", manifest->artifact_id);

@@ -4,11 +4,13 @@
  *
  * 本模块只负责让操作系统拥有可信时间，不决定设备何时睡眠。早于 2024-01-01 的
  * 时间视为 RTC 尚未设置或网络尚未同步，调用方必须暂停夜间判断。
+ * 本文件里的"时间"一律指墙钟：epoch 秒（time()/settimeofday()）叠加 CONFIG_JULIA_TIMEZONE
+ * 时区；esp_timer_get_time() 的"启动以来单调微秒"不是墙钟，两者不可互换。
  *
  * 线程模型：
  *   - s_time_valid / s_sntp_started 由 s_lock（portMUX）保护，可被 IP-ready 回调
- *     （网络任务）与 julia_time_valid()（可能来自其它任务）并发读写。
- *   - 与 julia_context.c 是两条独立同步路径，都会写同一块 PCF85063 RTC（见问题清单）。
+ *     （网络任务）与 julia_time_valid() 并发读写。
+ *   - 本模块是当前构建里唯一写 PCF85063 的路径：开机从 RTC 恢复，SNTP 同步后写回。
  */
 #include "julia_time.h"
 
@@ -20,26 +22,32 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_netif_sntp.h"
+#include "julia_night_schedule.h"
 #include "freertos/FreeRTOS.h"
 #include "sdkconfig.h"
 
 /* "时间已设置"的判定基准：2024-01-01 00:00:00 UTC 的 epoch。
- * 任何早于此的系统时间/ RTC 值都被视为无效（RTC 尚未写过、SNTP 还没同步）。 */
+ * 任何早于此的系统时间/ RTC 值都被视为无效（RTC 尚未写过、SNTP 还没同步）。
+ * 本模块判定的是"墙钟"：time()/settimeofday() 的 epoch 秒，经 CONFIG_JULIA_TIMEZONE
+ * 时区换算。esp_timer_get_time() 那种"启动以来的单调微秒"不含 RTC/SNTP 校正，既不能
+ * 用来和 JULIA_VALID_EPOCH 比较，也不是本模块认可的时间来源。 */
 #define JULIA_VALID_EPOCH 1704067200LL /* 2024-01-01 00:00:00 UTC */
 
-/* 日志标签与 julia_context 共用，便于在同一日志流里观察时间相关消息。 */
+/* 日志标签沿用 "JULIA_CONTEXT"：未参与当前构建的 julia_context.c 使用同一标签，
+ * 因此日志里出现该标签时必须按消息内容区分来源。 */
 static const char *TAG = "JULIA_CONTEXT";
 /* 墙钟是否已因"RTC 恢复或 SNTP 同步"而被标记为可信。 */
 static bool s_time_valid;
 /* SNTP 是否已经发起过（用于防止 ip_ready 回调重复启动）。 */
 static bool s_sntp_started;
-/* 保护上面两个布尔量不受并发读写竞争的临界区锁（可在 ISR? 否——SNTP 回调在任务上下文）。 */
+/* 保护上面两个布尔量的临界区锁。进入者都是任务上下文（网络任务与查询方），
+ * 因此用 portMUX 而不是 mutex 即可满足要求，也不会在临界区里阻塞。 */
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
 /*
- * 校验一个板级 RTC 时间值的合理性。范围比 julia_context.c 的 valid_time 更严格
- * （含 minute/second < 60）。年份限制到 2069，与 RTC 芯片表示范围一致。
- * 返回 false 表示该值不可信（RTC 未设过/读出为 0/乱码），不应写入系统时钟。
+ * 在板级校验之上再加一道产品门槛：RTC 编解码保证 1970～2069 内的日期自洽，这里要求
+ * 年份不早于 2024，用来识别"从没写过的 RTC"。返回 false 表示该值不可信，不得用它
+ * 设置系统时钟，也不得让夜间调度据此判断。
  */
 static bool datetime_valid(const board_rtc_datetime_t *value)
 {
@@ -70,6 +78,9 @@ static void mark_time_valid(void)
 static void sync_rtc_from_system(struct timeval *tv)
 {
     (void)tv;
+    /* 先唤醒夜间调度再写 RTC：同步回调意味着系统时间刚刚被校正，即使写 RTC 失败，
+     * 调度也应按新时间重算当前小时与睡眠宽限。 */
+    julia_night_schedule_notify();
     if (!board_rtc_ready()) return;
     time_t now = time(NULL);
     if ((int64_t)now < JULIA_VALID_EPOCH) return;
@@ -194,13 +205,17 @@ esp_err_t julia_time_ip_ready(void *arg)
 }
 
 /*
- * @brief 查询墙钟是否可信。
+ * @brief 查询墙钟（RTC/SNTP 校正过的 epoch 秒）是否可信。
  * @return true 表示系统时间可用（RTC 恢复或 SNTP 同步已把这时间标为有效，
  *              或即便标志未置、系统时钟本身也已越过 2024-01-01 这一有效基准）。
  *
- * 设计要点：即便 s_time_valid 是 false（例如只做了 RTC 恢复但没走 mark_time_valid 的
- * 情况——实际都会走），也会用 now >= JULIA_VALID_EPOCH 兜底判断；因此"是否可信"
- * 最终由"系统时钟是否已超过 2024-01-01"这一硬基准决定，宽容地接受两条同步路径。
+ * 设计要点：s_time_valid 只是快速路径，且它是单向的——一旦为 true 就直接返回，不再复核
+ * 当前时间：此后即使墙钟被改到基准之前（或被人为改动），本函数仍返回 true；标志为真是
+ * "曾经由 RTC 恢复或 SNTP 同步标记过"，不等于"此刻的时间仍与外部基准一致"。
+ * 标志为假时才会用 now >= JULIA_VALID_EPOCH 兜底，此时"是否可信"由系统时钟是否越过
+ * 2024-01-01 决定，RTC 恢复与 SNTP 同步两条路径都被接受。
+ * 夜间调度以本函数为准，返回 false 时必须暂停判断。它查询的是墙钟，与 esp_timer 的
+ * 单调时间无关（单调时间不参与可信性判定）。
  */
 bool julia_time_valid(void)
 {

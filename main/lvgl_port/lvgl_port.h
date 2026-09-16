@@ -23,14 +23,17 @@
 
 /** 创建双缓冲、同步对象、LVGL task 和 tick timer；失败也可能留下资源，不可直接重试。 */
 esp_err_t lvgl_port_init(esp_lcd_panel_handle_t panel_handle);
-/** init 成功后取得递归 LVGL mutex；timeout_ticks 使用 FreeRTOS tick。 */
+/** init 成功后取得递归 LVGL mutex；timeout_ticks 使用 FreeRTOS tick。
+ *  只允许在任务上下文调用：ISR、SPI 完成回调和定时器回调都不得取锁或调用 LVGL API。 */
 bool lvgl_port_lock(TickType_t timeout_ticks);
 /** 只能由持有递归 LVGL mutex 的同一任务配对调用。 */
 void lvgl_port_unlock(void);
-/* 只控制 panel 和 flush，不控制背光；成功表示硬件已应用，失败由 LVGL task 重试。 */
+/* 只控制 panel 和 flush，不控制背光；成功表示硬件已应用，失败由 LVGL task 重试。
+ * 与刷新暂停的差别：息屏会停 LVGL tick 定时器，唤醒时按实际停表时间补 lv_tick_inc。 */
 esp_err_t lvgl_port_set_display_off(bool off);
 bool lvgl_port_display_off(void);
-/* 冻结动画和刷新但保留当前画面，适合短时独占显示，不代表屏幕已经关闭。 */
+/* 冻结动画和刷新但保留当前画面，适合短时独占显示，不代表屏幕已经关闭。
+ * tick 定时器不停，恢复后 LVGL 看到的已流逝时间包含暂停区间。 */
 void lvgl_port_set_refresh_paused(bool paused);
 bool lvgl_port_refresh_paused(void);
 /** SPI ISR callback：只发送完成信号，不得访问 LVGL 对象。 */

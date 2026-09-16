@@ -4,6 +4,11 @@
  *
  * 语音服务只说明当前交流阶段并提供已播放声音；本模块把这些信息转换为表情。
  * 睡眠策略可切换到闭眼画面。界面同步由模块内部完成，调用方不需要操作 LVGL 锁。
+ *
+ * 不变量：对话相位（IDLE/LISTENING/THINKING/SPEAKING）、dozing 与状态／离线／电量
+ * 叠加层互相独立——相位由语音与 FSM 驱动，offline 由连接状态驱动，电量由电池监控驱动。
+ * 设置相位不会清除 offline 标签，主状态切换也不会改写电量显示。相位只描述呈现，
+ * 不参与行为状态判定。
  */
 #pragma once
 
@@ -23,6 +28,8 @@ typedef enum {
 
 /** 创建 Julia 立绘并启动眨眼、呼吸和嘴型更新。 */
 esp_err_t julia_avatar_init(void);
+/** S6 阻塞后台 UI 更新；恢复后重新同步状态与嘴型。 */
+void julia_avatar_set_suspended(bool suspended);
 
 /**
  * 播放一次开机睁眼与快速眨眼。重复调用不会重复创建对象；结束后保持清醒立绘，
@@ -54,17 +61,21 @@ void julia_avatar_set_dozing(bool active);
 /** 查询当前交流画面阶段，不触发重绘。 */
 julia_avatar_dialog_phase_t julia_avatar_get_dialog_phase(void);
 
-/** 设置固定在屏幕左上侧的黑色小号状态叠字；UI 未初始化时先缓存。 */
+/** 设置固定在屏幕左上侧的黑色小号状态叠字；UI 未初始化时先缓存。
+ *  取 LVGL 锁超时只丢弃本次刷新，avatar 任务每 40ms 会重新同步，最终一致。 */
 void julia_avatar_set_status_text(const char *text);
 /**
  * 设置与主状态正交的离线叠加层。UI 尚未初始化时缓存请求；函数内部串行 LVGL
  * 访问，调用方不得直接操作标签对象。主状态切换不会隐式清除该标志。
+ * 与状态叠字一样，锁超时由 avatar 任务在下一帧自动补上。
  */
 void julia_avatar_set_offline(bool offline);
 
 /**
  * 设置状态文字上方的常驻电量提示：正常显示黑色 BAT，低电量显示红色 LOW；
  * 未检测到有效电池电压时隐藏。百分比按5%取整，是带载电压的近似换算。
+ * 注意本条没有自动重试：取 LVGL 锁超时时本次更新丢失，要等下一次电量上报
+ * （CONFIG_JULIA_BATTERY_MONITOR_INTERVAL_SECONDS 周期）才会刷新。
  */
 void julia_avatar_set_battery_status(bool present, bool low, uint8_t percent);
 

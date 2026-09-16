@@ -87,13 +87,15 @@ static bool record_is_valid(const ota_resume_record_t *record)
 /**
  * @brief 从独立的 ota_resume namespace 读取 OTA 恢复记录。
  *
- * @param[out] record 输出记录；失败时会清零，不允许为 NULL。
+ * @param[out] record 输出记录；读取前会先清零，各失败路径也会再次清零，不允许为 NULL。
  * @return ESP_OK 读取到尺寸和 schema 均有效的记录。
  * @return ESP_ERR_NOT_FOUND 没有保存过记录。
  * @return ESP_ERR_INVALID_VERSION blob 尺寸或 schema 与当前实现不兼容。
  * @return 其他 esp_err_t NVS 打开或读取失败。
  *
  * @note 必须在 nvs_flash_init() 成功后调用；函数只执行一次短暂 NVS 读取，不等待网络。
+ * @note 无效记录只被忽略、不被擦除：NVS 中仍留着旧 blob，直到下一次成功保存覆盖它或
+ *       调用 ota_state_store_clear()。调用方看到 ESP_ERR_INVALID_VERSION 时按无记录处理。
  */
 esp_err_t ota_state_store_load(ota_resume_record_t *record)
 {

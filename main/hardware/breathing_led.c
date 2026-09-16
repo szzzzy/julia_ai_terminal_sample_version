@@ -5,6 +5,9 @@
  * 本模块拥有业务轮廓和过渡元组，底层 julia_led 拥有 RMT。transition_to() 只登记
  * 目标；没有持续调用 update() 就不会推进动画。当前实际构建没有 tick 调用点，
  * 相关旧 UI 源码也未参与构建，因此这些接口只能视为待接入策略。
+ *
+ * 任何会落到 julia_led 的路径都要求 julia_led_init() 已经成功执行：julia_led 的
+ * set_* 入口直接使用自己的 mutex，不检查句柄是否为空。
  */
 
 #include "breathing_led.h"

@@ -58,6 +58,17 @@ COMMON = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <setjmp.h>
+#ifndef CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+#define CONFIG_JULIA_LOCAL_CAPTURE_ENABLE 0
+#endif
+static bool voice_local_capture_ready(void){return false;}
+static bool voice_local_capture_text(const uint8_t *p,size_t n){return false;}
+static void julia_quiet_power_notify(void){}
+static void julia_night_schedule_notify(void){}
+static void julia_motion_notify(void){}
+static void julia_avatar_set_suspended(bool x){}
+static void voice_playback_set_interaction(bool x){}
+static void board_audio_mic_set_enabled(bool enabled){}
 #include "esp_err.h"
 #define ESP_ERR_INVALID_SIZE 0x104
 #define ESP_ERR_NOT_SUPPORTED 0x106
@@ -91,6 +102,7 @@ def run_case(args, name, prefix, units, main, extra=()):
     command = [args.cc, "-I" + str(root / "tests/host/stubs"),
                "-I" + str(root / "main/fsm"), "-I" + str(root / "main/hardware"), str(code)]
     command += [str(root / p) for p in extra] + ["-o", str(exe)]
+    if name in ("fsm_recovery", "voice_recovery"): command.insert(1,"-DCONFIG_JULIA_LOCAL_CAPTURE_ENABLE=1")
     subprocess.run(command, check=True)
     subprocess.run([str(exe)], check=True)
 
@@ -104,7 +116,10 @@ def backlight(args):
 #define BL_MAX_DUTY 1023U
 #define BREATHE_LUT_SEGMENTS 120U
 #define BREATHE_MIN_SEGMENT_MS 5U
-#define BREATHE_ZERO_HOLD_PERCENT 15U
+#define BREATHE_ZERO_HOLD_PERCENT 60U
+#define BL_TIMER 0
+static bool s_pwm_paused;
+static int ledc_timer_resume(int mode,int timer){return 0;}
 #define JULIA_DISPLAY_LOG 0
 #define LEDC_FADE_NO_WAIT 0
 static uint8_t s_percent,s_min_percent,s_max_percent;
@@ -142,7 +157,7 @@ static void vTaskDelayUntil(TickType_t *last,TickType_t increment){assert(!depth
 static TickType_t xTaskGetTickCount(void){return 0;}
 '''
     run_case(args, "backlight_recovery", prefix + tables, [("main/ui/julia_backlight.c", [
-        "control_lock", "control_unlock", "duty_for", "curve_duty", "start_segment", "breathe_task",
+        "control_lock", "control_unlock", "resume_pwm", "duty_for", "curve_duty", "start_segment", "breathe_task",
         "julia_backlight_breathe_stop", "julia_backlight_set", "julia_backlight_breathe_start_ex"])], r'''
 int main(void) {
     assert(julia_backlight_breathe_start_ex(5,30,4000,120)==ESP_OK);
@@ -194,7 +209,13 @@ def display(args):
     prefix = r'''
 static void *s_panel=(void*)1,*s_panel_mutex=(void*)1;
 static bool s_display_off=true,s_display_target_off=true,s_display_state_known=true;
-static int64_t s_wake_started_us;
+static int64_t s_wake_started_us,s_tick_stopped_us;
+static void *s_tick_timer=(void*)1,*s_lvgl_task;
+#define LVGL_TICK_PERIOD_MS 2
+static int esp_timer_stop(void *t){return ESP_OK;}
+static int esp_timer_start_periodic(void *t,int us){return ESP_OK;}
+static void lv_tick_inc(unsigned ms){}
+static void xTaskNotifyGive(void *t){}
 static unsigned attempts;static bool fail=true;
 static int xSemaphoreTake(void *s,unsigned ticks){return 1;}
 static void xSemaphoreGive(void *s){}
@@ -287,6 +308,7 @@ static void *s_state_observer_ctx;
 static fsm_runtime_message_t queued;
 static bool pending;
 static bool wake_before_dispatch;
+static bool s_quiet_recovery;
 static bool mqtt_ready=true,wss_ready=true;
 static bool cloud_ready=true;
 static bool voice_state_sync_is_ready(void){return cloud_ready;}
@@ -375,7 +397,9 @@ int main(void){
     assert(julia_fsm_runtime_post_sync(EVT_NIGHT_TIME)==ESP_OK && s_fsm.main_state==JULIA_MAIN_STATE_S6_SLEEP);
     assert(julia_fsm_runtime_post_sync(EVT_WAKEUP)==ESP_OK);
     assert(julia_fsm_runtime_post_sync(EVT_INTENT_DISMISS)==ESP_OK);
-    now=s_silent_deadline_us;runtime_check_deadlines();assert(s_fsm.main_state==JULIA_MAIN_STATE_S3_STANDBY);
+    now=s_silent_deadline_us;runtime_check_deadlines();assert(s_fsm.main_state==JULIA_MAIN_STATE_S6_SLEEP);
+    assert(julia_fsm_runtime_post_sync(EVT_MOTION_WAKE)==ESP_OK && s_fsm.main_state==JULIA_MAIN_STATE_S4_INTERACTION);
+    assert(julia_fsm_runtime_post_sync(EVT_VOICE_SESSION_RESET)==ESP_OK);
     assert(julia_fsm_runtime_post_sync(EVT_OTA_AVAILABLE)==ESP_OK && s_fsm.main_state==JULIA_MAIN_STATE_S8_OTA);
     assert(julia_fsm_runtime_post_sync(EVT_OTA_TASK_FAILED)==ESP_OK && s_fsm.main_state==JULIA_MAIN_STATE_S3_STANDBY);
     assert(julia_fsm_runtime_post_sync(EVT_WSS_DISCONNECTED)==ESP_OK);
@@ -439,7 +463,7 @@ int main(void){
     /* Sleep and OTA must not be woken/aborted by session establishment. */
     runtime_process_event(EVT_NIGHT_TIME);runtime_process_event(EVT_VOICE_SESSION_RESET);
     assert(s_fsm.main_state==JULIA_MAIN_STATE_S6_SLEEP);
-    runtime_process_event(EVT_MOTION_WAKE);runtime_process_event(EVT_OTA_AVAILABLE);
+    runtime_process_event(EVT_MOTION_WAKE);runtime_process_event(EVT_VOICE_SESSION_RESET);runtime_process_event(EVT_OTA_AVAILABLE);
     runtime_process_event(EVT_VOICE_SESSION_RESET);
     assert(s_fsm.main_state==JULIA_MAIN_STATE_S8_OTA);
     runtime_process_event(EVT_OTA_TASK_FAILED);
@@ -470,7 +494,8 @@ typedef struct {struct {uint8_t ssid[32],password[64];bool bssid_set;unsigned ch
 static wifi_config_t s_primary_wifi_config,applied;
 static unsigned s_wifi_profile;
 static bool s_rotate_wifi_profile,s_backup_wifi_available=true,s_ip_ready,s_connect_attempt_pending;
-static bool s_third_wifi_available;
+static bool s_third_wifi_available,s_power_paused;
+#define atomic_load(p) (*(p))
 static uint32_t s_retry_attempt;
 static int64_t s_next_retry_us,now;
 static void *s_network_task=(void*)1;
@@ -739,6 +764,8 @@ int main(void){
 def voice(args):
     prefix = r'''
 #include "julia_fsm.h"
+typedef enum {LC_START,LC_END} lc_event_t;
+typedef enum {LC_WAKE,LC_DIALOG} lc_mode_t;
 #define CONFIG_JULIA_SERVER_WAKE_ENABLE 1
 #define CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE 1
 #define CONFIG_JULIA_DIALOG_REPLY_TIMEOUT_SECONDS 30
@@ -768,7 +795,7 @@ static void voice_service_on_fsm_state(julia_main_state_t m,julia_s2_sub_state_t
 static void voice_test_enter(julia_fsm_t *f,julia_main_state_t m,julia_s2_sub_state_t s,fsm_event_t e){voice_service_on_fsm_state(m,s,e,NULL);}
 static julia_main_state_t julia_fsm_runtime_get_state(void){return fsm.main_state;}
 static julia_s2_sub_state_t julia_fsm_runtime_get_s2_sub_state(void){return fsm.s2_sub_state;}
-static esp_err_t julia_fsm_runtime_post(fsm_event_t e){async_posts++;return ESP_OK;}
+static esp_err_t julia_fsm_runtime_post(fsm_event_t e){async_posts++;return julia_fsm_handle_event(&fsm,e,NULL)?ESP_OK:ESP_ERR_INVALID_STATE;}
 static esp_err_t julia_fsm_runtime_post_sync(fsm_event_t e){return julia_fsm_handle_event(&fsm,e,NULL)?ESP_OK:ESP_ERR_INVALID_STATE;}
 static void julia_idle_display_note_activity(void){}
 static void julia_idle_display_set_busy(bool b){busy=b;}
@@ -803,12 +830,15 @@ static esp_err_t wss_transport_send_now(uint8_t op,const uint8_t *s,size_t n){
         "voice_service_apply_mic_start", "voice_service_apply_mic_stop",
         "interaction_id_is_valid", "voice_service_handle_wake_json",
         "voice_service_on_server_text", "voice_service_on_fsm_state", "voice_service_state_ready_poll",
-        "voice_service_reply_timeout_poll"])], r'''
+        "voice_service_reply_timeout_poll", "voice_service_local_capture_event"])], r'''
 int main(void){
     julia_fsm_init(&fsm);fsm.on_enter=voice_test_enter;
     julia_fsm_transition_to(&fsm,JULIA_MAIN_STATE_S3_STANDBY,JULIA_S2_SUB_STATE_NONE,EVT_NONE);
     julia_fsm_handle_event(&fsm,EVT_WAKEUP,NULL);
     voice_service_apply_mic_start();voice_service_apply_mic_stop();
+    assert(!s_dialog_listening && s_reply_deadline_us==0);
+    voice_service_local_capture_event(LC_START,LC_DIALOG);
+    voice_service_local_capture_event(LC_END,LC_DIALOG);
     assert(s_reply_deadline_us==30000000);
     cloud_ready=false;
     voice_service_on_server_text((const uint8_t*)"SPKS 16000",10);
@@ -816,7 +846,7 @@ int main(void){
     cloud_ready=true;
     voice_service_on_server_text((const uint8_t*)"SPKS 16000",10);
     assert(s_reply_deadline_us==0);
-    assert(starts==1 && fsm.s2_sub_state==JULIA_S2_SUB_STATE_S2_3_SPEAKING && async_posts==0);
+    assert(starts==1 && fsm.s2_sub_state==JULIA_S2_SUB_STATE_S2_3_SPEAKING && async_posts==2);
     fsm.main_state=JULIA_MAIN_STATE_S8_OTA;s_dialog_listening=false;busy=false;
     voice_service_apply_mic_start();assert(!s_dialog_listening && !busy);
     fsm.main_state=JULIA_MAIN_STATE_S4_INTERACTION;fsm.s2_sub_state=JULIA_S2_SUB_STATE_NONE;
@@ -879,12 +909,13 @@ int main(void){
     voice_service_speaker_done();assert(fsm.main_state==JULIA_MAIN_STATE_S6_SLEEP);
     voice_service_apply_mic_start();assert(fsm.main_state==JULIA_MAIN_STATE_S6_SLEEP);
     assert(voice_service_handle_wake_json((const uint8_t*)"{}",2));
-    voice_service_apply_mic_start();voice_service_apply_mic_stop();
+    voice_service_local_capture_event(LC_START,LC_DIALOG);
+    voice_service_local_capture_event(LC_END,LC_DIALOG);
     voice_service_on_server_text((const uint8_t*)"SPKS 16000",10);
     assert(fsm.s2_sub_state==JULIA_S2_SUB_STATE_S2_3_SPEAKING);
     voice_service_apply_mic_start();
-    assert(fsm.s2_sub_state==JULIA_S2_SUB_STATE_S2_1_LISTENING && s_dialog_listening && !playing);
-    puts("PASS: ordered MIC_STOP/SPKS, retained state_ready, bounded reply wait and deadline cancellation");return 0;
+    assert(fsm.s2_sub_state==JULIA_S2_SUB_STATE_S2_3_SPEAKING && !s_dialog_listening && playing);
+    puts("PASS: local capture/SPKS, ignored old MIC commands, retained state_ready, bounded reply wait and deadline cancellation");return 0;
 }
 ''', ["main/fsm/julia_fsm.c"])
 

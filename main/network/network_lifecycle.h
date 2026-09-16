@@ -9,6 +9,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdbool.h>
 
 #include "esp_err.h"
 
@@ -31,16 +32,20 @@ typedef esp_err_t (*network_ip_ready_cb_t)(void *arg);
  * @brief 登记一项“联网后才能启动”的服务。
  *
  * 每次重新获得 IPv4 地址，所有已登记服务都会按顺序重新确认启动。成功后在本次
- * 网络连接期间不再重复调用；失败时逐步延长等待时间并加入随机偏移，避免多台设备
- * 同时重试压垮服务器。Wi-Fi 再次断开后，本轮启动结果自动失效。
+ * 网络连接期间不再重复调用；失败时按该槽位独立的退避逐步延长等待时间，并减去
+ * 最多 CONFIG_NETWORK_WIFI_RETRY_JITTER_PERCENT 的负向随机抖动（多设备错峰，
+ * 实际等待不会超过上限）。Wi-Fi 再次断开后，本轮启动结果自动失效。
  *
- * @param[in] callback 联网后要执行的启动函数，不允许为 NULL。
- * @param[in] arg      传给该启动函数的业务数据，可为 NULL。
+ * @param[in] callback 联网后要执行的启动函数，不允许为 NULL；在本模块 Task 上下文
+ *                     中串行调用，因此不得无限阻塞。
+ * @param[in] arg      传给该启动函数的业务数据，可为 NULL；生命期必须覆盖整个网络
+ *                     运行期，本模块只保存指针、不做拷贝。
  *
  * @return ESP_OK 注册成功。
  * @return ESP_ERR_INVALID_ARG callback 为 NULL。
  * @return ESP_ERR_NO_MEM 回调表已满。
- * @return ESP_ERR_INVALID_STATE 网络生命周期已经启动（必须在启动前注册）。
+ * @return ESP_ERR_INVALID_STATE 网络生命周期已经启动（必须在启动前注册，启动后
+ *         注册表只读）。
  *
  * @note 不允许在中断上下文中调用。
  */
@@ -59,6 +64,20 @@ esp_err_t network_lifecycle_register_ip_ready(network_ip_ready_cb_t callback, vo
  * @note 不允许在中断上下文中调用。
  */
 esp_err_t network_lifecycle_start(void);
+
+/**
+ * @brief 请求进入或退出主动静默（省电）状态。
+ *
+ * true 只是请求：本模块 Task 先通知 WSS/MQTT owner 断开并清理连接，两者都确认后
+ * 才停止无线电；false 重新启动驱动，但联网服务仍保持暂停，直到重新取得 IPv4 地址
+ * 后由 IP-ready 回调恢复。当前调用方为 `app/julia_quiet_power.c`。
+ *
+ * @note 可在普通任务上下文调用；不得从 ISR 调用。
+ */
+void network_lifecycle_set_paused(bool paused);
+
+/** 返回当前的暂停请求，不代表无线电已停或连接已清理；无请求时为 false。 */
+bool network_lifecycle_is_paused(void);
 
 /**
  * 清除未成功服务的独立退避并唤醒 network_lifecycle Task。已成功槽位保持不变；

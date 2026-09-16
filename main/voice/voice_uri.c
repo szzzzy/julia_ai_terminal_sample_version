@@ -12,8 +12,6 @@
  *
  * 调用方：voice_service_push_file()（WSS 会话任务上下文）。映射本身无阻塞、无锁、
  * 无 GPIO/网络，可安全在任何任务上下文调用，也不必持有 SD 锁。
- *
- * 数据流：URI 字符串 -> 前缀匹配 -> 相对路径段安全性校验 -> "%s/%s" 拼接 -> 返回路径。
  */
 
 #include "voice_uri.h"
@@ -31,8 +29,9 @@
  *
  * 设计说明（隐藏不变量）：
  *   - 空段（如 "a//b" 里的双斜杠、首尾斜杠）会被 strcspn 加连续跳过分隔符的
- *     循环直接折叠，因此首尾斜杠/重复斜杠不构成拒绝条件——这使 "SD:/x" 与
- *     "SD://x" 都归一化到 "/sdcard/x"，属于"宽松归一化"而非安全漏洞。
+ *     循环直接跳过，因此首尾斜杠/重复斜杠不构成拒绝条件。跳过只影响校验，不改写
+ *     返回值：拼接仍是 snprintf("%s/%s")，"SD://x" 得到的是 "/sdcard//x"，
+ *     而不是折叠成 "/sdcard/x"。
  *   - 本函数只校验"段"本身，不校验字符串长度；长度上限由上层缓冲区里的
  *     snprintf 结果判断（voice_uri_to_path 中 n >= path_cap 分支）。
  *
@@ -63,10 +62,7 @@ static bool voice_uri_segments_safe(const char *rel)
 }
 
 /**
- * @brief 把 FILE_SEND URI 换算为受控根目录内的本地文件路径（见 voice_uri.h）。
- *
- * 数据流：uri -> strncmp 前缀匹配（区分 "SD:/" 与 "SPIFFS:/"）-> 取相对段 rel
- *         -> voice_uri_segments_safe 校验 -> snprintf("%s/%s", root, rel) -> path。
+ * @brief 把 FILE_SEND URI 换算为受控根目录内的本地文件路径（映射规则见 voice_uri.h）。
  *
  * @param[in]  uri      URI 字符串，不允许为 NULL；前缀匹配区分大小写（"sd:/" 不匹配）。
  * @param[out] path     输出路径缓冲区，不允许为 NULL。
@@ -74,6 +70,8 @@ static bool voice_uri_segments_safe(const char *rel)
  * @return true 换算成功，path 已写入 NUL 结尾路径。
  * @return false 前缀不支持、rel 为空、包含不安全路径段、或拼接结果超出缓冲区。
  *
+ * @note 失败时 path 不可用：snprintf 在报告截断之前已经写入了部分路径，
+ *       调用方只能依据返回值判断，不能读取或保留 path 内容。
  * @note 结果路径保留 rel 的结尾斜杠（如 "SD:/x/" -> "/sdcard/x/"），可能指向目录
  *       而非文件；当前调用方按文件 fopen，若遇到目录路径会得到 open 失败。
  * @note 该映射不检查文件是否存在、扩展名或大小；调用方仍需自行 open 并校验。

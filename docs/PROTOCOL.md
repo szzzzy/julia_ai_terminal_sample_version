@@ -1,8 +1,10 @@
 # 设备通信协议
 
+> 2026-09-15 新增 [capture-v1 分段协议](LOCAL_CAPTURE.md#4-报文)。默认开发固件先协商能力，再发送固件定义的 start / PCM2 / end；下文 PCM1 与云端 MIC_START/MIC_STOP 作为旧固件兼容协议保留。新路径仍复用本文 WSS、下行播放和 control-v1 身份约束。配套云端补丁尚未部署。
+
 `0.1.4` 严格多设备模式要求 [control_protocol=1](MULTIDEVICE_CONTROL_V1.md)，包括轮次确认与 MQTT 执行 ACK；旧单设备模式仍保留原编码。
 
-2026-09-10 多设备阶段改造、云端源码核对差异及严格模式限制见 [多设备协议核对](MULTIDEVICE_CONTRACT.md)。严格模式默认关闭；本文旧共享主题与凭证回退仅适用于旧模式。
+2026-09-10 多设备阶段改造、云端源码核对差异及严格模式限制见 [多设备协议核对](MULTIDEVICE_CONTRACT.md)。严格模式（`CONFIG_JULIA_MULTI_DEVICE_ENABLE`）在当前 `sdkconfig.defaults` 与开发配置中均为启用；本文旧共享主题与凭证回退仅适用于关闭该选项的旧模式。
 
 文档版本：V1.1。本文描述当前设备实现，供服务器联调使用。身份与版本基线见 [构建与发布](BUILD_AND_RELEASE.md)，限制与验证分别见 [工程边界](COMMENT_AUDIT_FINDINGS.md) 和 [验收清单](VALIDATION.md)。
 
@@ -22,7 +24,7 @@ MQTT 与 WSS 各自配置地址，不存在统一的 `JULIA_SERVER_ADDR` 配置�
 
 地址由 `CONFIG_WSS_SERVER_HOST`、`CONFIG_WSS_SERVER_PORT`、`CONFIG_WSS_PATH` 组成，端口默认 9443，路径默认 `/voice`。
 
-设备发送 `Authorization: Bearer <token>`，token 优先取 `CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE`，为空时取 `CONFIG_WSS_TOKEN`。该选择独立于 MQTT 的认证模式；空 token 不在本地拒绝，服务器应负责拒绝无效认证。
+设备发送 `Authorization: Bearer <token>`，token 优先取 `CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE`，为空时取 `CONFIG_WSS_TOKEN`。该选择独立于 MQTT 的认证模式；空或非法 token 由设备在 TLS 建连前本地拒绝并进入重试退避（`wss_transport.c` 的 `wss_auth_token_valid()`），服务器仍应负责拒绝无效认证。
 
 WSS 使用 `server_certs/ca_cert.pem` 验证证书链；当前传输实现设置 `skip_common_name=true`，跳过服务器名称校验。此行为属于开发安全限制，不应描述为完整服务器身份校验。
 
@@ -44,7 +46,7 @@ WSS 使用 `server_certs/ca_cert.pem` 验证证书链；当前传输实现设置
 
 ### 3.1 唤醒模式
 
-`CONFIG_JULIA_SERVER_WAKE_ENABLE=y` 为默认模式：新 WSS 会话先将旧 S1/S2/S4 校正到 S3，再打开持续上传，不继承旧会话的免唤醒资格；S3/S5/S6、故障和 OTA 状态不受此重置影响。服务器命中唤醒词后先通过同一 WSS 连接发送 `wake_detected` JSON；设备提交 S1/S3/S5/S6→S4 后回 `state_ready`，服务器收到回执后才能发送唤醒回应。允许 S1 接受唤醒确认，是为了兼容云端已经结束免唤醒窗口、设备仍显示陪伴的情况。实际用户话语开始再发送 `MIC_START`。
+`CONFIG_JULIA_SERVER_WAKE_ENABLE=y` 为默认模式：新 WSS 会话先将旧 S1/S2/S4 校正到 S3，再打开持续上传，不继承旧会话的免唤醒资格；S3/S5/S6、故障和 OTA 状态不受此重置影响。服务器命中唤醒词后先通过同一 WSS 连接发送 `wake_detected` JSON；设备提交 S1/S3→S4 后回 `state_ready`，服务器收到回执后才能发送唤醒回应。允许 S1 接受唤醒确认，是为了兼容云端已经结束免唤醒窗口、设备仍显示陪伴的情况。实际用户话语开始再发送 `MIC_START`。
 
 关闭该开关时，设备编译本地 WakeNet，模型名称为 `wn9_nihaoxiaozhi_tts`、显示唤醒词为“你好小智”。本地命中后请求打开上传；该动作不是向服务器发送一条 `MIC_START` 文本。模型是否已正确烧入 `model` 分区必须单独验证。两种模式是编译选择，没有自动断网切换。
 
@@ -56,9 +58,9 @@ WSS 使用 `server_certs/ca_cert.pem` 验证证书链；当前传输实现设置
 - `SPKE`：标记音频输入结束，排空已接收的 PCM 和 DMA 尾音后回到待机；默认服务器唤醒模式继续上传。
 - 本地唤醒模式在播放完成后启动陪伴上传计时，达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 300 秒）无后续对话时停止上传。
 - `MIC_STOP`、闭眼表情、夜间状态均不是隐私静音命令。
-- WSS transport 会话结束时关闭上传、停止播放、丢弃旧 generation PCM 并清除监听／忙碌状态；S1～S6 通过 `EVT_WSS_DISCONNECTED` 进入 S7.1。新连接从空 ring 按所选唤醒模式启动，不恢复旧业务轮次。
+- WSS transport 会话结束时关闭上传、停止播放、丢弃旧 generation PCM 并清除监听／忙碌状态；S1～S4 非主动休眠恢复期间通过 `EVT_WSS_DISCONNECTED` 进入 S7.1。新连接从空 ring 按所选唤醒模式启动，不恢复旧业务轮次。
 - MQTT 会话断开时，S1～S6 通过 `EVT_MQTT_DISCONNECTED` 进入 S7.1；Wi-Fi 仅负责承载与重连，不直接驱动行为状态。S8 的 OTA 链路错误继续由 OTA 恢复策略处理。
-- 独立服务状态启动为 `CONNECTING`；默认 30 秒内 MQTT 关键订阅和 WSS 认证会话未全部就绪，则按首次离线进入 S7.1。首次从 `CONNECTING/ONLINE` 变为 `OFFLINE` 时，S7.1 播放固件内嵌的 16kHz 单声道 PCM16 提示语音并显示 `S7.1 DISCONNECTED` 三秒，不记录严重故障也不复位。提示结束后，S3/S5/S6 返回原状态；S1/S2/S4 均绑定旧 WSS generation，断联后进入 S3，即使提示期间已经重连也不恢复旧会话。保持 `OFFLINE` 期间的重复断联或另一链路随后断开只更新原因，不重复播报；MQTT/WSS 全部恢复后隐藏标签并允许下一轮提示。
+- 独立服务状态启动为 `CONNECTING`；默认 30 秒内 MQTT 关键订阅和 WSS 认证会话未全部就绪，则按首次离线进入 S7.1。首次从 `CONNECTING/ONLINE` 变为 `OFFLINE` 时，S7.1 播放固件内嵌的 16kHz 单声道 PCM16 提示语音并显示 `S7.1 DISCONNECTED` 三秒，不记录严重故障也不复位。提示结束后，S3 返回原状态；S5/S6 主动休眠不进入断联提示；S1/S2/S4 均绑定旧 WSS generation，断联后进入 S3，即使提示期间已经重连也不恢复旧会话。保持 `OFFLINE` 期间的重复断联或另一链路随后断开只更新原因，不重复播报；MQTT/WSS 全部恢复后隐藏标签并允许下一轮提示。
 
 ### 3.2 PCM1 格式
 
@@ -82,8 +84,8 @@ PCM1 不包含会话编号、话语编号或采样时间戳。服务器应把连
 
 | 命令 | 设备行为 |
 | --- | --- |
-| `{"type":"wake_detected","interaction_id":"wake_<ms>"}` | S1/S3/S5/S6 投递 `EVT_WAKEUP`；FSM 提交 S4 后设备回 `state_ready` |
-| `MIC_START` | 普通交互中清空待播 PCM、使旧播放代次失效并标记实际话语开始；S4 中不改变主状态。终止提示期间忽略；v2 服务器唤醒模式下 S3/S5/S6 必须先收到 wake_detected |
+| `{"type":"wake_detected","interaction_id":"wake_<ms>"}` | S1/S3 投递 `EVT_WAKEUP`；FSM 提交 S4 后设备回 `state_ready` |
+| `MIC_START` | 普通交互中清空待播 PCM、使旧播放代次失效并标记实际话语开始；S4 中不改变主状态。终止提示期间忽略；v2 服务器唤醒模式下 S3 必须先收到 wake_detected；S5/S6 忽略语音命令 |
 | `MIC_STOP` | 结束当前监听并进入思考；没有活动话语时忽略；不关闭 streaming |
 | `SPKS <rate>` | S4 且等待唤醒回应时作为 WAKE_REPLY，播放完成仍留 S4；S2.2 时作为正常回答并进入 S2.3；其他状态拒绝 |
 | `SPKV <n>` | 暂不执行动态调音；收到后记录并忽略，使用固件配置的固定音量 |
@@ -113,9 +115,9 @@ S4 已提交         设备 → 服务器：{"type":"state_ready","interaction_i
 
 服务器应等待匹配 `interaction_id` 的 `state_ready` 再发送唤醒回应；当前服务器配置可在 2 秒超时后降级发送，设备届时若已处于 S4 仍可接受。不要把裸 `SPKS` 当作任意状态下的对话启动命令。播放期间服务端确认用户插话时可发送 `MIC_START`，设备会取消当前播放；迟到旧 SPKS 或新播放期间迟到旧 SPKE 仍需服务器按轮次避免。
 
-播放任务使用 64KiB PSRAM 缓冲：启动／欠载后以 80ms 音频量为预缓冲目标，从首个缓冲数据开始最多等待 120ms；SPKE 可立即放行不足目标的短尾段。播放小块为 160 样本，I2S 写入使用 50ms 等待参数并校验短写。750ms 断流不会自动关播；在无待播数据时，距最近输入／开播达到 15 秒则报告播放超时。
+播放任务使用 128KiB PSRAM 缓冲（`voice_playback.c` 的 `PLAYBACK_CAPACITY_BYTES`）：启动／欠载后以 1000ms 音频量为预缓冲目标，从首个缓冲数据开始最多等待 1500ms；SPKE 可立即放行不足目标的短尾段。播放小块为 160 样本，I2S 写入使用 50ms 等待参数并校验短写。750ms 断流不会自动结束整轮播放；在无待播数据时，距最近输入／开播达到 15 秒则报告播放超时。
 
-服务端应按播放速率推流，64KiB 约对应 24kHz 的 1.37 秒或 16kHz 的 2.05 秒 PCM。缓冲满时明确中止该次播放并返回 `ERROR playback_overflow`，不静默截断；超时／驱动失败分别返回 `ERROR playback_timeout`／`ERROR playback_failed`。未开播或 SPKE 后继续到来的 PCM 不被接受。
+服务端应按播放速率推流，128KiB 约对应 24kHz 的 2.73 秒或 16kHz 的 4.10 秒 PCM。缓冲满时明确中止该次播放并返回 `ERROR playback_overflow`，不静默截断；超时／驱动失败分别返回 `ERROR playback_timeout`／`ERROR playback_failed`。未开播或 SPKE 后继续到来的 PCM 不被接受。
 
 ### 4.1 接收、播放和完成的区别
 
@@ -161,7 +163,7 @@ URI 前缀区分大小写：`SD:/x.wav` 对应 `/sdcard/x.wav`，`SPIFFS:/x.wav`
 | 服务器 → 设备 | `/device/ota/response/<device_id>` | OTA 响应，订阅 QoS 1 |
 | 服务器 → 设备 | `/device/ota/notify/<device_id>` | 检查通知，订阅 QoS 1 |
 | 设备 → 服务器 | `/device/ota/status/<device_id>` | OTA 生命周期／进度，QoS 1 |
-| 服务器 → 设备 | `voice/esp32s3/vcmd` | 语音作业，订阅 QoS 1，非 critical |
+| 服务器 → 设备 | `voice/<device_id>/vcmd`（旧模式为 `voice/esp32s3/vcmd`） | 语音作业，订阅 QoS 1；严格多设备模式下按 critical 注册并阻塞就绪判定，旧共享主题为非 critical |
 
 语音主题是配置中的完整字符串，不自动拼接 device_id。多设备使用同一主题会收到相同命令，需在部署与权限设计中隔离。
 

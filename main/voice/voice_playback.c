@@ -2,7 +2,7 @@
  * @file voice_playback.c
  * @brief 用固定容量缓冲吸收网络抖动，并由单一后台任务连续驱动扬声器。
  *
- * 收到开始命令后先等待约 80 ms 声音，避免刚开播就因网络小间隔产生断续；
+ * 收到开始命令后先积累约 1 秒声音，观察较大预缓冲对网络抖动和播放连贯性的改善；
  * 输入短暂停顿时重新积累，连续 15 秒没有可播放数据才判定超时。服务器声明结束后，
  * 设备会播放所有已接受声音并补足扬声器硬件尾音，再报告“实际播放完成”。
  * 用户插话或新一轮播放会使旧编号失效，旧任务不能覆盖新一轮状态。固件内嵌
@@ -23,10 +23,12 @@
 
 #define PLAYBACK_CAPACITY_BYTES (128U * 1024U)
 #define PLAYBACK_CHUNK_SAMPLES 160U
-#define PLAYBACK_PREBUFFER_MS 80U
-#define PLAYBACK_PREBUFFER_WAIT_MS 120U
+#define PLAYBACK_PREBUFFER_MS 1000U
+#define PLAYBACK_PREBUFFER_WAIT_MS 1500U
 #define PLAYBACK_STARVE_MS 15000U
-/* 结束输入后再写入略多于扬声器硬件队列容量的静音，确保已接受的尾音真正离开硬件。 */
+/* 结束输入后再写入略多于扬声器硬件队列容量的静音，确保已接受的尾音真正离开硬件。
+ * 板级 DMA 队列为 4×160 帧（components/julia_board_audio/board_audio.c 的
+ * dma_desc_num/dma_frame_num），5×160 样本必须大于该容量；改板级 DMA 配置时同步此处。 */
 #define PLAYBACK_DRAIN_SAMPLES (5U * PLAYBACK_CHUNK_SAMPLES)
 
 static const char *TAG = "voice_playback";
@@ -36,6 +38,7 @@ static pcm_buffer_t s_buffer;
 static uint32_t s_generation;
 static uint32_t s_rate;
 static bool s_active;
+static bool s_keep_resources;
 static bool s_test;
 /* 本地源不复制，三个字段均受 s_lock 保护；调用方必须保证源覆盖播放生命周期。 */
 static const uint8_t *s_local_pcm;
@@ -72,6 +75,8 @@ static void playback_task(void *arg)
     (void)arg;
     uint32_t owned_generation = 0;
     bool device_started = false;
+    bool resources_kept = false;
+    int64_t last_write_us = 0;
     bool buffering = true;
     int64_t buffering_since = 0;
     size_t drain_samples = 0;
@@ -84,12 +89,18 @@ static void playback_task(void *arg)
         uint32_t generation = s_generation;
         uint32_t rate = s_rate;
         bool active = s_active;
+        bool keep_resources = s_keep_resources;
         bool test = s_test;
         bool local = s_local_pcm != NULL;
         bool ended = local ? s_local_offset >= s_local_bytes : s_buffer.ended;
         size_t queued = s_buffer.size;
         int64_t last_input = s_last_input_us;
         unlock();
+
+        if (resources_kept != keep_resources) {
+            if (board_audio_speaker_retain(keep_resources) == ESP_OK)
+                resources_kept = keep_resources;
+        }
 
         if (owned_generation != generation || !active) {
             if (device_started) (void)board_audio_speaker_stop();
@@ -104,17 +115,14 @@ static void playback_task(void *arg)
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             continue;
         }
-        if (!device_started) {
-            esp_err_t err = board_audio_speaker_start(rate);
-            if (err != ESP_OK) {
-                (void)board_audio_speaker_stop();
-                complete(generation, err);
-                continue;
-            }
-            device_started = true;
-        }
-
         int64_t now = esp_timer_get_time();
+        /* 距上次成功写入 60ms（毫秒）后仍没有待播数据，就释放硬件时钟；
+         * 无待播输入时不持续输出空时钟。 */
+        if (device_started && (buffering || !queued) && !local && !test && !ended &&
+            now - last_write_us >= 60000) {
+            (void)board_audio_speaker_stop();
+            device_started = false;
+        }
         if (test && !ended) {
             /* 三段 256 ms 音调之间留短静音；每 160 sample 检查一次取消，避免采用
              * 板级阻塞自检时无法及时响应新播放代次。 */
@@ -145,6 +153,8 @@ static void playback_task(void *arg)
             unlock();
         } else if (queued > 0) {
             if (buffering_since == 0) buffering_since = now;
+            /* 预缓冲目标为 1000ms 音频量，从首个缓冲数据起最多等 1500ms；
+             * ended 表示服务器已声明发完，短尾段直接放行，不再凑目标（PROTOCOL.md §4）。 */
             if (buffering && !ended && queued < rate * 2U * PLAYBACK_PREBUFFER_MS / 1000U &&
                 now - buffering_since < PLAYBACK_PREBUFFER_WAIT_MS * 1000LL) {
                 ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
@@ -157,6 +167,8 @@ static void playback_task(void *arg)
             }
             unlock();
         } else if (!ended) {
+            /* 输入短暂停顿不立即判失败：重新积累预缓冲继续等；只有距最近一次输入／
+             * 开播达到 15 秒仍无可播数据才以 ESP_ERR_TIMEOUT 结束本轮。 */
             buffering = true;
             buffering_since = 0;
             if (now - last_input >= PLAYBACK_STARVE_MS * 1000LL) {
@@ -185,6 +197,18 @@ static void playback_task(void *arg)
         unlock();
         if (bytes == 0 || !current) continue;
 
+        if (!device_started) {
+            /* 播放任务是唯一 I2S 写入者；board_audio_speaker_start() 在已有播放源时
+             * 会先停掉旧源（后开优先），所以不能再引入第二个写入者接管同一通道。 */
+            esp_err_t start_err = board_audio_speaker_start(rate);
+            if (start_err != ESP_OK) {
+                (void)board_audio_speaker_stop();
+                complete(generation, start_err);
+                continue;
+            }
+            device_started = true;
+        }
+
         esp_err_t err = board_audio_speaker_write((const uint8_t *)pcm, bytes);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "generation=%lu I2S failed: %s", (unsigned long)generation,
@@ -192,6 +216,7 @@ static void playback_task(void *arg)
             complete(generation, err);
             continue;
         }
+        last_write_us = esp_timer_get_time();
         /* UI 只接收已经写入 I2S 的块，不接收网络突发。取消最多与一个块并发，
          * talking 门控会拒绝该迟到块重新驱动嘴型。 */
         lock();
@@ -207,6 +232,8 @@ static void playback_task(void *arg)
 
 esp_err_t voice_playback_init(audio_pcm_sink_t pcm_sink, void *ctx)
 {
+    /* 幂等：s_task 非空即视为已初始化。失败路径释放锁和缓冲，但 public 接口都以
+     * s_task == NULL 作为“未初始化”判据，因此不会访问已释放的资源。 */
     if (s_task != NULL) return ESP_OK;
     s_lock = xSemaphoreCreateMutex();
     if (s_lock == NULL) return ESP_ERR_NO_MEM;
@@ -232,11 +259,24 @@ esp_err_t voice_playback_init(audio_pcm_sink_t pcm_sink, void *ctx)
     return ESP_OK;
 }
 
+void voice_playback_set_interaction(bool enabled)
+{
+    /* 由 FSM 观察者按主状态调用：S4/S2 为 true，保留 I2S 通道减少反复重建；
+     * 其他状态为 false，仅在空闲时删除通道，不打断仍在播放的语音。 */
+    if (!s_lock) return;
+    lock();
+    s_keep_resources = enabled;
+    unlock();
+    if (s_task) xTaskNotifyGive(s_task);
+}
+
 esp_err_t voice_playback_start(uint32_t rate, bool self_test, uint32_t *generation)
 {
     if (s_task == NULL) return ESP_ERR_INVALID_STATE;
     if (generation == NULL || (rate != 16000 && rate != 24000)) return ESP_ERR_INVALID_ARG;
     lock();
+    /* generation 每轮 +1 并跳过 0；0 在本地表示“无播放代次”，也是无条件停止的入参，
+     * 因此对外暴露的代次永不为 0。 */
     if (++s_generation == 0) ++s_generation;
     *generation = s_generation;
     s_timing = (voice_playback_timing_t){.generation = s_generation};
@@ -314,7 +354,8 @@ static uint16_t read_le16(const uint8_t *p)
 esp_err_t voice_playback_start_local_wav(const uint8_t *wav, size_t bytes,
                                          bool only_if_idle, uint32_t *generation)
 {
-    /* 资源由构建系统控制；固定头校验避免按错误采样格式驱动扬声器。 */
+    /* 资源由构建系统控制；只认固定 44 字节头且 data 块必须位于偏移 36，
+     * 否则按错误采样格式驱动扬声器。其他结构合法但布局不同的 WAV 会被拒绝。 */
     if (wav == NULL || bytes < 44 || memcmp(wav, "RIFF", 4) != 0 ||
         memcmp(wav + 8, "WAVE", 4) != 0 || memcmp(wav + 36, "data", 4) != 0 ||
         read_le16(wav + 20) != 1 || read_le16(wav + 22) != 1 ||
@@ -336,7 +377,9 @@ esp_err_t voice_playback_write(const uint8_t *pcm, size_t bytes)
     if (!s_active || s_test || s_local_pcm != NULL || s_buffer.ended) {
         result = ESP_ERR_INVALID_STATE;
     } else if (!pcm_buffer_write(&s_buffer, pcm, bytes)) {
-        /* 中间丢一块会破坏整句连续性，因此显式终止本轮，不能静默截断后继续。 */
+        /* 中间丢一块会破坏整句连续性，因此显式终止本轮，不能静默截断后继续。
+         * 完成槽有两个写入者：这里的溢出路径与播放任务的 complete()，两者都必须在
+         * s_lock 内写并携带自己的 generation，否则旧任务会覆盖新一轮的完成结果。 */
         ++s_overflows;
         s_completion_generation = s_generation;
         s_completion_result = ESP_ERR_NO_MEM;
@@ -366,6 +409,7 @@ static bool stop_generation(uint32_t generation)
 {
     if (s_task == NULL) return false;
     lock();
+    /* 代次不符直接放弃：迟到的收尾不得停掉已经开始的下一轮播放。 */
     if (generation != 0 && generation != s_generation) {
         unlock();
         return false;

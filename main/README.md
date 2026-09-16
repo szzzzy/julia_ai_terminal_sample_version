@@ -1,5 +1,7 @@
 # main 源码组织与运行架构
 
+> 当前默认开发配置已启用 capture-v1：板级输出完整 320 样本 PCM1 给 `voice_local_capture`，由采音任务维护底噪、预录和段编号，再通过同一 FIFO 上传 start / PCM2 / end。普通段结束由本地事件进入 Think；云端不再下发 MIC 起止。S3/S5/S6 保持连接。详见 [当前链路](../docs/LOCAL_CAPTURE.md)。以下有关“连续 PCM1 上传、云端 MIC_START/MIC_STOP”的描述属于 `CONFIG_JULIA_LOCAL_CAPTURE_ENABLE=n` 的兼容路径，不能套用到新路径。
+
 文档版本：V1.2。实现核对日期：2026-09-03。项目入口见 [README](../README.md)，源文件注册见 [CMakeLists.txt](CMakeLists.txt)，注释写法见 [源码注释规范](../docs/CODE_COMMENT_STYLE.md)。
 
 ## 模块职责
@@ -10,7 +12,7 @@
 | --- | --- |
 | `app/` | `main.c` 装配服务；`julia_idle_display.c` 维护活动时间与显示忙碌状态 |
 | `voice/` | `voice_service.c` 处理语音业务；`voice_playback.c` 与 `pcm_buffer.c` 管理播放；`wss_transport.c` 管理传输；`voice_uri.c` 映射文件路径 |
-| `network/` | Wi-Fi 后台生命周期、MQTT 主题路由与 OTA 控制；`http_downloader.c` 提供通用下载器 |
+| `network/` | Wi-Fi 后台生命周期、MQTT 主题路由与 OTA 控制；`http_downloader.c` 是音频素材下载使用的 HTTPS 下载器，OTA 在 `ota_engine.c` 内保留独立 HTTP 循环，两者只共用响应头采集与 Content-Range 解析 |
 | `ota/` | OTA 清单校验、下载、持久化、隔离／冷却、启动验收及可靠状态上报 |
 | `audio/` | 音频素材清单和下载引擎；应用只调用初始化占位入口，未接通 MQTT 下载触发 |
 | `fsm/` | `julia_fsm.c` 定义状态图和现有事件映射；`julia_fsm_runtime.c` 串行处理事件、S3/S7.1 计时和异常呈现；`julia_fault.c` 保存 S7.2 严重故障快照 |
@@ -45,12 +47,12 @@
 以 [app/main.c](app/main.c) 的实际调用顺序为准：
 
 1. 进入 `app_main()` 后立即把当前板卡验证的 GPIO7 `BAT_Control` 拉高以锁存电池供电（可由 `CONFIG_JULIA_BAT_CONTROL_GPIO` 适配其它批次），将 CPU 上限限制为80MHz，并初始化 GPIO8 `BAT_ADC`；然后由 `ota_boot_flow_run()` 初始化 NVS、网络基础设施与事件循环，处理镜像健康检查、启动确认／回滚和报告对账。
-2. 初始化背光、LCD、LVGL、Avatar，以最高25%背光顺序执行眨眼序列。
+2. 初始化背光、LCD、LVGL、Avatar，以最高 `CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT`（当前 50%）背光顺序执行眨眼序列。
 3. 动画完成后依次注册语音命令、初始化板级音频与独立播放任务、音频素材服务和 RTC，并挂载 SD；高电流阶段之间默认间隔250ms。
 4. 启动闲置显示和 FSM；关键显示、音频或语音依赖失败时进入 S7.2，否则由 S0 直接进入等待唤醒词的 S3。
 5. FSM 就绪后启动夜间、运动及可选本地唤醒输入。
 6. 注册的 IP-ready 回调保持关闭，直到本地运行时就绪后才最后启动 Wi-Fi；额外诊断扫描默认关闭，发射功率上限默认14dBm。
-7. 打开交互启动门槛，Wi-Fi 启动稳定默认等待1500ms后将 CPU 上限切到160MHz；MQTT／WSS 仅在此前置条件满足后启动。
+7. 启动 Wi-Fi 之前先把 CPU 上限从 `CONFIG_JULIA_BOOT_CPU_MAX_FREQ_MHZ`（80MHz）切到 `CONFIG_JULIA_RUNTIME_CPU_MAX_FREQ_MHZ`（160MHz）；Wi-Fi 启动后再等待 `CONFIG_JULIA_BOOT_SETTLE_DELAY_MS`（默认1500ms）稳定，最后打开交互启动门槛；MQTT／WSS 仅在此前置条件满足后启动。
 8. 仅在 `CONFIG_VOICE_PUSH_DEMO_ENABLE` 启用时启动文件推送演示。
 
 启动流程刻意用更长时间换取较低的重叠峰值；网络不可达不阻塞本地运行时。OTA 通用检查在最前执行；新镜像在关键应用初始化完成后才确认，验收失败保留回滚路径。RTC 年份编码仍保留旧格式，格式迁移待多版本联调。`JULIA_BATTERY` 的 `power_hold`、`ota_ready`、`display_ready`、`audio_ready`、`storage_ready`、`runtime_ready`、`wifi_started` 与 `wifi_settled` 日志用于比较各阶段电池电压，不能据此直接计算电流或充电状态。进入运行期后 `battery_monitor` 默认每10秒更新滤波电压，并维护 NORMAL／LOW 提示状态；它不进入行为FSM。当前采用单节3.7V、750mAh锂电池，保留老师指定的3.40V=0%、3.55V=15%标定点，按非线性表插值并以5%步进显示。有效电池始终在状态文字上方显示百分比：正常为黑色 `BAT xx%`，低电量为红色 `LOW xx%`；仅电压无效时隐藏。软件不再根据电压趋势推测充电，充电中／充满以ETA6098板载红灯为准。
@@ -69,12 +71,12 @@ Wi-Fi 关联失败后从约 1 秒开始指数退避，最大 60 秒并带最多 
 | MQTT 事件上下文 | 分片重组与路由；语音命令入队；PUBACK 交给报告处理流程 |
 | `julia_fsm` | 从 16 槽消息队列读取行为事件或严重故障；修改唯一运行实例、管理 S3 计时并应用呈现 |
 | LVGL／Avatar 任务 | LVGL 周期处理；Avatar 每 40ms 读取嘴型和相位状态，使用 LVGL 锁 |
-| 闲置／夜间／运动任务 | 闲置和夜间任务投递 FSM 事件；IMU 在 S6 确认明显运动后投递 `EVT_MOTION_WAKE`，由FSM恢复S3 |
+| 闲置／夜间／运动任务 | 闲置和夜间任务投递 FSM 事件；IMU 在 S3/S5/S6 确认明显运动后投递 `EVT_MOTION_WAKE`，由 FSM 进入 S4 发起交互 |
 | OTA 下载与报告任务 | 下载／Flash 工作与 MQTT 事件处理分离；报告按 event_id 关联 PUBACK |
 
 MIC 使用 256 槽（约 5.12 秒、168KB）的 PSRAM SPSC ring，MQTT 控制作业使用独立 4 槽队列。2 的幂容量保证 32 位序号回绕后槽位映射仍连续。正常每轮发送 1 个 MIC 帧；检测到积压后每轮最多 8 帧且不超过 8ms，控制队列仍优先处理且每轮最多 4 条。ring 满时 producer 只关闭入口并请求 `audio_overflow`，WSS owner 统一丢弃本轮、销毁连接和重连，不把缺帧音频继续交给 ASR。FILE_SEND 每轮最多发送一个 1200 字节块，文件区间暂停并清空 MIC ring，END 后从实时新帧恢复。
 
-下行 PCM 写入 64KiB PSRAM 环形缓冲，播放任务独占 I2S；共享互斥只保护缓冲和状态，不覆盖 I2S 或 UI。播放分为唤醒回应、正常回答和自检三种角色：唤醒回应播完保持 S4，只有正常回答播完才由 S2.3 回 S1。MIC_START／断链使旧播放代次失效并清空缓冲。
+下行 PCM 写入 128KiB PSRAM 环形缓冲，播放任务独占 I2S；共享互斥只保护缓冲和状态，不覆盖 I2S 或 UI。播放分为唤醒回应、正常回答和自检三种角色：唤醒回应播完保持 S4，只有正常回答播完才由 S2.3 回 S1。MIC_START／断链使旧播放代次失效并清空缓冲。
 
 ### 实时音频模块边界
 
@@ -101,11 +103,11 @@ MIC 使用 256 槽（约 5.12 秒、168KB）的 PSRAM SPSC ring，MQTT 控制作
 麦克风 I2S 原始采样在送入本地 AFE 和 WSS 上行前统一应用 `CONFIG_JULIA_MIC_GAIN_PERCENT` 数字增益，当前默认 70%；100% 表示不缩放。
 扬声器固定音量为 50%，由 `CONFIG_JULIA_SPEAKER_VOLUME_PERCENT` 配置，回答、断网、低电量、晚安及结束交流提示共用；暂时忽略服务端 `SPKV` 命令，调整音量需重新编译烧录。
 
-默认服务器唤醒模式中，WSS 建连后立即持续上传麦克风声音。服务器命中唤醒词后发送带 `interaction_id` 的 `wake_detected`；设备提交 S3/S5/S6→S4 并回 `state_ready`，随后唤醒回应的 `SPKS` 临时启用闭眼底图上的独立嘴层，播完闭嘴并仍停留 S4。实际有效话语以 `MIC_START` 标记开始、`MIC_STOP` 进入 S2.2“想”，正常回答 `SPKS` 进入 S2.3“说”，实际播完回 S1。收到 MQTT `goodnight`／`dismiss` 时，在 S4 播放“好的，晚安”／“那我不烦你了”并同步嘴型，实际播完再进入 S6／S5；若 MIC_STOP 已使设备进入 S2，则先回到 S4 再播报。细节与时序见 [通信协议](../docs/PROTOCOL.md)。
+默认服务器唤醒模式中，WSS 建连后立即持续上传麦克风声音。服务器命中唤醒词后发送带 `interaction_id` 的 `wake_detected`；设备提交 S3→S4 并回 `state_ready`，随后唤醒回应的 `SPKS` 临时启用闭眼底图上的独立嘴层，播完闭嘴并仍停留 S4。实际有效话语以 `MIC_START` 标记开始、`MIC_STOP` 进入 S2.2“想”，正常回答 `SPKS` 进入 S2.3“说”，实际播完回 S1。收到 MQTT `goodnight`／`dismiss` 时，在 S4 播放“好的，晚安”／“那我不烦你了”并同步嘴型，实际播完再进入 S6／S5；若 MIC_STOP 已使设备进入 S2，则先回到 S4 再播报。细节与时序见 [通信协议](../docs/PROTOCOL.md)。
 
 FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发起交互、S5 静默、S6 睡眠、S7 异常、S8 OTA。S2 有 S2.1“听”、S2.2“想”、S2.3“说”三个对话阶段；S7.1 表示 WSS 或 MQTT 刚刚断开并播放本地提示，三秒后按来源策略返回稳定状态；S7.2 表示核心能力不可用，需要保存故障并受控复位。S7 本身不作为可驻留状态。
 
-当前背光策略为：S1 固定 50%，S3 在 5%–30% 间呼吸，S5 固定 50%，S6 熄灭；S7.1 使用基础立绘、状态字幕和本地语音并固定 50% 亮度，S7.2 严重故障使用现有调试呈现。运行时以 `CONNECTING` 开始等待 MQTT/WSS；默认 30 秒仍未全部就绪时进入一次 S7.1并叠加红色 `offline`。相关连接全部恢复后删除标签，主状态切换不会清除该标签。
+当前背光策略以 `julia_fsm_runtime.c` 的呈现表为准：S1 固定 `CONFIG_JULIA_COMPANION_BRIGHTNESS_PERCENT`（当前 50%），S3 在 `CONFIG_JULIA_DISPLAY_BREATHE_MIN/MAX_PERCENT`（当前 0%–30%，周期 4000ms）间呼吸，S5 固定 `CONFIG_JULIA_SILENT_BRIGHTNESS_PERCENT`（当前 30%），S6 熄灭并关闭显示；S2 三个阶段为 70%，S4 与 S2.1 共用呈现时为 100%，S0/S7.2/S8 走默认 100%；S7.1 使用基础立绘、状态字幕和本地语音并固定 50% 亮度。运行时以 `CONNECTING` 开始等待 MQTT/WSS；默认 30 秒仍未全部就绪时进入一次 S7.1并叠加红色 `offline`。相关连接全部恢复后删除标签，主状态切换不会清除该标签。
 
 | 当前来源 | 生效状态 | 目标状态 |
 | --- | --- | --- |
@@ -116,19 +118,19 @@ FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发�
 | `EVT_INTERRUPT`／`EVT_USER_CALL` | S2.3 | S2.1 |
 | `EVT_SILENCE_TIMEOUT` | S2.3 | S1 |
 | `EVT_USER_LEAVE` | S1 | S3 |
-| MQTT 会话断开 `EVT_MQTT_DISCONNECTED` | S1～S6 | S7.1，并置 `offline` |
-| WSS 会话结束 `EVT_WSS_DISCONNECTED` | S1～S6 | S7.1，并置 `offline` |
-| 断联提示完成 `EVT_DISCONNECT_NOTICE_TIMEOUT` | 来自 S3/S5/S6 的 S7.1 | 返回来源稳定状态 |
+| MQTT 会话断开 `EVT_MQTT_DISCONNECTED` | S1～S4（非主动休眠恢复期间） | S7.1，并置 `offline` |
+| WSS 会话结束 `EVT_WSS_DISCONNECTED` | S1～S4（非主动休眠恢复期间） | S7.1，并置 `offline` |
+| 断联提示完成 `EVT_DISCONNECT_NOTICE_TIMEOUT` | 来自 S3 的 S7.1 | 返回来源稳定状态 |
 | 断联提示完成 `EVT_DISCONNECT_NOTICE_TIMEOUT` | 来自 S1/S2/S4 的 S7.1 | S3，不恢复旧会话 |
 | MQTT/WSS 重连 | 任意行为状态 | 清除对应离线原因；全部恢复后删除 `offline` |
-| 初始业务连接超时 `EVT_SERVICE_CONNECT_TIMEOUT` | S1～S6 | S7.1，并置 `offline` |
-| 唤醒词 `EVT_WAKEUP` | S3／S5／S6 | S4 |
-| IMU明显运动 `EVT_MOTION_WAKE` | S6 | S3，只恢复待机，不进入对话 |
+| 初始业务连接超时 `EVT_SERVICE_CONNECT_TIMEOUT` | S1～S4（非主动休眠恢复期间） | S7.1，并置 `offline` |
+| 唤醒词 `EVT_WAKEUP` | S1／S3 | S4 |
+| IMU明显运动 `EVT_MOTION_WAKE` | S3/S5/S6 | S4，发起交互（capture-v1 本地入口） |
 | `EVT_NIGHT_TIME`／`EVT_STANDBY_TIMEOUT` | S3 | S6 |
 | MQTT `intent_result=goodnight` | S4／S2 任一阶段 | S2 先回 S4，在 S4 播“好的，晚安”并动嘴，播完进入 S6 |
 | MQTT `intent_result=dismiss` | S4／S2 任一阶段 | S2 先回 S4，在 S4 播“那我不烦你了”并动嘴，播完进入 S5 |
-| `EVT_SILENT_TIMEOUT`（默认 30 分钟） | S5 | S3 |
-| OTA 引擎接受升级 | S0／S1／S3 | S8 |
+| `EVT_SILENT_TIMEOUT`（默认 30 分钟） | S5 | S6 |
+| OTA 引擎接受升级 | S3（S5/S6 静默期间显式拒绝） | S8 |
 | OTA 任务失败（非链路、非严重故障） | S8 | S3 |
 | OTA 提交成功、即将复位 | S8 | S0 |
 | 严重故障消息 | S0～S6／S7.1／S8 | S7.2 |
@@ -136,7 +138,7 @@ FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发�
 
 `intent_result=normal` 只表示没有特殊语义，不改变状态。OTA 任务、NVS 检查点、目标分区、启动分区设置或普通镜像校验失败都不会触发 S7.2，因为活动固件尚未被替换；这类失败由 S8 回到 S3 等待唤醒。Wi-Fi、TLS、HTTP 等错误导致 OTA 任务退出时同样回到 S3，保留符合恢复条件的下载断点，后续仍按既有检查/通知机制尝试。只有已经无法回滚到可用固件时才从 S8 进入 S7.2。
 
-S7.2 只接收关键初始化、FSM 内部损坏和 OTA 无法安全恢复等严重故障，并保存 NVS 快照后按策略复位。S7.1 不写严重故障快照、不触发复位：每个离线周期只在第一次由 `ONLINE` 变为 `OFFLINE` 时播放固件内嵌的 `network_disconnected_16k_mono_16bit.wav`，嘴型按实际送往扬声器的本地 PCM能量同步，并显示 `S7.1 DISCONNECTED` 与 `offline`；保持离线期间的重复断联不再播报。三秒后，S3/S5/S6 返回原稳定状态；S1的免唤醒资格与 S2/S4的交互上下文均绑定旧 WSS generation，断联后统一进入 S3。WSS/MQTT 各自继续后台重连。OTA 任务发生链路错误退出后回 S3；仅业务链路断开而 OTA 仍在运行时，不套用 S7.1。
+S7.2 只接收关键初始化、FSM 内部损坏和 OTA 无法安全恢复等严重故障，并保存 NVS 快照后按策略复位。S7.1 不写严重故障快照、不触发复位：每个离线周期只在第一次由 `ONLINE` 变为 `OFFLINE` 时播放固件内嵌的 `network_disconnected_16k_mono_16bit.wav`，嘴型按实际送往扬声器的本地 PCM能量同步，并显示 `S7.1 DISCONNECTED` 与 `offline`；保持离线期间的重复断联不再播报。三秒后，S3 返回原稳定状态；S5/S6 主动休眠不进入断联提示，也不自动重连；S1的免唤醒资格与 S2/S4的交互上下文均绑定旧 WSS generation，断联后统一进入 S3。WSS/MQTT 各自继续后台重连。OTA 任务发生链路错误退出后回 S3；仅业务链路断开而 OTA 仍在运行时，不套用 S7.1。
 
 ## 编译范围与参考源码
 

@@ -6,24 +6,29 @@
  *   - 本模块是"当前运行时真正生效"的 L1 立绘链路（app_main 经 julia_display_init()+
  *     julia_avatar_init() 启动）。它构建 Julia 静态立绘，并按"对话相位"
  *     （IDLE/LISTENING/THINKING/SPEAKING）使用统一稳定底图，以眼睛开合区分相位，
- *     同时用 RMS 驱动 4 档嘴型，并运行一个"微动"任务（眨眼/呼吸由微动层承担）。
+ *     同时用 RMS 驱动 4 档嘴型，并运行一个背景任务负责嘴型/标签同步（整帧呼吸与点头
+ *     受 AVATAR_ENABLE_FULL_FRAME_MOTION=0 控制，当前不执行；随机眨眼由 avatar_eyes
+ *     自带的 blink_task 独立调度）。
  *   - 与之相对：julia_ui.c 是 fused 遗留的总控（不参与当前构建）；julia_backlight 管
  *     背光；julia_display_theme（或 app/julia_idle_display.c）管显示功率/息屏。
- *   - 上游调用方：voice_service（WSS 任务）经 julia_avatar_feed_pcm/talking_start/
- *     talking_stop/set_dialog_phase 驱动嘴型与相位；julia_idle_display 经
- *     julia_avatar_set_dozing 切换睡眠立绘。
+ *   - 上游调用方：voice_service（WSS/播放任务）经 julia_avatar_feed_pcm/talking_start/
+ *     talking_stop 驱动嘴型，并在进入 S6 时经 julia_avatar_set_suspended 暂停后台更新；
+ *     相位与睡眠立绘统一由 julia_fsm_runtime 设置（set_dialog_phase/set_dozing），
+ *     main.c 只在启动路径设置初始 IDLE/dozing。
  *
  * 线程模型：
  *   - 本模块所有 LVGL 对象操作都在 lvgl_port_lock() 临界区内进行（lvgl_port 内有独立
  *     "lvgl" 任务在跑 lv_timer_handler）。
- *   - julia_avatar_init() 创建一个 "avatar_l1" 任务（优先级 3，栈 4096，PSRAM），每
- *     40ms 计算一次嘴型档位并调用 avatar_mouth_set_shape()。
+ *   - julia_avatar_init() 创建一个 "avatar_l1" 任务（优先级 3，栈 4096，PSRAM），
+ *     按 40ms 节拍把最新目标档位应用到嘴型层并同步标签；档位本身在
+ *     julia_avatar_feed_pcm() 中由 RMS 算出。
  *   - 相位/嘴型/dozing 状态用 portMUX_TYPE（s_phase_lock / s_state_lock）保护，因为
  *     它们可能在 WSS 任务与 avatar_l1 任务之间并发读写。
  *
  * 数据流：
- *   - 相位帧：LISTEN/THINK/SPEAK .bin（嵌入）→ avatar_rle_decode_rgb565() 解到 PSRAM
- *     （360x360 RGB565）→ 校验 CRC32 → 作为 lv_img_dsc_t 绑定到底图 s_base。
+ *   - 相位帧（当前未启用）：LISTEN/THINK/SPEAK .bin（嵌入）→ avatar_rle_decode_rgb565()
+ *     解到 PSRAM（360x360 RGB565）→ 校验 CRC32 → 作为 lv_img_dsc_t 绑定到底图 s_base。
+ *     avatar_source_for_phase() 现在直接返回静态立绘资源，这条 RLE 路径只作为保留实现。
  *   - 嘴型：voice_service 每帧 PCM → julia_avatar_feed_pcm() → mouth_level_for_frame()
  *     计算 RMS 档位(0..3) → avatar_l1 任务每 40ms 调 avatar_mouth_set_shape()。
  */
@@ -68,11 +73,10 @@
 #define BOOT_BLINK_OPEN_MS          255U
 #define BOOT_BLINK_CLOSED_MS        120U
 
-/* Transforming the 360x360 root invalidates the complete display on every
- * animation tick.  On the QSPI panel that frame is committed in ten strips,
- * without a TE signal to keep the writes outside the LCD scanout window.  The
- * result is continuous visible tearing/flicker.  Keep animation updates local
- * to the eyes and mouth until panel-synchronised full-frame rendering exists. */
+/* 对 360x360 根对象做变换会让每个动画节拍都重绘整屏；QSPI 面板把整帧拆成十条带提交，
+ * 又没有 TE 信号把写入避开放屏扫描窗口，结果是持续可见的撕裂/闪烁。在具备与面板同步的
+ * 整帧渲染之前，动画只能停留在眼睛和嘴部的局部更新；本宏为 0 时 update_micro_motion()
+ * 整体被裁掉。 */
 #define AVATAR_ENABLE_FULL_FRAME_MOTION 0
 
 #define STATUS_LABEL_X               60
@@ -96,14 +100,24 @@ static uint8_t s_mouth_level;
 static uint8_t s_target_mouth_level;
 static uint32_t s_last_pcm_ms;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_updates_suspended;
+static TaskHandle_t s_avatar_task;
+
+void julia_avatar_set_suspended(bool suspended)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    s_updates_suspended = suspended;
+    portEXIT_CRITICAL(&s_state_lock);
+    if (s_avatar_task) xTaskNotifyGive(s_avatar_task);
+}
 static julia_avatar_dialog_phase_t s_dialog_phase = JULIA_AVATAR_DIALOG_IDLE;
 static bool s_dozing;
 static bool s_offline;
 static bool s_battery_present;
 static bool s_battery_low;
 static uint8_t s_battery_percent;
-/* Last phase successfully assigned to the LVGL base image.  It is separate
- * from the requested state so a lock timeout can be retried safely. */
+/* 已成功应用到 LVGL 底图的相位，与"请求相位"分开保存：取锁超时不会改动它，
+ * 因此失败的相位请求仍可在下一轮重试。 */
 static julia_avatar_dialog_phase_t s_applied_dialog_phase =
     (julia_avatar_dialog_phase_t)(JULIA_AVATAR_DIALOG_SPEAKING + 1);
 static portMUX_TYPE s_phase_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -193,6 +207,10 @@ void julia_avatar_set_offline(bool offline)
     lvgl_port_unlock();
 }
 
+/* 电量标签与状态/离线标签的关键差别：只有本函数会把电量写进标签，avatar_l1 任务不会
+ * 重新同步它，因此取锁超时等于本次电量更新丢失，要等下一次电量上报
+ * （CONFIG_JULIA_BATTERY_MONITOR_INTERVAL_SECONDS 周期）才补上；status/offline 则由
+ * 任务每 40ms 自动重试。 */
 void julia_avatar_set_battery_status(bool present, bool low, uint8_t percent)
 {
     if (percent > 100U) percent = 100U;
@@ -331,8 +349,8 @@ static const lv_img_dsc_t *avatar_source_for_phase(julia_avatar_dialog_phase_t p
     return &avatar_asset_julia_s1_1_near_standby;
 }
 
-/* Refresh from current playback ownership, including local notices on the
- * closed-eye portrait. Retry every frame if a UI lock was unavailable. */
+/* 按当前播放归属刷新嘴型，包含闭眼立绘上的本地提示语音。取锁失败时不动任何状态，
+ * 由 avatar_l1 任务的 40ms 节拍在下一帧重试。 */
 static void avatar_sync_mouth(void)
 {
     if (!s_ready || !lvgl_port_lock(pdMS_TO_TICKS(20))) return;
@@ -351,12 +369,12 @@ static void avatar_sync_mouth(void)
         target = 0;
     avatar_mouth_set_visible(!dozing &&
         (talking || phase != JULIA_AVATAR_DIALOG_LISTENING));
-    /* The mouth component deduplicates successfully applied shapes itself. */
+    /* 档位去重由 avatar_mouth_set_shape 内部完成，这里每帧无条件调用即可。 */
     avatar_mouth_set_shape((avatar_mouth_shape_t)target, rms);
     lvgl_port_unlock();
 }
 
-/* LISTEN keeps its baked-in eyes, while active local speech exposes the mouth. */
+/* LISTEN 相位使用底图自带的闭眼，其余相位显示独立眼层并同步嘴型。 */
 static void avatar_apply_phase_eyes(julia_avatar_dialog_phase_t phase)
 {
     bool full_closed_portrait = phase == JULIA_AVATAR_DIALOG_LISTENING;
@@ -380,8 +398,8 @@ static bool avatar_apply_dialog_phase(julia_avatar_dialog_phase_t phase)
     portEXIT_CRITICAL(&s_phase_lock);
     if (dozing) return false;
     const lv_img_dsc_t *source = avatar_source_for_phase(phase);
-    /* Decoding can take long enough for a later transport command to supersede
-     * this request. Never let a stale request overwrite the latest phase. */
+    /* 取源可能耗时（RLE 解码），期间更新的相位请求可能已经生效；过期请求
+     * 不得覆盖最新相位。 */
     if (!s_base || !dialog_phase_is_current(phase)) return false;
     if (!lvgl_port_lock(pdMS_TO_TICKS(250))) {
         ESP_LOGW(TAG, "LVGL lock timeout applying %s phase", dialog_phase_name(phase));
@@ -480,8 +498,9 @@ static uint8_t mouth_level_for_frame(const int16_t *samples, size_t count)
     }
     uint32_t rms = count ? integer_sqrt_u64(energy / count) : 0;
 
-    /* Same asymmetric thresholds as the fused lipsync module: fast attack,
-     * slower release, and one-level steps avoid chatter around a boundary. */
+    /* 与 fused 的 julia_lipsync 模块同源的阈值：上升快、下降慢，每次只升降一档，
+     * 避免在门限附近抖动。数值是 int16 RMS 绝对值（量级数百到数千），沿用该模块的
+     * 经验值，没有标定记录。 */
     s_smoothed_rms = (s_smoothed_rms * 5U + rms * 3U) / 8U;
     static const uint16_t rise[] = {300, 950, 2300};
     static const uint16_t fall[] = {180, 650, 1650};
@@ -504,8 +523,8 @@ void julia_avatar_feed_pcm(const int16_t *samples, size_t sample_count)
     }
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
     portENTER_CRITICAL(&s_state_lock);
-    /* Playback now feeds from another task; serialize the RMS smoother with
-     * talking_start/stop and never let a cancelled chunk reopen the mouth. */
+    /* PCM 现在由播放任务喂入，与 talking_start/stop 不在同一上下文：用同一把锁
+     * 串行化 RMS 平滑器，并保证被取消的音频块不能重新张嘴。 */
     if (!s_talking) {
         portEXIT_CRITICAL(&s_state_lock);
         return;
@@ -539,13 +558,12 @@ void julia_avatar_talking_stop(void)
     s_mouth_level = 0;
     s_target_mouth_level = 0;
     portEXIT_CRITICAL(&s_state_lock);
-    /* Close immediately on SPKE/session teardown rather than waiting for the
-     * next 40 ms lip-sync tick. */
+    /* SPKE/会话收尾时立即闭嘴，不等下一个 40ms 嘴型节拍。 */
     avatar_sync_mouth();
 }
 
-/* 设置对话框相位。may be called from WSS/command tasks；相位未变或已应用则忽略
- * 重复请求（needs_apply 判断），避免重复把同一张底图 set 一遍。 */
+/* 设置对话相位，可由 WSS/命令任务调用；相位未变且已应用时忽略重复请求
+ * （needs_apply 判断），避免把同一张底图重复 set 一遍。 */
 void julia_avatar_set_dialog_phase(julia_avatar_dialog_phase_t phase)
 {
     if (phase < JULIA_AVATAR_DIALOG_IDLE || phase > JULIA_AVATAR_DIALOG_SPEAKING) {
@@ -585,13 +603,13 @@ static void update_micro_motion(uint32_t now_ms)
         return;
     }
 
-    /* A tiny zoom pulse reads as breathing without exposing the screen edge. */
+    /* 极小幅缩放即读作呼吸，同时不暴露屏幕边缘。 */
     uint32_t breath_phase = now_ms % AVATAR_BREATH_PERIOD_MS;
     uint32_t half = AVATAR_BREATH_PERIOD_MS / 2U;
     uint32_t triangle = breath_phase <= half ? breath_phase : AVATAR_BREATH_PERIOD_MS - breath_phase;
     lv_coord_t zoom = (lv_coord_t)(256U + (triangle * 2U + half / 2U) / half);
 
-    /* Periodic sub-degree forward/back motion gives a restrained idle nod. */
+    /* 周期性的亚角度前后摆动构成克制的待机点头。 */
     uint32_t nod_phase = now_ms % AVATAR_NOD_PERIOD_MS;
     int16_t angle = 0;
     if (nod_phase < AVATAR_NOD_DURATION_MS) {
@@ -614,13 +632,22 @@ static void update_micro_motion(uint32_t now_ms)
 #endif
 }
 
-/* L1 micro-motion 任务（优先级 3，栈 4096，PSRAM）：每 40ms 读一次嘴型状态，
- * 若非说话或超过 PCM 保持期则目标档位置 0（闭嘴），否则用目标档位驱动嘴型层；
- * 同时跑 update_micro_motion()。所有 LVGL 对象访问在 lvgl_port_lock 内。 */
+/* L1 立绘任务（优先级 3、栈 4096、PSRAM）：每轮同步嘴型与状态/离线标签，再跑
+ * update_micro_motion()，最后按 AVATAR_UPDATE_MS(40ms) 等待一次通知（实际周期 =
+ * 本轮耗时 + 40ms）；被挂起时无限等待通知，不空转。时间基准是 esp_timer 单调时钟
+ * 换算出的 ms。闭嘴判定（非 talking 或超过 PCM 保持期）在 avatar_sync_mouth() 内完成；
+ * 所有 LVGL 对象访问都在 lvgl_port_lock 内。 */
 static void avatar_task(void *argument)
 {
     (void)argument;
     for (;;) {
+        portENTER_CRITICAL(&s_state_lock);
+        bool suspended = s_updates_suspended;
+        portEXIT_CRITICAL(&s_state_lock);
+        if (suspended) {
+            (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
         avatar_sync_mouth();
         if (lvgl_port_lock(pdMS_TO_TICKS(20))) {
@@ -629,7 +656,7 @@ static void avatar_task(void *argument)
             update_micro_motion(now_ms);
             lvgl_port_unlock();
         }
-        vTaskDelay(pdMS_TO_TICKS(AVATAR_UPDATE_MS));
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(AVATAR_UPDATE_MS));
     }
 }
 
@@ -718,8 +745,7 @@ esp_err_t julia_avatar_init(void)
     lv_obj_invalidate(screen);
     lvgl_port_unlock();
 
-    /* A phase can be requested before display initialisation; honour it once
-     * the one and only avatar object tree exists. */
+    /* 相位可能在显示初始化之前就被请求；对象树建好后要立刻补上这次请求。 */
     avatar_apply_dialog_phase(julia_avatar_get_dialog_phase());
 
     esp_err_t refresh_err = lvgl_port_refr_now_sync(pdMS_TO_TICKS(1000));
@@ -727,7 +753,7 @@ esp_err_t julia_avatar_init(void)
         ESP_LOGW(TAG, "first portrait refresh reported: %s", esp_err_to_name(refresh_err));
     }
 
-    if (xTaskCreateWithCaps(avatar_task, "avatar_l1", 4096, NULL, 3, NULL,
+    if (xTaskCreateWithCaps(avatar_task, "avatar_l1", 4096, NULL, 3, &s_avatar_task,
                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
@@ -765,15 +791,14 @@ esp_err_t julia_avatar_play_boot_sequence(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* Hold off the random blink task for the complete deterministic sequence.
-     * The backlight is still at 0 here, so the first visible frame is closed. */
+    /* 整个确定性序列期间抑制随机眨眼任务；此时背光仍为 0，因此用户看到的第一帧
+     * 就是闭眼。 */
     avatar_eyes_set_idle_closed(true);
     ESP_RETURN_ON_ERROR(lvgl_port_refr_now_sync(pdMS_TO_TICKS(500)),
                         TAG, "refresh closed boot frame");
 
-    /* Keep the initial closed-eye hold and every blink interval unchanged.
-     * Hardware PWM ramps throughout the sequence instead of finishing before
-     * the first blink. The duration follows the existing animation timings. */
+    /* 保持初始闭眼保持时长和每次眨眼间隔不变：背光渐变贯穿整个序列，而不是在第一次
+     * 眨眼之前就结束；渐变时长由现有动画时序推算。 */
     const uint32_t fade_ms = BOOT_CLOSED_HOLD_MS +
         BOOT_BLINK_COUNT * (BOOT_BLINK_OPEN_MS + BOOT_BLINK_CLOSED_MS);
     julia_backlight_set(0);
@@ -795,13 +820,12 @@ esp_err_t julia_avatar_play_boot_sequence(void)
         }
     }
 
-    /* Releasing idle_closed also applies the final open frame and lets the
-     * existing 3-8 second random blink task resume normally. */
+    /* 解除 idle_closed 会顺带应用最后一帧睁眼，并让原有的 3~8 秒随机眨眼任务恢复。 */
     avatar_eyes_set_idle_closed(false);
     if (lvgl_port_refr_now_sync(pdMS_TO_TICKS(500)) != ESP_OK) {
         sequence_err = ESP_FAIL;
     }
-    /* End at the exact target without adding another wait to boot timing. */
+    /* 直接落到目标亮度，不为等待渐变结束再增加一次开机延时。 */
     julia_backlight_set(CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT);
     s_boot_sequence_played = true;
     ESP_LOGI(TAG, "Boot eye sequence complete: %u rapid blinks in about 3 seconds",

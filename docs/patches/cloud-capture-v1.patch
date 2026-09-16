@@ -1,0 +1,517 @@
+--- a/api_server/server/state_sync.py
++++ b/api_server/server/state_sync.py
+@@ -59,6 +59,9 @@
+         self.connection_id = uuid.uuid4().hex
+         self.history = []
+         self.floor = None
++        self.capture_receiver = None
++        self.capture_generation = 0
++        self.capture_dialog_id = 0
+         self.playback_until = 0.
+         self.interaction_id = None
+         self.controls = SessionControl(self)
+@@ -195,6 +198,9 @@
+             state['state'] in WAIT | PAUSE | {'S1'} or
+             (state['sub_state'] == 'S2.1' and old['sub_state'] in {'S2.2', 'S2.3'}) or
+             (state['sub_state'] == 'S2.2' and old['sub_state'] == 'S2.3'))
++        if (boundary and self.capture_receiver is not None
++                and old['state'] in WAIT and state['state'] in WAIT):
++            boundary = False
+         if boundary:
+             if state['state'] == 'S1' and old['state'] in {'S2', 'S4'}:
+                 # 继承原引擎正常播放后的0.6s余震窗口，轮次隔离不能使回声进入下一轮。
+@@ -266,7 +272,8 @@
+             self.blocked_revision = None
+         if self.blocked_revision is not None:
+             return None  # Wait for a new device turn; never replay timed-out audio.
+-        if self.state['state'] == 'S2' and self.state['sub_state'] != 'S2.1':
++        if (self.state['state'] == 'S2' and self.state['sub_state'] != 'S2.1'
++                and not (self.capture_receiver and self.capture_receiver.has_pending())):
+             return None  # 不为背景PCM构造不存在的回答轮次。
+         resources = getattr(self.adapter, 'resources', None)
+         lease = resources.try_voice(self.device_id) if resources else None
+@@ -291,6 +298,9 @@
+             engine.resource_lease = lease
+             self.engine = engine
+             engine.v2_session = self
++            if self.capture_receiver is not None:
++                engine.stream.local_capture = self.capture_receiver
++                engine.stream.capture_stop = engine._stop
+             engine.on_client_connected(self.session_id)
+             engine._history = list(self.history)
+             engine._session_interaction_id = self.interaction_id
+@@ -345,6 +355,19 @@
+         epoch = self.generation
+         command = payload.split()[0] if isinstance(payload, str) and payload else None
+         try:
++            if isinstance(payload, str) and payload.startswith('{'):
++                local = json.loads(payload)
++                if local.get('type') == 'capture_dialog':
++                    uid = local.get('utterance_id')
++                    if (self.capture_receiver is None or type(uid) is not int or uid <= 0
++                            or uid != getattr(engine.stream, 'capture_utterance_id', None)):
++                        return False
++                    if uid == self.capture_dialog_id:
++                        return True
++                    if self.strict_identity and not await self.controls.begin(engine, 'speech', 'utt_'+str(uid)):
++                        return False
++                    self.capture_dialog_id = uid
++                    return True
+             if self.strict_identity:
+                 if self.interrupt_pending == (engine,epoch): return False
+                 wake = json.loads(payload) if command and payload.startswith('{') else None
+@@ -419,10 +442,13 @@
+         if isinstance(payload, bytes):
+             return state in {'S2', 'S4'} or wake_ready
+         if payload.startswith('{'):
+-            return json.loads(payload).get('type') == 'wake_detected' and state in WAIT | {'S1'}
++            kind = json.loads(payload).get('type')
++            if kind == 'capture_verdict' and self.capture_receiver is not None:
++                return True
++            return kind == 'wake_detected' and state in WAIT | {'S1'}
+         command = payload.split()[0]
+         if command == 'MIC_START':
+-            return state in {'S1', 'S4'} or self.state['sub_state'] in {'S2.1','S2.3'}
++            return state in {'S1', 'S4'} or self.state['sub_state'] in {'S2.1','S2.3'} or (self.capture_receiver is not None and self.state['sub_state'] == 'S2.2')
+         if command == 'MIC_STOP':
+             return state in {'S1', 'S4'} or self.state['sub_state'] == 'S2.1'
+         if command in {'SPKS', 'SPKE'}:
+@@ -466,6 +492,8 @@
+             self.pending.pop(rid,None)
+ 
+     def close(self):
++        if self.capture_receiver is not None:
++            self.capture_receiver.close()
+         self.controls.close()
+         self.active = self.ready = False
+         self.retire()
+--- a/api_server/server/wss_adapter.py
++++ b/api_server/server/wss_adapter.py
+@@ -471,6 +471,17 @@
+         if len(message) > FRAME_LIMIT:
+             target.on_bad_frame(f"frame {len(message)}B > {FRAME_LIMIT}B")
+             return
++        receiver = getattr(self.sessions.get(ws), 'capture_receiver', None)
++        if receiver is not None:
++            from local_capture import CaptureProtocolError
++            try:
++                pcm1 = receiver.audio(message)
++            except CaptureProtocolError as exc:
++                target.on_bad_frame(str(exc))
++                asyncio.create_task(ws.close(code=1002, reason='capture protocol error'))
++                return
++            target.on_frame(pcm1, raw=None)
++            return
+         pcm1 = pcm1_parse(message)
+         if pcm1 is None:
+             target.on_bad_frame("magic/checksum/len 不合法")
+@@ -498,6 +509,57 @@
+             if isinstance(data, dict):
+                 from state_sync import DeviceSession, MESSAGE_TYPES
+                 kind = data.get('type')
++                if kind in {'capture_hello', 'capture_start', 'capture_end', 'capture_abort'}:
++                    from local_capture import LocalCaptureReceiver, CaptureProtocolError, decode_capture_text
++                    session = self.sessions.get(ws)
++                    if not session or not session.ready or not session.owns():
++                        await ws.close(code=1002, reason='capture requires synchronized session')
++                        return file_rx
++                    try:
++                        data = decode_capture_text(t)
++                        if kind == 'capture_hello':
++                            generation = data.get('stream_generation')
++                            if (data.get('session_id') != session.session_id or type(data.get('version')) is not int or data.get('version') != 1
++                                    or data.get('sample_rate') != 16000 or data.get('frame_ms') != 20
++                                    or type(generation) is not int or not 0 < generation <= 0xffffffff):
++                                raise CaptureProtocolError('capture capability mismatch')
++                            if generation < getattr(session, 'capture_generation', 0):
++                                raise CaptureProtocolError('stale capture generation')
++                            if (session.capture_receiver is None and session.engine is not None
++                                    and getattr(session.engine, 'frames', 0)):
++                                raise CaptureProtocolError('PCM1 requires a new connection before capture-v1')
++                            if session.capture_receiver is not None and session.capture_generation != generation:
++                                session.capture_receiver.close()
++                                session.retire()
++                                session.capture_receiver = None
++                            if session.capture_receiver is None:
++                                session.capture_receiver = LocalCaptureReceiver()
++                            session.capture_generation = generation
++                            if session.engine is not None:
++                                session.engine.stream.local_capture = session.capture_receiver
++                                session.engine.stream.capture_stop = session.engine._stop
++                            await session.send_json(dict(type='capture_ready', version=1,
++                                session_id=session.session_id, stream_generation=generation))
++                        else:
++                            receiver = session.capture_receiver
++                            if receiver is None:
++                                raise CaptureProtocolError('capture not negotiated')
++                            if kind == 'capture_start':
++                                state = session.state
++                                allowed = (state['state'] in {'S3','S5','S6'} if data.get('mode') == 'wake'
++                                           else state['state'] in {'S1','S2','S4'})
++                                if not allowed:
++                                    raise CaptureProtocolError('capture mode/state mismatch')
++                                receiver.start(data)
++                                engine = session.ensure_engine()
++                                if engine is None:
++                                    raise CaptureProtocolError('capture engine unavailable')
++                                engine._wake_worker()
++                            else:
++                                receiver.end(data, abort=kind == 'capture_abort')
++                    except CaptureProtocolError:
++                        await ws.close(code=1002, reason='capture protocol error')
++                    return file_rx
+                 if kind == 'interaction_sync_ack':
+                     session = self.sessions.get(ws)
+                     if session and session.ready: session.controls.accept_round_ack(data)
+--- a/api_server/server/real_engine.py
++++ b/api_server/server/real_engine.py
+@@ -249,6 +249,10 @@
+ 
+     def on_frame(self, pcm1, raw=None):
+         with self.lock:
++            uid = pcm1.get("utterance_id")
++            if uid is not None and uid != getattr(self, "_last_capture_id", None):
++                self.last_seq = None
++                self._last_capture_id = uid
+             seq = pcm1["seq"]
+             if self.last_seq is not None and seq != (self.last_seq + 1) & 0xFFFFFFFF:
+                 self.seq_gaps += 1
+@@ -266,6 +270,7 @@
+             'connection_id': self.v2_session.connection_id if self.v2_session else '',
+             'epoch': self.v2_session.generation if self.v2_session else 0,
+             'request_id': getattr(getattr(self, 'api', None), 'context', {}).get('request_id', ''),
++            "utterance_id": pcm1.get("utterance_id"),
+             "seq": seq, "bytes": pcm1["bytes_len"], "dbfs": pcm1["dbfs_x100"] / 100.0,
+         })
+ 
+@@ -467,7 +472,7 @@
+ 
+         df_cfg = vad.get("dynamic_floor")
+         df_cfg = df_cfg if isinstance(df_cfg, dict) else {}
+-        if df_cfg.get("enabled", False):
++        if df_cfg.get("enabled", False) and getattr(self.stream, "local_capture", None) is None:
+             self._floor = NoiseFloorTracker(default_background, df_cfg)
+             log.info("动态底噪: 启用 (fast=%.1fs slow=%.1fs gate=%.1fdB 升%.1fdB/s 降%.1fdB/s 触发%.1fdB)",
+                      float(df_cfg.get("fast_window_s", 1.5)),
+@@ -533,7 +538,7 @@
+         while not self._stop.is_set():
+             if self.v2_session is not None:
+                 state = self.device_state
+-                if state['state'] in {'S0', 'S7', 'S8'} or state['sub_state'] in {'S2.2', 'S2.3'}:
++                if (state['state'] in {'S0', 'S7', 'S8'} or (state['sub_state'] in {'S2.2', 'S2.3'} and not self._local_pending())):
+                     self._stop.wait(.05)
+                     continue
+                 # 是否识别唤醒词由主状态决定，不能只看wake_required或背景PCM。
+@@ -590,8 +595,11 @@
+                 self._remember("WAKE- timeout")
+                 self._awake = False
+                 self._mic_started = False
+-            if self.stream.real_bytes_total <= self._real_bytes_consumed:
++            if self.stream.real_bytes_total <= self._real_bytes_consumed and not self._local_pending():
+                 continue
++            if getattr(self.stream, 'local_capture', None) is not None:
++                self._floor = None
++                self._calibration_done = True
+             if not self._calibration_done and self._floor is None:
+                 self._calibrate_background(self.stream, background_seconds)
+             elif not self._calibration_done:
+@@ -619,7 +627,7 @@
+ 
+                 try:
+                     w_samples, _, w_ep = capture_until_endpoint(
+-                        self.stream, max_seconds=wk_listen_s,
++                        self.stream, max_seconds=wk_listen_s, capture_mode="wake",
+                         background_dbfs=background_dbfs,
+                         endpoint_silence_ms=wk_endpoint_ms,
+                         threshold_above_bg=wk_start_above,
+@@ -643,6 +651,7 @@
+                 if self._speech_detector is not None:
+                     ok_sp, sp_ratio, sp_ms = self._speech_detector.is_speech(w_samples)
+                     if not ok_sp:
++                        self._capture_verdict(w_ep, 'empty')
+                         self._nonspeech_count += 1
+                         print(f"[语音检测] 唤醒候选段非语音(占比={sp_ratio:.2f}) → 继续守听",
+                               flush=True)
+@@ -670,6 +679,7 @@
+                     self._remember(f"WAKE? {wake_text or '[空]'}")
+                     print(f"[唤醒] 候选识别({wk_asr_s:.2f}s): {wake_text!r}", flush=True)
+                     hit = any(n in value for n in self._wake_needles)
++                self._capture_verdict(w_ep, 'speech' if wake_text else 'empty')
+                 if hit:
+                     interaction_id = f"wake_{int(time.time() * 1000)}"
+                     self._session_interaction_id = interaction_id
+@@ -728,7 +738,8 @@
+             asr_stream = StreamingAsr(asr)
+ 
+             def _on_speech_start():
+-                if self._wake_enabled and not self._mic_started:
++                if (getattr(self.stream, 'local_capture', None) is not None
++                        or (self._wake_enabled and not self._mic_started)):
+                     self._send_mic_start("语音起始")
+                     print("[下行] MIC_START(检测到本轮语音起始,设备→LISTEN)", flush=True)
+ 
+@@ -743,7 +754,7 @@
+             self.api.context['request_id'] = f'turn_{turn+1:03d}'
+             try:
+                 samples, _, endpoint = capture_until_endpoint(
+-                    self.stream, max_seconds=max_seconds,
++                    self.stream, max_seconds=max_seconds, capture_mode="dialog",
+                     background_dbfs=background_dbfs,
+                     endpoint_silence_ms=endpoint_ms,
+                     threshold_above_bg=start_above,
+@@ -798,6 +809,9 @@
+             if self._speech_detector is not None:
+                 ok_sp, sp_ratio, sp_ms = self._speech_detector.is_speech(samples)
+                 if not ok_sp:
++                    self._capture_verdict(endpoint, 'empty')
++                    if endpoint.get('local_capture'):
++                        self._send_empty_round(mic_start=False)
+                     self._nonspeech_count += 1
+                     print(f"[语音检测] 段{round(len(samples) / 16000, 2)}s 非语音"
+                           f"(占比={sp_ratio:.2f} {sp_ms:.0f}ms) → 跳过(不进轮)", flush=True)
+@@ -834,6 +848,9 @@
+ 
+             is_noise, active_ratio = self._judge_noise_segment(
+                 samples, endpoint, recognized, background_dbfs)
++            self._capture_verdict(endpoint, 'noise' if is_noise else ('speech' if recognized else 'empty'))
++            if is_noise and endpoint.get('local_capture'):
++                recognized = ''
+             if self._wake_enabled and not is_noise and recognized:
+                 self._awake_at = time.monotonic()
+             if is_noise and self._floor is not None:
+@@ -1388,7 +1405,8 @@
+         if self._detector is not None:
+             self._detector.stop()
+             self._detector = None
+-        if self._interrupt_enabled and self._asr_model is not None and str(text or "").strip():
++        if (self._interrupt_enabled and self._asr_model is not None and str(text or "").strip()
++                and getattr(self.stream, 'local_capture', None) is None):
+             self._detector = _InterruptDetector(
+                 self.stream, self._asr_model, text, self._interrupt_hit,
+                 self._interrupt_min_chars, self._interrupt_min_similarity)
+@@ -1575,7 +1593,19 @@
+                         from audio_pacer import PlaybackCancelled
+                         raise PlaybackCancelled('send cancelled')
+ 
++    def _local_pending(self):
++        receiver = getattr(self.stream, 'local_capture', None)
++        return receiver is not None and receiver.has_pending()
++
++    def _capture_verdict(self, endpoint, verdict):
++        if endpoint.get('local_capture'):
++            self._push_text(json.dumps(dict(type='capture_verdict',
++                utterance_id=endpoint['utterance_id'], verdict=verdict,
++                session_id=self.v2_session.session_id)))
++
+     def _push_text(self, text, *, drain=True):
++        if text == 'MIC_STOP' and getattr(self.stream, 'local_capture', None) is not None:
++            return
+         from audio_pacer import AudioPacer
+         if self.v2_session is not None and self._stop.is_set():
+             if not drain:
+@@ -1604,7 +1634,12 @@
+         wait = gap - (time.monotonic() - self._last_spke_at)
+         if wait > 0:
+             time.sleep(wait)
+-        self._push_text("MIC_START")
++        if getattr(self.stream, 'local_capture', None) is not None:
++            uid = getattr(self.stream, 'capture_utterance_id', None)
++            if uid is not None:
++                self._push_text(json.dumps(dict(type='capture_dialog', utterance_id=uid)))
++        else:
++            self._push_text("MIC_START")
+         self._mic_started = True
+         if tag:
+             self._remember(f"MIC_START({tag})")
+--- a/api_server/engine/board_serial_asr_test.py
++++ b/api_server/engine/board_serial_asr_test.py
+@@ -302,6 +302,7 @@
+     floor_tracker=None,
+     stop_event=None,
+     on_start=None,
++    capture_mode=None,
+ ):
+     """能量 VAD 主函数:边收帧边判定"人开始说话了吗 / 人说完了吗",输出整段语音。
+ 
+@@ -335,6 +336,14 @@
+     """
+     # 流式 ASR(可选):传入了逐块回调时,每凑满 600ms(9600 样本=30 帧)切一块回调,
+     # 供"边说边识别";默认不传时行为与旧版完全一致(本地 V5 等调用者零影响)。
++    receiver = getattr(ser, 'local_capture', None)
++    if receiver is not None:
++        def local_start(uid):
++            ser.capture_utterance_id = uid
++            if on_start:
++                on_start()
++        return receiver.capture(capture_mode or ('wake' if voice_start_ms == 20 else 'dialog'),
++                                on_chunk, local_start, getattr(ser, 'capture_stop', None))
+     samples = []
+     dbfs_frames = []
+     max_samples = int(max_seconds * sr)
+--- /dev/null
++++ b/api_server/server/local_capture.py
+@@ -0,0 +1,164 @@
++"""Receive device-defined 16 kHz utterances without estimating endpoints or noise.
++
++One instance belongs to one authenticated WSS connection. Protocol errors are fatal:
++incomplete or reordered audio must never reach ASR as a completed utterance.
++"""
++from collections import deque
++import math
++import json
++import struct
++import threading
++import time
++
++
++class CaptureProtocolError(ValueError):
++    pass
++
++
++def decode_capture_text(text):
++    if len(text) > 1024:
++        raise CaptureProtocolError('capture control size')
++    def unique(pairs):
++        result = {}
++        for key, value in pairs:
++            if key in result:
++                raise CaptureProtocolError('duplicate capture field')
++            result[key] = value
++        return result
++    try:
++        data = json.loads(text, object_pairs_hook=unique)
++    except (ValueError, RecursionError) as exc:
++        raise CaptureProtocolError('invalid capture JSON') from exc
++    if not isinstance(data, dict):
++        raise CaptureProtocolError('capture object required')
++    return data
++
++
++class LocalCaptureReceiver:
++    def __init__(self, clock=time.monotonic):
++        self.clock = clock
++        self.cond = threading.Condition()
++        self.pending = deque()
++        self.active = None
++        self.last_id = 0
++        self.closed = False
++
++    def start(self, data):
++        uid = data.get('utterance_id')
++        bg = data.get('floor_dbfs')
++        mode = data.get('mode')
++        if (type(uid) is not int or not 0 < uid <= 0xffffffff or uid <= self.last_id
++                or mode not in ('wake', 'dialog') or type(bg) not in (int, float)
++                or not math.isfinite(bg) or not -80 <= bg <= -35
++                or data.get('sample_rate') != 16000 or data.get('frame_ms') != 20
++                or data.get('frames') != 0):
++            raise CaptureProtocolError('invalid capture_start')
++        with self.cond:
++            if self.closed or self.active is not None or len(self.pending) >= 4:
++                raise CaptureProtocolError('capture overlap or capacity')
++            now = self.clock()
++            segment = dict(id=uid, mode=mode, floor=bg, frames=[], end=None,
++                           aborted=False, started=now, received=now)
++            self.active = segment
++            self.last_id = uid
++            self.pending.append(segment)
++            self.cond.notify_all()
++
++    def audio(self, message):
++        if len(message) != 656 or message[:4] != b'PCM2':
++            raise CaptureProtocolError('PCM2 length/magic')
++        uid, index, db, size, flags, checksum = struct.unpack('<IHhHBB', message[4:16])
++        pcm = message[16:]
++        if size != 640 or flags or sum(pcm) & 255 != checksum or not -12000 <= db <= 0:
++            raise CaptureProtocolError('PCM2 header/checksum')
++        with self.cond:
++            s = self.active
++            if s is None or s['id'] != uid or index != len(s['frames']):
++                raise CaptureProtocolError('PCM2 utterance/sequence')
++            if index >= (400 if s['mode'] == 'wake' else 750):
++                raise CaptureProtocolError('capture sample limit')
++            self._check_timeout(s)
++            s['frames'].append((pcm, db / 100))
++            s['received'] = self.clock()
++            self.cond.notify_all()
++        return dict(seq=index, utterance_id=uid, bytes_len=size, dbfs_x100=db, pcm=pcm)
++
++    def end(self, data, abort=False):
++        with self.cond:
++            s = self.active
++            if (s is None or data.get('utterance_id') != s['id']
++                    or type(data.get('frames')) is not int
++                    or data['frames'] != len(s['frames']) or data.get('mode') != s['mode']):
++                raise CaptureProtocolError('capture end mismatch')
++            self._check_timeout(s)
++            if not abort and (not s['frames'] or data.get('reason') not in ('silence', 'limit')):
++                raise CaptureProtocolError('capture empty/reason')
++            s['aborted'] = abort
++            s['end'] = dict(data)
++            self.active = None
++            self.cond.notify_all()
++
++    def _check_timeout(self, s):
++        now = self.clock()
++        if now - s['received'] > 5 or now - s['started'] > 25:
++            s['aborted'] = True
++            raise CaptureProtocolError('capture receive timeout')
++
++    def has_pending(self):
++        with self.cond:
++            return bool(self.pending)
++
++    def close(self):
++        with self.cond:
++            self.closed = True
++            for s in self.pending:
++                s['aborted'] = True
++            self.cond.notify_all()
++
++    def capture(self, mode, on_chunk=None, on_start=None, stop_event=None):
++        import numpy as np
++        with self.cond:
++            if not self.pending:
++                raise TimeoutError('no device segment')
++            s = self.pending.popleft()
++        if s['mode'] != mode:
++            raise TimeoutError('stale capture mode')
++        if on_start:
++            on_start(s['id'])
++        sent = 0
++        while True:
++            with self.cond:
++                if self.closed or s['aborted'] or (stop_event and stop_event.is_set()):
++                    raise TimeoutError('capture cancelled')
++                try:
++                    if s['end'] is None:
++                        self._check_timeout(s)
++                except CaptureProtocolError as exc:
++                    raise TimeoutError(str(exc)) from exc
++                count = len(s['frames'])
++                end = s['end']
++                blocks = []
++                while count - sent >= 30:
++                    blocks.append(b''.join(p for p, _ in s['frames'][sent:sent+30]))
++                    sent += 30
++                if not blocks and end is None:
++                    self.cond.wait(.1)
++                    continue
++            # Call inference outside the receiver lock so WSS remains responsive.
++            if on_chunk:
++                for block in blocks:
++                    on_chunk(np.frombuffer(block, dtype='<i2').copy())
++            if end is not None:
++                break
++        samples = np.frombuffer(b''.join(p for p, _ in s['frames']), dtype='<i2').copy()
++        levels = [d for _, d in s['frames']]
++        bg = s['floor']
++        last = max((i + 1 for i, d in enumerate(levels) if d > bg + 3), default=0)
++        return samples, levels, dict(
++            utterance_id=s['id'], local_capture=True, speech_started=True,
++            endpoint_triggered=end['reason'] == 'silence', speech_start_seconds=0,
++            last_active_seconds=last * .02, trailing_silence_ms=(len(levels)-last)*20,
++            vad_threshold_dbfs=bg + (3 if mode == 'wake' else 9),
++            vad_start_threshold_dbfs=bg + (3 if mode == 'wake' else 9),
++            vad_endpoint_threshold_dbfs=bg+3, bg_initial_dbfs=bg, bg_final_dbfs=bg,
++            dynamic_floor_enabled=True, bg_trajectory=[])

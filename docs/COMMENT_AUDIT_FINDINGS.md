@@ -7,14 +7,14 @@
 | 编号 | 范围 | 事实与影响 | 验证／处理方向 |
 | --- | --- | --- | --- |
 | VOICE-01 | 对话超时 | `MIC_STOP` 保持 busy 并进入思考，没有回答业务超时；连接保活不能让业务自动结束 | 模拟服务器继续心跳但不返回回答，定义可取消／可退出的超时策略 |
-| VOICE-02 | 播放缓冲 | 独立播放任务使用 64KiB PSRAM；服务端长期快于播放速率会触发显式溢出中止 | 服务端节流；上板验证高水位、尾音和实际打断延迟 |
+| VOICE-02 | 播放缓冲 | 独立播放任务使用 128KiB PSRAM；服务端长期快于播放速率会触发显式溢出中止 | 服务端节流；上板验证高水位、尾音和实际打断延迟 |
 | VOICE-03 | 播放断流 | 欠载后可重新预缓冲；无待播数据且距最后输入／开播达到 15 秒时中止 | 主机模拟覆盖 1 秒间隔；真实网络与 I2S 时序仍需上板 |
 | VOICE-04 | 队列压力 | MIC 使用 256 帧（约 5.12 秒）PSRAM ring，正常1帧／积压最多8帧且受8ms预算约束；ring 满明确终止整轮 WSS，不静默继续残缺 ASR | 验证弱网、追赶耗时、命令突发、owner teardown 与新连接无旧 PCM |
 | VOICE-05 | 打断关联 | 本地代次隔离已取消的 PCM 和完成事件，但网络消息无 session_id／turn_id | 服务器仍需停止旧回答；新播放期间迟到的旧命令不能可靠辨别 |
 | VOICE-06 | 命令确认 | MQTT 仅支持 MIC_START、MIC_STOP、FILE_SEND，没有 vstatus 应用回执 | 服务器不能把 PUBACK 当作执行成功；定义实际回执再对接 |
 | FILE-01 | 文件与语音 | 文件按块推进、读取失败关闭会话；语音启动可发 file_cancelled 结束文件区间 | 服务端需处理取消并丢弃部分文件；SD 底层 I/O 时延仍需测试 |
 | FILE-02 | SD 生命周期 | `sd_card_start()` 只尝试挂载，没有后台重试／拔卡检测；文件服务的 SD 锁是弱默认实现 | 验证无卡、失败挂载和读取中断；建立共享访问和卡状态管理 |
-| HW-01 | 共享 I2C／IMU | TCA9554 初始化失败清理已修复；QMI8658 为每轴 ±64dps，而默认 120dps 向量门限高于三轴满量程约 111dps | 验证低内存恢复；陀螺仪量程或门限仍需上板标定 |
+| HW-01 | 共享 I2C／IMU | TCA9554 初始化失败清理已修复；QMI8658 固定为每轴 ±64dps，陀螺仪门限现为 `CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS=30`，落在量程内（三轴合成上界约 110.9dps） | 验证低内存恢复；陀螺仪量程与门限仍需上板标定确认 |
 | DISPLAY-01 | 显示驱动契约 | `julia_display_set_backlight()` 只有声明；ST77916 `swap_xy` 的 QSPI 路径绕过命令封装并忽略错误；panel 开关错误现在保留为待重试状态 | 新代码使用 `julia_backlight`；修复 QSPI 命令与错误传播后再开放对应 API |
 
 源码定位：[voice_service.c](../main/voice/voice_service.c)、[wss_transport.c](../main/voice/wss_transport.c)、[board_audio.c](../components/julia_board_audio/board_audio.c)、[sd_card.c](../main/storage/sd_card.c)、[tca9554.c](../main/hardware/tca9554.c)、[qmi8658_shared.c](../main/hardware/qmi8658_shared.c)、[esp_lcd_st77916.c](../main/display/esp_lcd_st77916.c)。
@@ -48,7 +48,7 @@ OTA 下载已经通过 FSM 确认准入，S2/S4/S5/S6 的清单以已有 deferre
 - OTA URL 主机允许列表为空时放行；未启用安全启动、Flash 加密及强制签名镜像。
 - 默认服务器唤醒会持续上传 MIC；MICS 在该模式下被忽略，MIC_STOP 不关闭上传。
 - 屏幕休眠只有显示策略，不等于 MIC、I2S、功放、Wi-Fi 和 CPU 的联合节能。
-- Wi-Fi 使用 `WIFI_PS_NONE`；当前无按行为状态实施的完整电源管理闭环。
+- Wi-Fi 使用 `WIFI_PS_MIN_MODEM`（`network_lifecycle.c`）；当前无按行为状态实施的完整电源管理闭环。
 
 持续 16kHz 单声道 PCM16 的裸数据速率为 32000 字节／秒，即 256kbps；全天连续上传约 2.7648GB，不包含协议开销。这是格式推算，不是网络流量或功耗实测。
 
@@ -71,7 +71,7 @@ OTA 下载已经通过 FSM 确认准入，S2/S4/S5/S6 的清单以已有 deferre
 
 编辑器以 `build/compile_commands.json` 为固件索引，配置头来自 `build/config/sdkconfig.h`。只在独立目录构建不会自动为 `build/` 生成这些文件；`.vscode/` 也不随 Git 分发。目录不一致时优先按 [构建与发布](BUILD_AND_RELEASE.md) 重新配置，不能把所有头文件目录或主机测试 stub 加入全局搜索路径掩盖问题。
 
-播放初始化需要分配 64KiB PSRAM 并创建任务；资源不足会使 voice_ready 为假，WSS 不放行。该状态与服务器不可达应分别诊断。启动门槛保护初始化顺序，不是完整的产品自检，也不提供硬件故障后的自动重建流程。
+播放初始化需要分配 128KiB PSRAM 并创建任务；资源不足会使 voice_ready 为假，WSS 不放行。该状态与服务器不可达应分别诊断。启动门槛保护初始化顺序，不是完整的产品自检，也不提供硬件故障后的自动重建流程。
 
 项目有启动阶段耗时、播放缓冲高水位、溢出及 MIC 入队失败计数，仍缺少统一的唤醒命中率、端到端首音延迟和状态功耗实测记录。没有硬件测量记录时，不声明续航、远场唤醒率、实际帧率或最大并发量。
 

@@ -29,6 +29,10 @@ extern "C" {
  *
  * 每次成功生成都会记录一个新的 request_id，服务器响应必须严格匹配最近
  * 一次请求。设备标识与 OTA 共用 native_ota_get_device_id() 规则。
+ * 只有生成成功（JSON 已写入调用方缓冲）才会刷新 request_id；生成失败保留上一条，
+ * 因此失败不会让"上一条请求的响应"变成不可接受。
+ *
+ * 现状：本函数在当前构建内没有外部调用点；音频检查尚无 MQTT 发送/调度入口。
  *
  * @param[in]  current_audio_version 设备当前已安装音频素材版本；未安装时传
  *                                   NATIVE_OTA_AUDIO_VERSION_UNKNOWN。
@@ -56,11 +60,14 @@ esp_err_t native_audio_build_check_request(const char *current_audio_version,
  * @param[out] download_requested  接收是否应创建下载任务的标志，不允许为 NULL。
  *
  * @return ESP_OK 响应有效。
- * @return ESP_ERR_INVALID_ARG JSON、设备身份、清单字段、有效期或 URL 无效。
- * @return ESP_ERR_INVALID_STATE request_id 不匹配。
+ * @return ESP_ERR_INVALID_ARG JSON、设备身份、清单字段、有效期或 URL 无效
+ *         （URL 主机不在允许列表时也归入此类；允许列表为空则不校验主机）。
+ * @return ESP_ERR_INVALID_STATE request_id 不匹配（迟到或不属于本次请求的响应）。
  * @return ESP_ERR_NO_MEM cJSON 临时对象创建失败。
  *
  * @note 可在通信事件任务中调用，但会分配 cJSON 临时对象，不能在中断中调用。
+ * @note 校验是全有或全无：失败时清单被清零、download_requested 置 false，调用方
+ *       不会拿到部分可信的字段。
  */
 esp_err_t audio_control_plane_parse_audio_response(const char *json, size_t json_len,
                                                    native_audio_manifest_t *manifest,

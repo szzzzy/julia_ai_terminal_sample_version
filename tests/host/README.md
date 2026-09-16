@@ -1,5 +1,7 @@
 # 固件主机回归测试
 
+2026-09-15 新增 `test_local_capture`、`test_voice_local_capture` 和 capture-v1 静默编排场景；当前本地 CTest 为 35 项。跨端 wire 与实际云端算法差分见 [本地收音验证](../../docs/LOCAL_CAPTURE_VALIDATION.md)。TinyCC 修改头文件后应使用 `cmake --build <build-dir> --clean-first`，避免旧对象混入。
+
 `0.1.4` 新增 control-v1 轮次屏障、结果缓存与 busy 真实事件测试。设置 `-DJULIA_CLOUD_SOURCE_DIR=<云端 api_server 源码目录>` 后，额外运行实际 C/Python 消息互通替身测试，共 31 项；不设置时为 30 项，不需要真实设备或外部推理 API。
 
 2026-09-10 多设备阶段新增 WSS 凭证策略、严格同步、控制归属/去重与实际 MQTT 分派测试；完整配置包含 30 个 CTest 项。结果及双设备硬件边界见 [多设备验证交付](../../docs/MULTIDEVICE_VALIDATION_20260910.md)。TinyCC 在本机未跟踪全部头文件依赖，改动 stub/头文件后使用 `cmake --build build-host-multidevice --clean-first`，避免运行旧对象。

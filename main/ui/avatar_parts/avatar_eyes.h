@@ -4,7 +4,8 @@
  *
  * 眼睛三态（avatar_eyes_frame_t）对应三张生成资源：OPEN/HALF/CLOSED。
  * 周期性眨眼由本模块启用的独立任务（blink_task）驱动，调度权在本模块；
- * 瞳孔的“随动/微动”则交给上层 avatar_micro_motion 处理（本模块只暴露眼睛对象句柄）。
+ * 瞳孔的“随动/微动”则交给上层 avatar_micro_motion 处理（本模块只暴露眼睛对象句柄），
+ * 但 avatar_micro_motion.c 与 julia_ui.c 均不在当前构建中，当前调用方只有 julia_avatar.c。
  */
 #pragma once
 
@@ -21,7 +22,8 @@ typedef enum {
 
 /* 创建左右眼对象并启动眨眼任务。前置：parent 为有效容器，未重复初始化。 */
 void avatar_eyes_init(lv_obj_t *parent);
-/* 跟随主状态：记录状态、递增“代”使进行中的眨眼失效，并复位为睁眼（转场除外）。 */
+/* 跟随主状态：记录状态、递增“代”使进行中的眨眼失效，并复位为睁眼（转场除外）。
+ * 只有主状态 1（S1）与 3（S3）允许随机眨眼；julia_avatar 的 IDLE 相位传 1、其余相位传 4。 */
 void avatar_eyes_set_state(uint8_t main_state);
 /* 转场开关：转场期间隐藏眼睛并冻结眨眼。 */
 void avatar_eyes_set_transition_active(bool active);
@@ -31,9 +33,10 @@ void avatar_eyes_set_visible(bool visible);
 void avatar_eyes_show(avatar_eyes_frame_t frame);
 /** 持续保持闭眼，直到调用方显式解除；期间周期眨眼任务不会恢复睁眼。 */
 void avatar_eyes_set_idle_closed(bool closed);
-/* 将 360×360 RGB565 帧内的“绿色瞳孔”像素重着色为金铜色（眼部特征处理）。 */
+/* 将 360×360 RGB565 帧内的“绿色瞳孔”像素重着色为金铜色（眼部特征处理）。
+ * 离线处理生成资源时使用，当前构建内没有调用点。 */
 void avatar_eyes_correct_pupils_rgb565(uint16_t *pixels, uint16_t width, uint16_t height);
-/* 检测帧内是否存在超出预期区域、且呈现特定绿色块（用于校验/调试）。 */
+/* 检测帧内是否存在超出预期区域、且呈现特定绿色块（用于校验/调试），当前构建内无调用点。 */
 bool avatar_eyes_has_green_blob_rgb565(const uint16_t *pixels, uint16_t width,
                                        uint16_t height);
 /* 左右眼对象句柄（供上层绑定给微动引擎）。 */

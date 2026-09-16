@@ -58,6 +58,48 @@ subprocess.run([a.cc, "-I"+str(root/"tests/host"), "-I"+str(root/"tests/host/stu
                 str(Path(a.cjson)/"cJSON.c"), "-o", str(exe)], check=True)
 subprocess.run([str(exe)], check=True)
 
+# capture-v1 must play after the round barrier without a legacy MIC_START.
+capture_fixture = r'''
+#include "control_service_fixture.h"
+'''
+capture_main = main[:main.index('int main(void)')] + r'''
+int main(void){
+ s_control_guard.active=true;
+ state=JULIA_MAIN_STATE_S2_DIALOG;sub=JULIA_S2_SUB_STATE_S2_2_THINKING;
+ barrier(1,"speech-1","speech");
+ assert(strstr(last_wss,"\"accepted\":true") && !s_round_pending);
+ char ack[512];strcpy(ack,last_wss);
+ barrier(1,"speech-1","speech");assert(!strcmp(ack,last_wss) && !s_round_pending);
+ voice_service_on_server_text((const uint8_t*)"SPKS 24000",10);
+ assert(playing && s_playback_role==VOICE_PLAYBACK_ROLE_DIALOG_REPLY);
+ voice_service_on_server_text((const uint8_t*)"MIC_START",9);
+ voice_service_on_server_text((const uint8_t*)"MIC_STOP",8);
+ assert(playing && !starts && !stops);
+ receive(1,"\"type\":\"command\",\"command\":\"MIC_START\"");execute();
+ assert(strstr(last_status,"unsupported_operation") && !starts && playing);
+ receive(2,"\"type\":\"command\",\"command\":\"MIC_STOP\"");execute();
+ assert(strstr(last_status,"unsupported_operation") && !stops && playing);
+ voice_service_on_server_text((const uint8_t*)"SPKE",4);assert(!playing);
+ state=JULIA_MAIN_STATE_S3_STANDBY;sub=0;s_playback_role=VOICE_PLAYBACK_ROLE_NONE;
+ barrier(2,"wake-2","wake");assert(s_round_pending);
+ voice_service_on_server_text((const uint8_t*)"SPKS 24000",10);assert(!playing);
+ assert(!failures);puts("PASS: capture-v1 playback without MIC_START, duplicate sync, obsolete MIC rejection, wake barrier");
+ return 0;
+}
+'''
+names = ("voice_service_handle_control_json", "voice_service_apply_scoped_control",
+         "interaction_id_is_valid", "voice_service_handle_wake_json",
+         "voice_service_on_server_text", "voice_service_on_mqtt_command")
+capture_common = '#define CONFIG_JULIA_LOCAL_CAPTURE_ENABLE 1\n' + COMMON.replace(
+    'voice_local_capture_ready(void){return false;}', 'voice_local_capture_ready(void){return true;}')
+code.write_text(capture_common + capture_fixture + '\n'.join(function(source, n) for n in names) + capture_main,
+                encoding="utf-8")
+subprocess.run([a.cc, *["-I"+str(d) for d in (root/"tests/host", root/"tests/host/stubs",
+                root/"main/fsm", root/"main/voice", Path(a.cjson))], str(code),
+                str(root/"main/voice/voice_control_guard.c"), str(Path(a.cjson)/"cJSON.c"),
+                "-o", str(exe)], check=True)
+subprocess.run([str(exe)], check=True)
+
 # Compile the actual credential selectors in all supported non-certificate modes.
 mqtt = (root / "main/network/mqtt_comm.c").read_text(encoding="utf-8")
 wss = (root / "main/voice/wss_transport.c").read_text(encoding="utf-8")

@@ -12,6 +12,14 @@
  *   - 后台任务定期检查时间；语音处理只负责报告新活动或交流开始/结束。
  *   - 每次活动都会更新一个变化编号。后台任务准备报告超时时会再次核对编号；
  *     如果期间出现新活动，就放弃已经过时的超时结果。
+ *
+ * 与行为状态机的关系：
+ *   - 本模块按“最后一次有效活动”计时，窗口到期只投递 EVT_USER_LEAVE。
+ *   - julia_fsm_runtime 另按“进入 S1 的时刻”用同一个
+ *     CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS 维护自己的陪伴截止时间，并拒绝早于
+ *     该截止时间到达的 EVT_USER_LEAVE。
+ *   - 两处各自独立计时，截止时间可能不一致；迁移最终是否发生由 julia_fsm_runtime 的
+ *     门控和 FSM 迁移判定决定，本模块不保证自己的判断被采纳。
  */
 #include "julia_idle_display.h"
 
@@ -67,6 +75,9 @@ static bool transition_is_current(display_activity_state_t state, uint32_t gener
 /*
  * 陪伴时间耗尽后只报告用户离开。设备状态管理随后统一切换表情和背光，
  * 本模块不直接改变画面。
+ *
+ * 这里依据的是本模块的“最后活动时间”；julia_fsm_runtime 还按“进入 S1 的时刻”独立
+ * 计时，可能拒绝这次 EVT_USER_LEAVE，因此投递成功不代表迁移一定发生。
  */
 static void display_enter_standby(uint32_t generation)
 {
@@ -116,7 +127,14 @@ static void display_theme_task(void *argument)
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_DISPLAY_ACTIVITY_POLL_MS));
+        portENTER_CRITICAL(&s_lock);
+        bool wait_idle = s_busy || s_state == DISPLAY_ACTIVITY_STANDBY;
+        int64_t remaining_us = s_last_activity_us +
+            (int64_t)CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS * 1000000LL - esp_timer_get_time();
+        portEXIT_CRITICAL(&s_lock);
+        TickType_t wait = wait_idle ? portMAX_DELAY : pdMS_TO_TICKS(
+            remaining_us > 0 ? (remaining_us + 999) / 1000 : CONFIG_JULIA_DISPLAY_ACTIVITY_POLL_MS);
+        (void)ulTaskNotifyTake(pdTRUE, wait ? wait : 1);
     }
 }
 
@@ -152,7 +170,8 @@ esp_err_t julia_idle_display_init(void)
 
 /*
  * @brief 记录一次有效交流，并从现在重新计算免唤醒陪伴时间。
- * 唤醒词、用户话语和有效按键都属于活动；本函数不直接改变显示。
+ * 当前调用方是语音链路：唤醒词命中、话语开始、各阶段播放结束和本地采音记录都会刷新
+ * 时间；本函数不直接改变显示。
  */
 void julia_idle_display_note_activity(void)
 {
@@ -161,6 +180,7 @@ void julia_idle_display_note_activity(void)
     s_state = DISPLAY_ACTIVITY_ACTIVE;
     ++s_generation;
     portEXIT_CRITICAL(&s_lock);
+    if (s_task) xTaskNotifyGive(s_task);
 }
 
 /*
@@ -177,6 +197,7 @@ void julia_idle_display_set_busy(bool busy)
     if (busy) s_state = DISPLAY_ACTIVITY_ACTIVE;
     ++s_generation;
     portEXIT_CRITICAL(&s_lock);
+    if (s_task) xTaskNotifyGive(s_task);
 }
 
 /*

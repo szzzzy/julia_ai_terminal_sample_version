@@ -3,6 +3,9 @@
 #include "voice_control_guard.h"
 #include "julia_fsm_runtime.h"
 #define CONFIG_JULIA_MULTI_DEVICE_ENABLE 1
+#ifndef CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+#define CONFIG_JULIA_LOCAL_CAPTURE_ENABLE 0
+#endif
 #define VOICE_SCOPED_CONTROL_MAX_LEN 768U
 #define VOICE_JOB_SCOPED_CONTROL 7
 #define VOICE_INTERACTION_ID_MAX_LEN 64

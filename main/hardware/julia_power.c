@@ -13,7 +13,25 @@
 #include "sdkconfig.h"
 
 static const char *TAG = "JULIA_POWER";
+static esp_pm_lock_handle_t s_cpu_boost;
 
+/* ESP-PM 计数锁（ESP_PM_CPU_FREQ_MAX）：持有期间只要求 CPU 运行在"已配置的最高频率"
+ * 上，即当前 boot／runtime 档位给出的 DFS 上限，并不会超过该上限；最后一个持有者释放后
+ * 才允许 DFS 回落到 min（80 MHz）。每次 begin() 成功都必须对应一次 end()：调用方用局部
+ * 标志记住 begin() 是否成功（未初始化 PM 时返回 false），未配对或凭空释放都会让持锁计数
+ * 与实际持锁者失配。 */
+bool julia_power_boost_begin(void)
+{
+    return s_cpu_boost && esp_pm_lock_acquire(s_cpu_boost) == ESP_OK;
+}
+
+void julia_power_boost_end(void)
+{
+    if (s_cpu_boost) (void)esp_pm_lock_release(s_cpu_boost);
+}
+
+/* 只调整 DFS 上下限：min 固定 80 MHz，max 由 Kconfig 的启动／运行档位给出；
+ * light_sleep 保持关闭，自动休眠尚未与各外设 owner 协调。 */
 static esp_err_t configure_cpu_limit(int max_freq_mhz, const char *profile)
 {
     const esp_pm_config_t config = {
@@ -30,8 +48,10 @@ static esp_err_t configure_cpu_limit(int max_freq_mhz, const char *profile)
 
 esp_err_t julia_power_hold_enable(void)
 {
-    /* Preload the output latch before enabling the pad so the battery switch
-     * does not see an avoidable low pulse while app_main takes ownership. */
+    /* 先把输出锁存预置为高，再把 pad 切成输出：电池开关不会在 app_main 接管的瞬间
+     * 看到可避免的低脉冲。 */
+    /* 保持脚由 CONFIG_JULIA_BAT_CONTROL_GPIO 选择（当前板卡 GPIO7）；同板 GPIO6 是
+     * Key_BAT、GPIO8 是 BAT_ADC，都不能改用作电池供电保持。 */
     const gpio_num_t hold_gpio = (gpio_num_t)CONFIG_JULIA_BAT_CONTROL_GPIO;
     esp_err_t err = gpio_set_level(hold_gpio, 1);
     if (err != ESP_OK) return err;
@@ -53,13 +73,23 @@ esp_err_t julia_power_hold_enable(void)
     return err;
 }
 
+/* 由 app_main 调用：创建供 OTA／TLS 等阻塞操作把 CPU 拉到"当前档位上限"的计数锁
+ * （锁名只是调试标签），再把 CPU 上限设为启动档位。可重复调用（已创建则复用）；
+ * 锁创建失败会直接返回，这一次连启动档位也不会应用，且 boost 接口此后恒为 false。 */
 esp_err_t julia_power_management_init(void)
 {
+    if (!s_cpu_boost) {
+        esp_err_t err = esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "network_ota", &s_cpu_boost);
+        if (err != ESP_OK) return err;
+    }
     /* 启动阶段限制 CPU 峰值，避免与屏幕、音频和 Wi-Fi 上电浪涌叠加。自动
      * Light-sleep 尚未与各 owner 协调，因此仍保持关闭。 */
     return configure_cpu_limit(CONFIG_JULIA_BOOT_CPU_MAX_FREQ_MHZ, "boot");
 }
 
+/* 切换到运行档位：调用者是 app_main，时机在本地显示／音频／FSM 启动完成之后、
+ * 启动后台网络生命周期之前。这里设置的是 DFS 上限（CONFIG_JULIA_RUNTIME_CPU_MAX_FREQ_MHZ，
+ * min 仍为 80 MHz）；持有 boost 锁的操作只会把 CPU 锁在该上限上运行，不会突破它。 */
 esp_err_t julia_power_runtime_profile_enable(void)
 {
     return configure_cpu_limit(CONFIG_JULIA_RUNTIME_CPU_MAX_FREQ_MHZ, "runtime");

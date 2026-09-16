@@ -1,14 +1,12 @@
 /*
  * wake_detector.c - 本地唤醒词检测（WakeNet "你好小智"，wn9_nihaoxiaozhi_tts）
  *
- * 来源：fused 工程 julia_voice.c 的 AFE/WakeNet 初始化与 feed/detect 任务，
- * 裁剪为纯"唤醒检测"形态：
- *   - 只做本地唤醒（不接 ASR/LLM/TTS/FSM——那些在服务器侧或后续接入）；
- *   - 检测到唤醒词 → 调 voice_service_mic_start()（开麦推 PCM1 流），
- *     服务器收到后负责 ASR/LLM/TTS，回推 PCM 由 voice_service 播报。
+ * 只做本地唤醒判定：不使用设备侧 ASR/LLM/TTS，命中后调用 voice_service_mic_start()
+ * 打开麦克风上行，后续识别与回应都在服务器侧完成。
  *
  * 与最小包/board_audio 的衔接：mic_task 的 afe_sink fanout（路径 1）在
- * board_audio_set_afe_sink() 后每 20 ms 回调一次，本模块把它喂给 AFE。
+ * board_audio_set_afe_sink() 后每 20 ms 回调一次，本模块把它喂给 AFE。板级帧是 320 样本，
+ * 而 AFE 要求的 feed 块大小由运行时接口给出，两者不一致时用拼接缓冲对齐。
  *
  * 数据流：
  *   mic_task(20ms/320样本) --wake_afe_feed--> 内部拼接缓冲 --s_afe->feed-->
@@ -17,16 +15,16 @@
  *
  * 线程模型：
  * - wake_afe_feed 运行在 board_audio 的 mic_task 上下文（必须轻量、非阻塞）；
- * - wake_detect_task 常驻 core1/p5（高优先级 5），从 AFE fetch 结果；
- * - s_ready / s_wake_cooldown_until_us 跨任务共享：s_ready 只在 init 写、
- *   其余只读；冷却时间戳仅由 detect 任务读写。
- * - 本模块不持有锁，靠"单生产者（mic_task 喂数）+ 单消费者（detect 拉结果）"
- *   的 AFE 内部队列做解耦。
+ * - wake_detect_task 常驻 core1/p5，从 AFE fetch 结果；
+ * - 喂数与检测分属不同任务，靠 s_capture_epoch/s_feed_epoch 的换代确认协调，而不是锁；
+ * - s_ready 只在 init 写、启动后只读；冷却时间戳仅由 detect 任务读写。
  */
 
 #include "wake_detector.h"
 
 #include <stdbool.h>
+#include <stdatomic.h>
+#include "julia_fsm_runtime.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -47,12 +45,28 @@
 
 #define TAG "WAKE"
 
-/* 唤醒词模型：与 fused wake_word_config.h 一致（量产模型 wn9_nihaoxiaozhi_tts）。 */
+/* 唤醒词模型名必须与 "model" 分区中实际打包的量产模型一致；显示文本只用于日志，
+ * 换词时要同时改模型名、显示文本和分区内容。 */
 #define WAKE_WORD_MODEL_NAME "wn9_nihaoxiaozhi_tts"
 #define WAKE_WORD_DISPLAY_TEXT "你好小智"
 #define MODEL_PARTITION "model"
-/* 两次唤醒之间的最小间隔：屏蔽自己播放/回声导致的二次触发。 */
+/* 两次唤醒之间的最小间隔，单位 us；用来挡住自身播放与回声造成的二次触发，同时防止
+ * AFE 对同一句唤醒词重复上报。 */
 #define WAKE_COOLDOWN_US 2000000LL
+static atomic_bool s_paused;
+static atomic_uint s_capture_epoch;
+static atomic_uint s_feed_epoch;
+
+void wake_detector_set_paused(bool paused)
+{
+    if (atomic_load(&s_paused) != paused) {
+        /* 暂停和恢复都要换代：恢复时先置 paused 再换代，检测任务必须等喂数侧丢弃旧窗口、
+         * 确认换代之后才能继续取结果，否则会拿着暂停前的残帧判定唤醒。 */
+        if (paused) atomic_store(&s_paused, true);
+        atomic_fetch_add(&s_capture_epoch, 1U);
+        atomic_store(&s_paused, paused);
+    }
+}
 
 static const esp_afe_sr_iface_t *s_afe;       /* AFE 接口句柄（ESP-SR 静态表）。 */
 static esp_afe_sr_data_t *s_afe_data;         /* AFE 运行时实例（含 WakeNet/VAD）。 */
@@ -61,7 +75,8 @@ static size_t s_feed_chunk_samples;
 /** 将板级 20 ms（320 sample）帧拼成 AFE 所要求大小的缓冲区。 */
 static size_t s_feed_samples;
 static int16_t *s_feed_buffer;                /* 拼接缓冲（内部 SRAM，8bit）。 */
-static volatile bool s_ready;                 /* init 完成后置 true，供查询。 */
+/* 非 atomic：依赖“仅 init 写、启动后只读”的约定，因此不能由检测任务在运行期改写。 */
+static volatile bool s_ready;
 static int64_t s_wake_cooldown_until_us;      /* 下一次允许唤醒的时间戳（esp_timer us）。 */
 
 /**
@@ -82,9 +97,18 @@ static int64_t s_wake_cooldown_until_us;      /* 下一次允许唤醒的时间�
 static void wake_afe_feed(const int16_t *pcm, size_t samples, void *ctx)
 {
     (void)ctx;
+    if (atomic_load(&s_paused)) return;
     /* 初始化未完成或参数异常时静默丢弃本帧，不阻塞 mic_task。 */
     if (s_afe_data == NULL || s_feed_buffer == NULL || pcm == NULL || samples == 0) {
         return;
+    }
+    unsigned epoch = atomic_load(&s_capture_epoch);
+    if (atomic_load(&s_feed_epoch) != epoch) {
+        /* 换代说明暂停/恢复刚发生：先丢掉拼接余量并复位 AFE 内部缓冲，再记录已跟上新代次。
+         * 不复位就会把暂停前后的音频拼成一段连续输入，AFE 可能据此误判唤醒。 */
+        s_feed_samples = 0;
+        (void)s_afe->reset_buffer(s_afe_data);
+        atomic_store(&s_feed_epoch, epoch);
     }
     while (samples > 0U) {
         size_t copy = s_feed_chunk_samples - s_feed_samples;
@@ -109,10 +133,14 @@ static void wake_afe_feed(const int16_t *pcm, size_t samples, void *ctx)
  * 常驻 core1/p5。每轮 fetch 一次；命中唤醒词且已过冷却窗口则：
  *   1) 记录下次允许唤醒时间（防回声/自身音频二次触发）；
  *   2) 记一次显示活动、置 busy（保持屏亮）；
- *   3) 调用 voice_service_mic_start() 等效于服务器下发 MIC_START，把麦克风
+ *   3) 调用 voice_service_mic_start()：效果等同于服务器下发 MIC_START，把麦克风
  *      流推给服务器（之后的 ASR/LLM/TTS 由服务器完成）；
  *   4) 清 AFE 识别窗口，避免残余结果重复触发。
  * mic_start 失败时回退 busy 状态并记日志（但检测器仍可继续工作）。
+ *
+ * fetch 之后必须重新确认暂停、代次和 quiet：取结果期间状态可能已经变化，旧代次或
+ * 已进入静默的结果不能再触发唤醒。fetch 返回 NULL 或 ESP_FAIL 只是本次没有可用结果，
+ * 跳过本轮即可，不算故障也不结束任务。
  *
  * @param[in] arg 未使用。
  *
@@ -122,12 +150,25 @@ static void wake_detect_task(void *arg)
 {
     (void)arg;
     while (true) {
+        if (atomic_load(&s_paused)) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        unsigned epoch = atomic_load(&s_capture_epoch);
+        if (atomic_load(&s_feed_epoch) != epoch) {
+            /* 喂数侧还没跟上本代次：等它先复位缓冲，避免取到暂停前后的混合结果。 */
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
         afe_fetch_result_t *result = s_afe->fetch(s_afe_data);
+        if (atomic_load(&s_paused) || epoch != atomic_load(&s_capture_epoch) ||
+            julia_fsm_is_quiet(julia_fsm_runtime_get_state())) continue;
         if (result == NULL || result->ret_value == ESP_FAIL) {
             continue;
         }
         int64_t now_us = esp_timer_get_time();
-        /* 冷却判定：避免唤醒词-播放-回声形成无限自触发循环。 */
+        /* 冷却判定：避免唤醒词-播放-回声形成无限自触发循环。同时要求 WakeNet 与 VAD 同时命中，
+         * 以抑制只有能量突起的误唤醒。 */
         if (result->wakeup_state == WAKENET_DETECTED &&
             result->vad_state == AFE_VAD_SPEECH &&
             now_us >= s_wake_cooldown_until_us) {
@@ -152,8 +193,7 @@ static void wake_detect_task(void *arg)
  * @brief 初始化本地唤醒词检测（app 装配阶段调用一次）。
  *
  * 顺序：初始化 AFE/WakeNet -> 校验输入布局(1 声道/正块长) -> 分配 feed 拼接
- * 缓冲 -> 挂板级 AFE sink -> 创建 wake_detect_task -> 置 s_ready。任何失败
- * 都会按序释放已创建的资源（if (s_afe_data) s_afe->destroy）后返回错误码。
+ * 缓冲 -> 挂板级 AFE sink -> 创建 wake_detect_task -> 置 s_ready。
  *
  * @return ESP_OK 就绪；ESP_ERR_INVALID_STATE CONFIG_USE_WAKENET 未启用；
  *         ESP_ERR_NOT_FOUND "model" 分区或 WakeNet 模型无；
@@ -162,6 +202,12 @@ static void wake_detect_task(void *arg)
  *
  * @note 须在 board_audio_init() 与 voice_service_init() 之后调用（依赖二者
  *       提供的 AFE sink 与 mic_start 通道）。AFE 实例依赖 PSRAM，见下方注释。
+ *
+ * @warning 失败路径的释放范围与直觉不一致，未置 s_ready 即视为不可用：
+ *          AFE 创建后、sink 注册前的失败会销毁 AFE 实例并释放拼接缓冲；
+ *          而 xTaskCreatePinnedToCore 失败时不解绑 sink，也不释放 AFE 实例和
+ *          s_feed_buffer，已注册的 sink 仍指向本模块的喂数函数。
+ *          TODO: 需要支持初始化失败后重试时，补齐缓冲释放、AFE 销毁和 sink 解绑。
  */
 esp_err_t wake_detector_init(void)
 {
@@ -174,9 +220,8 @@ esp_err_t wake_detector_init(void)
     ESP_RETURN_ON_FALSE(wake_model, ESP_ERR_NOT_FOUND, TAG, "WakeNet model unavailable");
 
     /* AFE 配置：单麦、无回声(AEC)/无分离(SE)，只保留 WakeNet + VAD。
-     * 实机上 VAD mode 2/3 会漏掉正常唤醒词，因此 VAD 保持最宽松的 mode 0；
-     * WakeNet 仍使用 normal DET_MODE_90，并在检测任务中要求二者同时命中，
-     * 比旧的 VAD_MODE_0 + aggressive DET_MODE_95 更能抑制环境噪声误唤醒。 */
+     * VAD 保持最宽松的 mode 0，WakeNet 用 normal DET_MODE_90，检测任务再要求二者同时命中，
+     * 以抑制只有能量突起的误唤醒；mode 0 与 DET_MODE_90 的具体取舍依据未确认。 */
     afe_config_t config = AFE_CONFIG_DEFAULT();
     config.aec_init = false; config.se_init = false;
     config.vad_init = true; config.wakenet_init = true;
@@ -218,7 +263,8 @@ esp_err_t wake_detector_init(void)
      * 让"喂数"与"判定"分核，避免挤占同一核心。 */
     ESP_RETURN_ON_ERROR(board_audio_set_afe_sink(wake_afe_feed, NULL), TAG, "set AFE sink");
 
-    /* 创建唤醒检测任务（core1/p5，与 fused 一致）。失败则返回，不置 s_ready。 */
+    /* 创建唤醒检测任务（core1/p5，与检测线程模型一致）。失败则返回且不置 s_ready：
+     * 此时 sink 已注册、AFE 与缓冲仍在，调用方只能放弃本地唤醒而不能重试初始化。 */
     if (xTaskCreatePinnedToCore(wake_detect_task, "wake_detect", 6144, NULL, 5,
                                 NULL, 1) != pdPASS) {
         return ESP_ERR_NO_MEM;

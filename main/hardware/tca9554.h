@@ -22,7 +22,7 @@
 /** P2 = Extend_IO3：SD 卡 D3/CS。SDMMC(SD) 模式下必须保持为高。 */
 #define TCA9554_PIN_SD_CS 2
 
-/** P1 = board schematic EXIO2: active-low ST77916 reset. */
+/** P1 = 板级原理图 EXIO2：ST77916 复位，低有效。 */
 #define TCA9554_PIN_LCD_RST 1
 
 /**
@@ -39,7 +39,7 @@ esp_err_t tca9554_init(void);
  *
  * @param[in] pin   引脚号 0～7。
  * @param[in] level true 高电平；false 低电平。
- * @note  阻塞并持有模块 mutex；不得从 ISR 调用。
+ * @note  阻塞并持有模块 mutex，一次调用最多发起 4 次寄存器传输（每次超时 100 ms）；不得从 ISR 调用。
  */
 esp_err_t tca9554_write_pin(uint8_t pin, bool level);
 
@@ -48,7 +48,7 @@ esp_err_t tca9554_write_pin(uint8_t pin, bool level);
  *
  * @param[in]  pin   引脚号 0～7。
  * @param[out] level 输出当前电平。
- * @note  只在 I2C 读取成功时写 level；阻塞且不得从 ISR 调用。
+ * @note  只在 I2C 读取成功时写 level；阻塞（最多 100 ms）且不得从 ISR 调用。
  */
 esp_err_t tca9554_read_pin(uint8_t pin, bool *level);
 

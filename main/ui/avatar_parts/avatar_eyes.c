@@ -8,6 +8,8 @@
  *   - 眨眼调度：本模块自建 blink_task，每 3~8s 随机触发一次“闭眼 90ms → 睁眼 90ms”；
  *     何时眨眼由本文件决定，眼睛对象最终也可能被 avatar_micro_motion 覆盖 src 做状态换帧
  *     （二者共用同一 lv_obj_t，见 julia_ui.c 的“分层眼睛由 micro_motion 统一调度”）。
+ *     注意 avatar_micro_motion.c 与 julia_ui.c 都不参与当前构建，当前唯一调用方是
+ *     julia_avatar.c（相位切换与开机眨眼序列）。
  *   - 瞳孔随动不在此处：本模块只把左右眼对象句柄暴露给上层。
  *
  * 线程模型：
@@ -46,7 +48,8 @@ static volatile uint32_t s_generation;   /* “代”计数：状态一变就 +1
 #define PUPIL_GREEN_RGB565 0x2645U
 
 /* 眼睛资源在 360×360 底图中的基准位置。闭眼素材的眼睑中心略偏高，
- * 只在眨眼帧下移以覆盖底图下缘残留；睁眼帧始终保持生成清单坐标。 */
+ * 只在眨眼帧下移以覆盖底图下缘残留；睁眼帧始终保持生成清单坐标。
+ * 下移量按覆盖残留所需的最小像素取：半闭帧 +1px、全闭帧 +3px。 */
 #define EYE_LEFT_X              112
 #define EYE_RIGHT_X             194
 #define EYE_BASE_Y              108
@@ -133,7 +136,8 @@ static const lv_img_dsc_t *right_source(avatar_eyes_frame_t frame)
 }
 
 /* 立即把左右眼 src 切换到指定帧。前置：眼睛对象已创建。
- * 副作用：内部取 lvgl_port_lock(100ms)；若超时则放弃本帧（不阻塞调用方）。
+ * 副作用：内部取 lvgl_port_lock(100ms)——取锁本身会阻塞等待，最长约 100ms；超时才放弃
+ * 本帧（不重试）。
  * 失败路径：对象未建或锁超时 → 直接返回；刷新耗时 >12ms 打慢刷警告。 */
 void avatar_eyes_show(avatar_eyes_frame_t frame)
 {
@@ -150,11 +154,13 @@ void avatar_eyes_show(avatar_eyes_frame_t frame)
         ESP_LOGW("JULIA_AVATAR", "eye refresh slow frame=%u elapsed_us=%lld", frame, elapsed);
 }
 
-/* 眨眼任务：每 3~8s 随机触发一次“闭眼 90ms → 睁眼 90ms”。
+/* 眨眼任务：每 3~8s 随机触发一次“闭眼 90ms → 睁眼 90ms”。随机间隔由
+ * vTaskDelay(3000 + esp_random()%5001) 给出，时间基准是 FreeRTOS tick 而非 esp_timer。
  * 守卫（满足任一条件则本轮跳过）：转场中、被要求持续闭眼、主状态不在 S1/S3（待机/主动）。
  * “代”机制：触发后先记录 generation，闭眼 90ms 后才睁眼；若期间状态变化使 generation 增值
  * （set_state/set_idle_closed/set_transition_active 都会 ++），说明外部已抢先调整眼睛，
- * 则放弃本次睁眼，避免覆盖外部刚设的帧。 */
+ * 则放弃本次睁眼，避免覆盖外部刚设的帧。
+ * 若 avatar_eyes_show() 因取锁超时而放弃当前帧，本任务不重试，要等下一个眨眼周期。 */
 static void blink_task(void *argument)
 {
     (void)argument;
@@ -197,7 +203,10 @@ void avatar_eyes_init(lv_obj_t *parent)
         ESP_LOGE("JULIA_AVATAR", "failed to create PSRAM blink task");
 }
 
-/* 记录主状态并使进行中的眨眼失效；非转场时复位为睁眼。由 avatar_face_set_state 转发来。 */
+/* 记录主状态并使进行中的眨眼失效；非转场时复位为睁眼。当前由 julia_avatar.c 的相位
+ * 切换直接调用（avatar_face.c 里的转发实现不在当前构建中）。
+ * blink_task 只允许主状态 1（S1 待机）与 3（S3）眨眼；julia_avatar 在 IDLE 相位传 1、
+ * 其余相位传 4，因此 LISTEN/THINK/SPEAK 阶段不会出现随机眨眼。 */
 void avatar_eyes_set_state(uint8_t main_state)
 {
     s_main_state = main_state;
@@ -222,7 +231,7 @@ void avatar_eyes_set_transition_active(bool active)
     if (!active) avatar_eyes_show(AVATAR_EYES_OPEN);
 }
 
-/* 直接显示/隐藏左右眼。内部取 lvgl_port_lock(100ms)，超时则放弃。 */
+/* 直接显示/隐藏左右眼。内部取 lvgl_port_lock(100ms)，取锁会阻塞等待，超时才放弃本次调用。 */
 void avatar_eyes_set_visible(bool visible)
 {
     if (!s_left || !s_right || !lvgl_port_lock(pdMS_TO_TICKS(100))) return;

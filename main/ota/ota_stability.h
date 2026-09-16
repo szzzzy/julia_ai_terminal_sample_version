@@ -32,10 +32,13 @@ extern "C" {
 /** 将统一失败原因转换为稳定日志字符串。 */
 const char *native_ota_failure_reason_name(native_ota_failure_reason_t reason);
 
-/** 检查当前供电是否足以安全写入启动信息并重启；默认实现不附加限制。 */
+/** 检查当前供电是否足以安全写入启动信息并重启；默认实现不附加限制。
+ *  由 ota_stability_pre_commit_check() 在 OTA 任务上下文同步调用（提交临界点），
+ *  实现必须快速返回；返回非 ESP_OK 只推迟提交。 */
 esp_err_t native_ota_check_power(void);
 
-/** 检查当前是否没有不可中断的业务；默认实现不附加限制。 */
+/** 检查当前是否没有不可中断的业务；默认实现不附加限制。
+ *  与电源检查同一调用点：返回非 ESP_OK 表示“稍后提交”，对应上报状态 DEFERRED。 */
 esp_err_t native_ota_check_business_state(void);
 
 /**
@@ -78,12 +81,14 @@ size_t ota_stability_normalize_resume_offset(size_t offset);
  *
  * @param[in,out] record 待更新的恢复记录，不允许为 NULL。
  * @param[in]     offset 已写入镜像长度，单位为字节。
- * @param[in]     force  为 true 时立即保存。
- * @return ESP_OK 未到保存间隔或保存成功。
- * @return 其他 esp_err_t NVS 写入失败。
+ * @param[in]     force  为 true 时绕过间隔判断立即尝试保存。
+ * @return ESP_OK 未到保存间隔（未写入 NVS）或保存成功。
+ * @return 其他 esp_err_t NVS 写入失败；此时 record->verified_offset 可能已在内存中前移，
+ *         但 NVS 仍是上一次成功保存的值。
  *
  * @note offset 会先限制到 expected_size；非 force 调用只有跨过
- *       OTA_STATE_STORE_CHECKPOINT_BYTES 才会触发一次 NVS 写入。
+ *       OTA_STATE_STORE_CHECKPOINT_BYTES 才会触发一次 NVS 写入。force 只跳过这一间隔
+ *       判断，是否真正落盘仍取决于返回值和 ota_state_store_save() 的结果。
  */
 esp_err_t ota_stability_save_checkpoint(ota_resume_record_t *record, size_t offset, bool force);
 
@@ -136,12 +141,13 @@ esp_err_t ota_stability_validate_image_header(const uint8_t *header, size_t head
  *
  * @param[in]  partition 目标 OTA 分区，不允许为 NULL。
  * @param[in]  manifest  已校验服务器清单，不允许为 NULL。
- * @param[out] app_desc  接收镜像应用描述符，不允许为 NULL。
+ * @param[out] app_desc  接收镜像应用描述符，不允许为 NULL；失败时可能已被部分写入。
  * @return ESP_OK 分区前缀可安全用于恢复。
  * @return 其他 esp_err_t Flash 读取或镜像校验失败。
  *
  * @note 仅当恢复记录的 target_partition_subtype 与当前分区一致时才应调用；本函数
- *       本身只验证分区头和清单，不验证已写入长度。
+ *       本身只验证分区头和清单，不验证已写入长度。应用描述符在校验前就已从读取缓冲区
+ *       拷入 app_desc，返回非 ESP_OK 时不能使用其内容。
  */
 esp_err_t ota_stability_validate_partition_header(const esp_partition_t *partition,
                                                   const native_ota_manifest_t *manifest,
@@ -172,6 +178,8 @@ esp_err_t ota_stability_calculate_partition_sha256(const esp_partition_t *partit
  *
  * @note 函数只检查条件；调用方仍需在返回成功后调用 esp_ota_set_boot_partition()，
  *       失败时保留 READY_TO_COMMIT 记录以便下次启动继续尝试。
+ * @note 堆阈值 CONFIG_OTA_MIN_FREE_HEAP 与 ota_boot_health.c 的启动验收共用同一个
+ *       Kconfig 值：改动它等于同时改变“提交前”和“新镜像启动验收”两道门槛。
  */
 native_ota_failure_reason_t ota_stability_pre_commit_check(
     const native_ota_manifest_t *manifest, const esp_partition_t *partition);

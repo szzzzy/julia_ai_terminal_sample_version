@@ -62,7 +62,7 @@ int main(void)
 
     char *runtime = read_source("main/fsm/julia_fsm_runtime.c");
     assert(strstr(runtime, "case FSM_PRESENT_S6_SLEEP:") != NULL);
-    assert(strstr(runtime, "julia_backlight_set(0);") != NULL);
+    assert(strstr(runtime, "julia_backlight_force_off();") != NULL);
     assert(strstr(runtime, "lvgl_port_set_display_off(true)") != NULL);
     free(runtime);
 

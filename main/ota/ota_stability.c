@@ -77,6 +77,9 @@ const char *native_ota_failure_reason_name(native_ota_failure_reason_t reason)
  * @return ESP_OK 当前示例不附加电源限制。
  *
  * @note 产品代码可提供同名强符号覆盖该弱实现。
+ * @note 只在 ota_stability_pre_commit_check() 内被同步调用，运行在 OTA 任务上下文，
+ *       且处于“镜像已校验、即将切换启动分区”的临界点：实现必须快速返回，不得等待
+ *       网络、用户输入或长时间阻塞；返回非 ESP_OK 只推迟提交，不隔离制品。
  */
 __attribute__((weak)) esp_err_t native_ota_check_power(void)
 {
@@ -90,6 +93,8 @@ __attribute__((weak)) esp_err_t native_ota_check_power(void)
  * @return ESP_OK 当前示例不附加业务状态限制。
  *
  * @note 产品代码可提供同名强符号覆盖该弱实现。
+ * @note 与电源钩子同一调用点：OTA 任务上下文、提交临界点内同步执行，必须快速返回；
+ *       返回非 ESP_OK 会让上报状态映射为 DEFERRED（保留镜像稍后再提交），不是终态失败。
  */
 __attribute__((weak)) esp_err_t native_ota_check_business_state(void)
 {
@@ -154,12 +159,17 @@ esp_err_t ota_stability_save_checkpoint(ota_resume_record_t *record, size_t offs
     if (normalized > record->expected_size) {
         normalized = record->expected_size;
     }
-    /* 以固定字节间隔写 NVS，减少掉电恢复收益与 Flash 擦写次数之间的冲突。 */
+    /* 以固定字节间隔写 NVS，减少掉电恢复收益与 Flash 擦写次数之间的冲突。
+     * 间隔常量 OTA_STATE_STORE_CHECKPOINT_BYTES 的取值来源未确认。 */
     if (!force && normalized < (size_t)record->verified_offset +
                               OTA_STATE_STORE_CHECKPOINT_BYTES) {
         return ESP_OK;
     }
 
+    /* 只有跨过保存间隔或传 force 才前移，因此该字段在进程内单调不降；force 会绕过
+     * 间隔判断，不额外保证已写入长度与检查点之间的差值。字段在调用 ota_state_store_save()
+     * 之前就已写入 RAM，本次保存成功与否才是它能否当作已落盘的依据：返回非 ESP_OK 时
+     * 内存值已前移但 NVS 仍是旧值，调用方不得把它当作已持久化的前缀长度。 */
     record->verified_offset = (uint32_t)normalized;
     return ota_state_store_save(record);
 }
@@ -208,7 +218,8 @@ bool ota_stability_parse_content_range(const char *value, size_t *range_start,
  * @param[in] header 网络接收的镜像前缀。
  * @param[in] header_size 前缀长度，单位为字节。
  * @param[in] manifest 当前清单。
- * @param[out] app_desc 接收复制出的应用描述符。
+ * @param[out] app_desc 接收复制出的应用描述符；在版本/安全版本校验之前就已写入，
+ *             因此返回非 ESP_OK 时其内容不代表可用描述符。
  * @return ESP_OK 成功；其他值表示芯片、项目、版本或安全版本不匹配。
  */
 esp_err_t ota_stability_validate_image_header(const uint8_t *header, size_t header_size,
@@ -268,7 +279,7 @@ esp_err_t ota_stability_validate_image_header(const uint8_t *header, size_t head
  *
  * @param[in] partition 目标 OTA 分区。
  * @param[in] manifest 当前清单。
- * @param[out] app_desc 接收应用描述符。
+ * @param[out] app_desc 接收应用描述符；与 validate_image_header 相同，失败时可能已被写入。
  * @return ESP_OK 分区前缀仍对应当前 artifact；其他值表示不能续传。
  */
 esp_err_t ota_stability_validate_partition_header(const esp_partition_t *partition,
@@ -366,12 +377,16 @@ native_ota_failure_reason_t ota_stability_pre_commit_check(
         manifest->image_size > partition->size) {
         return NATIVE_OTA_FAILURE_IMAGE_TOO_LARGE;
     }
-    /* 镜像切换会触发后续重启；保持最低可用堆，避免在提交临界点进入资源枯竭状态。 */
+    /* 镜像切换会触发后续重启；保持最低可用堆，避免在提交临界点进入资源枯竭状态。
+     * 同一阈值 CONFIG_OTA_MIN_FREE_HEAP 也被新镜像启动验收使用（ota_boot_health.c），
+     * 两处共用同一个 Kconfig 值，调整时必须同时评估“提交前”和“启动验收”两个阶段。 */
     if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < CONFIG_OTA_MIN_FREE_HEAP) {
         ESP_LOGE(TAG, "Free heap is below OTA commit threshold");
         return NATIVE_OTA_FAILURE_PRECONDITION_LOW_POWER;
     }
     if (native_ota_check_power() != ESP_OK) {
+        /* 日志保留的 VERIFIED_WAIT_COMMIT 是旧设计的措辞：当前没有同名状态或宏，
+         * 实际行为是保留 READY_TO_COMMIT 记录、本次不提交，等待下次再试。 */
         ESP_LOGW(TAG, "Board power check requested VERIFIED_WAIT_COMMIT");
         return NATIVE_OTA_FAILURE_PRECONDITION_LOW_POWER;
     }

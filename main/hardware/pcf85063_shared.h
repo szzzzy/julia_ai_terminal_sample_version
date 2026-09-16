@@ -34,6 +34,9 @@ bool board_rtc_ready(void);
 esp_err_t board_rtc_read_time(board_rtc_datetime_t *time);
 /** 保存有效公历日期，保留 1970～2069 年份编码以兼容旧固件。 */
 esp_err_t board_rtc_set_time(const board_rtc_datetime_t *time);
+/** 校验各字段范围与公历日期是否成立；不校验 dotw 与实际日期是否自洽。 */
 bool board_rtc_datetime_valid(const board_rtc_datetime_t *time);
+/** 编码为 7 字节 BCD 寄存器块（秒起）；日期非法或 data 为空时返回 false 且不写输出。 */
 bool board_rtc_encode(const board_rtc_datetime_t *time, uint8_t data[7]);
+/** 解码 7 字节寄存器块；停振标志、非法 BCD 或非法日期返回 false，成功时才写 *time。 */
 bool board_rtc_decode(const uint8_t data[7], uint16_t year_base, board_rtc_datetime_t *time);

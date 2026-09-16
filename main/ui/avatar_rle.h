@@ -12,6 +12,7 @@
 
 #include "esp_err.h"
 
-/** Decode the project RGB565 RLE stream into exactly output_pixels pixels. */
+/** 把项目自有 RGB565 RLE 流解成恰好 output_pixels 个像素。
+ *  不分配内存：output 缓冲由调用方准备，仅在输入被完全消费且输出恰好填满时成功。 */
 esp_err_t avatar_rle_decode_rgb565(const uint8_t *input, size_t input_size,
                                    uint16_t *output, size_t output_pixels);

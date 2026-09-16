@@ -30,7 +30,12 @@ extern "C" {
 /**
  * @brief 查询设备是否正在下载、校验或提交一项固件升级。
  *
- * @return true 已有 OTA 任务运行；false 空闲。
+ * @return true 已有 OTA 任务运行（含成功提交后、等待 esp_restart() 的窗口）；
+ *         false 当前没有任务在跑。
+ *
+ * @note false 不等于“没有待提交的升级”：镜像已校验但提交前条件不满足时会以
+ *       READY_TO_COMMIT 记录退出（上报 deferred），任务不再运行，下次启动或检查仍会继续
+ *       提交。调用方（如音频下载准入）若需要“绝对不碰 OTA 分区”，必须同时考虑这种状态。
  */
 bool ota_engine_is_running(void);
 

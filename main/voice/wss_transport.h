@@ -53,7 +53,9 @@ typedef void (*wss_transport_binary_cb_t)(const uint8_t *data, size_t len);
  * @param[in] item      待处理内容，由语音服务定义，仅在回调返回前有效。
  * @param[in] item_size 内容长度，必须与启动时约定一致。
  *
- * @note 在会话任务上下文中同步执行；回调内可直接调用 wss_transport_send_now()。
+ * @note 在会话任务上下文中同步执行，因此回调必须保持有界、不得阻塞调用方；
+ *       回调内可直接调用 wss_transport_send_now()。
+ * @note item 指向队列条目接收缓冲，内存只在本次回调期间有效，需要长期保存时必须自行复制。
  */
 typedef void (*wss_transport_queue_item_cb_t)(void *item, size_t item_size);
 
@@ -64,17 +66,19 @@ typedef void (*wss_transport_queue_item_cb_t)(void *item, size_t item_size);
  */
 typedef void (*wss_transport_session_start_cb_t)(void);
 
+/** 会话结束原因：当前只进入断链归因日志和 on_session_end 的 reason 参数，不改变重连节奏
+ * （重连下限由 CLOSE 码决定，见 wss_auth_policy.h 的 wss_close_retry_floor）。 */
 typedef enum {
-    WSS_TRANSPORT_END_NONE = 0,
-    WSS_TRANSPORT_END_PEER_CLOSE,
-    WSS_TRANSPORT_END_RX_ERROR,
-    WSS_TRANSPORT_END_TX_ERROR,
-    WSS_TRANSPORT_END_TX_STALL,
-    WSS_TRANSPORT_END_KEEPALIVE_TIMEOUT,
-    WSS_TRANSPORT_END_PROTOCOL_ERROR,
-    WSS_TRANSPORT_END_APPLICATION_ERROR,
-    WSS_TRANSPORT_END_AUDIO_OVERFLOW,
-    WSS_TRANSPORT_END_REASON_COUNT,
+    WSS_TRANSPORT_END_NONE = 0, /**< 尚无归因，仅作为"未记录"的初值。 */
+    WSS_TRANSPORT_END_PEER_CLOSE, /**< 对端发来 CLOSE（含 4401 认证拒绝等应用码）。 */
+    WSS_TRANSPORT_END_RX_ERROR, /**< 接收失败、EOF 或非法帧，链路已不可用。 */
+    WSS_TRANSPORT_END_TX_ERROR, /**< 写方向永久错误，无法再送出字节。 */
+    WSS_TRANSPORT_END_TX_STALL, /**< 帧级写期限耗尽，对端长时间不收数据。 */
+    WSS_TRANSPORT_END_KEEPALIVE_TIMEOUT, /**< 发出 PING 后探测窗口内没有任何下行帧。 */
+    WSS_TRANSPORT_END_PROTOCOL_ERROR, /**< 本地按 RFC 6455 判定协议错误并以 1002/1007 关闭。 */
+    WSS_TRANSPORT_END_APPLICATION_ERROR, /**< 上层判定业务无法安全继续，请求结束会话。 */
+    WSS_TRANSPORT_END_AUDIO_OVERFLOW, /**< 上行缓冲写满，上层要求结束会话并重新开始。 */
+    WSS_TRANSPORT_END_REASON_COUNT, /**< 枚举计数哨兵，不是有效原因。 */
 } wss_transport_end_reason_t;
 
 /**
@@ -82,6 +86,8 @@ typedef enum {
  *
  * @param[in] reason 本次连接结束的主要原因。
  * @note 语音服务应在这里停止上传和播放，并丢弃只属于旧连接的数据。
+ * @note 回调发生在 TLS 句柄销毁之后、重连等待之前，仍在会话任务上下文；此时链路已不可用，
+ *       任何发送都会失败，属预期行为。
  */
 typedef void (*wss_transport_session_end_cb_t)(wss_transport_end_reason_t reason);
 
@@ -91,12 +97,13 @@ typedef void (*wss_transport_session_end_cb_t)(wss_transport_end_reason_t reason
 typedef struct {
     wss_transport_text_cb_t on_text; /**< 服务端文本消息回调，可为 NULL。 */
     wss_transport_binary_cb_t on_binary; /**< 服务端二进制消息回调，可为 NULL。 */
-    wss_transport_queue_item_cb_t on_queue_item; /**< 命令队列条目回调，不允许为 NULL。 */
+    wss_transport_queue_item_cb_t on_queue_item; /**< 普通命令队列条目回调，不允许为 NULL。 */
     wss_transport_session_start_cb_t on_session_start; /**< 会话认证成功回调，可为 NULL。 */
     wss_transport_session_end_cb_t on_session_end; /**< 会话结束回调，可为 NULL。 */
-    void (*on_poll)(void); /**< 每轮收发后继续推进少量语音或文件数据。 */
-    size_t queue_item_size; /**< 每项待发送业务内容占用的字节数。 */
-    unsigned queue_depth; /**< 最多允许积压多少项待发送内容。 */
+    void (*on_poll)(void); /**< 每轮收到一帧（含空闲超时）后调用一次，用于推进少量语音或文件
+                            *   数据；必须保持有界、不得阻塞。可为 NULL。 */
+    size_t queue_item_size; /**< 每项待发送业务内容占用的字节数；普通队列与固定 4 槽的控制队列共用。 */
+    unsigned queue_depth; /**< 普通待发送内容的队列深度；控制队列固定 4 槽，不受该字段影响。 */
 } wss_transport_config_t;
 
 /**
@@ -115,6 +122,11 @@ typedef struct {
  * @note 必须取得 IPv4 后调用；本函数不允许在中断上下文中调用。
  */
 esp_err_t wss_transport_start(const wss_transport_config_t *config);
+/** 暂停或恢复整个收发循环：暂停请求会唤醒会话任务，使其立即停止连接与收发。
+ * 恢复后从重连流程重新开始，不在暂停期间保留旧会话。 */
+void wss_transport_set_paused(bool paused);
+/** true 表示"已请求暂停且会话任务确实已停下"；暂停请求刚发出、任务尚未就绪时仍为 false。 */
+bool wss_transport_is_paused(void);
 
 /**
  * @brief 提交一项待语音连接处理的业务内容，例如文件发送请求。
@@ -136,17 +148,27 @@ esp_err_t wss_transport_enqueue(const void *item, size_t item_size);
 esp_err_t wss_transport_enqueue_control(const void *item, size_t item_size);
 /** 业务处理已经无法安全继续时，要求关闭当前连接并重新建立。 */
 void wss_transport_fail_session(void);
-/* WSS owner only; changes the next retry delay without blocking this callback. */
+/** 抬高下一次重连等待的下限，单位秒，上限 300 s，只抬高不降低；认证成功后由会话任务清零。
+ * 只允许在 WSS owner 上下文调用，不阻塞该回调。当前调用点传入 30/60（见 wss_close_retry_floor）。 */
 void wss_transport_defer_retry(unsigned seconds);
 
 /**
  * 从其它任务请求结束当前语音连接。调用方只说明原因，不能直接关闭加密连接；
  * 负责收发的任务会在当前完整写入结束后统一清理。主要用于麦克风缓冲已满。
+ *
+ * @note 只有第一次请求生效，后续原因被忽略；请求成功即关闭就绪标志，新的入队会立刻被拒绝，
+ *       但 TLS 释放始终由 owner 执行。
  */
 esp_err_t wss_transport_request_session_end(wss_transport_end_reason_t reason);
 /**
  * 线程安全地读取会话就绪快照。true 表示 TLS、WebSocket 握手和认证均完成；
  * 调用不接触 TLS 句柄、不阻塞，可供连接状态巡检 Task 使用。
+ *
+ * @note 实现先判暂停与 quiet 再看会话标志：暂停期间恒为 false。quiet 只在
+ *       CONFIG_JULIA_LOCAL_CAPTURE_ENABLE 关闭的兼容分支下才使本函数恒为 false；该选项
+ *       开启（当前生效）时 wss_quiet_blocks() 恒为 false，S5/S6 仍可保持连接与就绪。
+ *       因此 false 只说明"当前不可收发"，不等于握手失败或链路已断；FSM 的 WSS 在线判据
+ *       建立在本函数之上，不能用它区分"暂停"与"断链"。
  */
 bool wss_transport_is_ready(void);
 const char *wss_transport_end_reason_name(wss_transport_end_reason_t reason);

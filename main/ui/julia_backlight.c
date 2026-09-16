@@ -10,7 +10,7 @@
  * 渐变，实际亮度过渡由硬件完成，因此不会持续占用 CPU。
  *
  * 呼吸曲线预先计算，低亮度变化经过视觉校正，避免人眼看到突跳。最小亮度配置为零时，
- * 每个周期会短暂停留在全黑，降低平均功耗但不改变渐亮和渐暗速度。
+ * 每个周期采用 20% 渐亮、20% 渐暗、60% 全黑；S6 暂停 PWM 定时器。
  */
 #include "julia_backlight.h"
 #include "driver/gpio.h"
@@ -24,6 +24,9 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+/* JULIA_BACKLIGHT_GPIO 正常由构建注入（main/CMakeLists.txt 的
+ * target_compile_definitions 定义 JULIA_BACKLIGHT_GPIO=5）。下面的 38 只是宏缺失时的
+ * 兜底值，并伴随编译告警；看到该告警说明构建定义丢失，不能据此判断板级接线。 */
 #ifndef JULIA_BACKLIGHT_GPIO
 #define JULIA_BACKLIGHT_GPIO 38
 #warning "JULIA_BACKLIGHT_GPIO undefined; falling back to GPIO 38"
@@ -32,19 +35,29 @@
 #define JULIA_DISPLAY_LOG 0
 #endif
 
+/* LEDC 固定用 low-speed timer0/channel0，占空比满量程 1023（10 bit，即 BL_MAX_DUTY）。
+ * 亮度百分比按 duty = 1023 * percent / 100 线性换算，1% 约等于 10 个计数。
+ * 20kHz 频率与 10bit 分辨率沿用既有实现，仓库内没有对应的硬件依据记录（来源未确认）。 */
 #define BL_MODE LEDC_LOW_SPEED_MODE
 #define BL_TIMER LEDC_TIMER_0
 #define BL_CHANNEL LEDC_CHANNEL_0
 #define BL_MAX_DUTY 1023U
+/* 呼吸用"分段 + 硬件 fade"实现：每段只发起一次 LEDC fade，插值由硬件完成，CPU 不参与。
+ * 段数默认 120，但会被 period_ms / BREATHE_MIN_SEGMENT_MS（或 tick 周期）的上限裁剪，
+ * 因此实际段数可能小于请求值；段时长 = period_ms / 实际段数。 */
 #define BREATHE_DEFAULT_SEGMENTS 120U
 #define BREATHE_LUT_SEGMENTS 120U
 #define BREATHE_MIN_SEGMENT_MS 5U
-/* 最小亮度为零时，每个周期有 15% 时间保持全黑，以降低平均功耗。 */
+/* 最小亮度为零时，20% 渐亮、20% 渐暗、60% 全黑。 */
 #ifndef BREATHE_ZERO_HOLD_PERCENT
-#define BREATHE_ZERO_HOLD_PERCENT 15U
+#define BREATHE_ZERO_HOLD_PERCENT 60U
 #endif
 
-/* 预先计算的呼吸曲线保存在 Flash，运行时不做浮点运算；视觉校正不会改变配置的端点。 */
+/* 预先计算的呼吸曲线保存在 Flash，运行时不做浮点运算。两条曲线都是 Q10 的升余弦
+ * （即正弦平方）形状：0～1023 满量程、两端接近 0、中点为峰值 1023。s_sine_q10 为线性
+ * 占空比版本，s_sine_gamma22_q10 是同一形状按 gamma 2.2 做感知校正后的版本，由
+ * julia_backlight_set_gamma() 选择；两者仍沿用 s_sine_* 命名，名称不代表半周期正弦。
+ * 曲线先归一化再映射到 [s_min_percent, s_max_percent]，因此视觉校正不会改变配置的端点亮度。 */
 static const uint16_t s_sine_q10[BREATHE_LUT_SEGMENTS + 1] = {
     0,1,3,6,11,17,25,34,44,56,69,83,98,114,131,150,169,190,211,233,256,
     279,303,328,353,379,405,431,458,485,511,538,565,592,618,644,670,695,
@@ -78,6 +91,13 @@ static TaskHandle_t s_breathe_task;
 static SemaphoreHandle_t s_fade_done;
 /* 配置、停止和一次完整 LEDC 提交共享递归锁；ISR 只发通知，从不取此锁。 */
 static SemaphoreHandle_t s_control_lock;
+static bool s_pwm_paused;
+
+static void resume_pwm(void)
+{
+    if (s_pwm_paused && ledc_timer_resume(BL_MODE, BL_TIMER) == ESP_OK)
+        s_pwm_paused = false;
+}
 
 static bool control_lock(void)
 {
@@ -97,12 +117,13 @@ static uint32_t duty_for(uint8_t percent)
  * 避免 gamma 校正改变配置的明暗端点。 */
 static uint32_t curve_duty(uint16_t index)
 {
+    uint16_t curve_segments = s_segments;
     if (s_min_percent == 0U && BREATHE_ZERO_HOLD_PERCENT > 0U) {
-        uint16_t hold = (uint16_t)(((uint32_t)s_segments * BREATHE_ZERO_HOLD_PERCENT) / 100U);
-        if (index <= hold || index >= (uint16_t)(s_segments - hold)) return 0;
+        curve_segments = (uint16_t)((uint32_t)s_segments * (100U - BREATHE_ZERO_HOLD_PERCENT) / 100U);
+        if (!curve_segments || index >= curve_segments) return 0;
     }
     uint16_t lut_index = (uint16_t)(((uint32_t)index * BREATHE_LUT_SEGMENTS +
-                                     s_segments / 2U) / s_segments);
+                                     curve_segments / 2U) / curve_segments);
     if (lut_index > BREATHE_LUT_SEGMENTS) lut_index = BREATHE_LUT_SEGMENTS;
     const uint16_t *lut = s_gamma_enabled ? s_sine_gamma22_q10 : s_sine_q10;
     uint32_t minimum = duty_for(s_min_percent);
@@ -168,14 +189,16 @@ static void breathe_task(void *arg)
                      s_gamma_enabled ? 1U : 0U);
 #endif
         s_curve_index = (s_curve_index + 1U) % (s_segments + 1U);
-        /* Index zero is the duplicated cycle endpoint; proceed to one. */
+        /* 索引 0 与末尾是同一个周期端点（曲线表首尾重复），回绕后跳到 1 避免重复输出。 */
         if (s_curve_index == 0U) s_curve_index = 1U;
         (void)start_segment(s_curve_index);
         control_unlock();
     }
 }
 
-/* 初始化完成后 duty 仍为零；只有首帧提交者可以显式点亮，避免暴露未初始化画面。 */
+/* 初始化完成后 duty 仍为零；只有首帧提交者可以显式点亮，避免暴露未初始化画面。
+ * 该 GPIO 初始化后被路由到 LEDC 通道，因此点亮/熄灭都应经 julia_backlight_* 接口，
+ * 不要再直接 gpio_set_level()。 */
 esp_err_t julia_backlight_init(void)
 {
     if (s_breathe_task != NULL) return ESP_OK;
@@ -221,6 +244,7 @@ void julia_backlight_breathe_stop(void)
 void julia_backlight_set(uint8_t percent)
 {
     if (!control_lock()) return;
+    resume_pwm();
     julia_backlight_breathe_stop();
     if (percent > 100U) percent = 100U;
     s_percent = percent;
@@ -233,6 +257,7 @@ void julia_backlight_set(uint8_t percent)
 esp_err_t julia_backlight_fade_to(uint8_t percent, uint32_t duration_ms)
 {
     if (!control_lock()) return ESP_ERR_INVALID_STATE;
+    resume_pwm();
     julia_backlight_breathe_stop();
     if (percent > 100U) percent = 100U;
     if (s_fade_done) xSemaphoreTake(s_fade_done, 0);
@@ -244,7 +269,11 @@ esp_err_t julia_backlight_fade_to(uint8_t percent, uint32_t duration_ms)
     return err;
 }
 
-/* 等待最近一次 fade 完成（由 ISR 给 s_fade_done）。 */
+/* 等待最近一次 fade 完成。完成信号由呼吸任务释放，不由 fade 完成 ISR 释放：ISR 只调用
+ * vTaskNotifyGiveFromISR 唤醒 s_breathe_task，任务在确认 s_breathing 为假且 LEDC 占空比已
+ * 到达目标后才调用 xSemaphoreGive(s_fade_done)。只消费一次信号，调用方需自行保证信号属于
+ * 本次 fade（julia_backlight_fade_to 会先清掉残留信号）；超时返回 ESP_ERR_TIMEOUT，
+ * 但不改变当前 PWM 输出。 */
 esp_err_t julia_backlight_wait_fade(uint32_t timeout_ms)
 {
     if (!s_fade_done) return ESP_ERR_INVALID_STATE;
@@ -273,6 +302,7 @@ esp_err_t julia_backlight_breathe_start_ex(uint8_t min_percent, uint8_t max_perc
     if (segments > allowed_segments) segments = (uint16_t)allowed_segments;
     if (!control_lock()) return ESP_ERR_INVALID_STATE;
     julia_backlight_breathe_stop();
+    resume_pwm();
     s_min_percent = min_percent;
     s_max_percent = max_percent;
     s_period_ms = period_ms;
@@ -310,11 +340,16 @@ bool julia_backlight_breathing(void) { return s_breathing; }
 uint8_t julia_backlight_get_percent(void) { return s_percent; }
 uint32_t julia_backlight_get_duty(void) { return ledc_get_duty(BL_MODE, BL_CHANNEL); }
 int julia_backlight_get_gpio_level(void) { return gpio_get_level(JULIA_BACKLIGHT_GPIO); }
+/* 强制熄灭：停呼吸、停 LEDC 输出并暂停定时器（记 s_pwm_paused），再把引脚拉低。
+ * 之后没有单独的"恢复"接口：julia_backlight_set()、julia_backlight_fade_to() 和
+ * julia_backlight_breathe_start_ex() 都会先 resume_pwm() 隐式恢复 PWM；
+ * 只调用 julia_backlight_set_gamma() 或查询接口不会恢复输出。 */
 void julia_backlight_force_off(void)
 {
     if (!control_lock()) return;
     julia_backlight_breathe_stop();
     ledc_stop(BL_MODE, BL_CHANNEL, 0);
+    if (ledc_timer_pause(BL_MODE, BL_TIMER) == ESP_OK) s_pwm_paused = true;
     gpio_set_level(JULIA_BACKLIGHT_GPIO, 0);
     s_percent = 0;
     control_unlock();

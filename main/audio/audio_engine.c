@@ -40,14 +40,20 @@
 
 static const char *TAG = "audio_engine";
 
-/** 音频断点记录布局版本；改变布局时必须递增，否则旧记录判为过期从零下载。 */
+/** 音频断点记录布局版本。改布局必须同步递增：递增后旧布局记录会因版本不符被拒绝
+ * （audio_record_load() 返回 ESP_ERR_INVALID_VERSION，按无记录从零下载）；反之改布局
+ * 而不递增，旧记录会被当成本版本记录读入并按新字段语义解释，属于误读。 */
 #define AUDIO_ENGINE_STORE_SCHEMA_VERSION 1U
 
 /**
  * NVS 断点检查点之间的最小写入间隔，单位为字节。
  * 权衡：间隔越小，掉电可续传的粒度越细，但 NVS 擦写次数越多、写入越频繁；
  * 间隔越大，NVS 越省、但掉电后最多丢失 <16 KiB 已下载数据需要重下。
- * 音频素材通常远小于固件（上限 1 MiB），此处与 OTA 的检查点窗口保持同一量级。
+ * 取值与 OTA 的检查点窗口相同（OTA_STATE_STORE_CHECKPOINT_BYTES 同为 16 KiB）；
+ * 素材尺寸上限由 CONFIG_AUDIO_MAX_FILE_SIZE 给出，本工程 sdkconfig 中该值为
+ * 1048576 字节 = 1 MiB（Kconfig 默认值是 3145728 字节 = 3 MiB，范围 64 KiB～8 MiB），
+ * 实际还受 audio_data 分区容量约束。仓库内没有素材尺寸样本，"音频素材通常远小于固件"
+ * 这一说法无法核对（依据未确认）。
  */
 #define AUDIO_ENGINE_CHECKPOINT_BYTES (16U * 1024U)
 
@@ -62,7 +68,8 @@ static const char *TAG = "audio_engine";
  * 事件任务、主动检查任务）发起下载时互斥，避免同一时刻存在两个音频下载任务。
  * - 写者：audio_engine_start() 创建任务前置 true；audio_download_task() 结尾
  *   （cleanup 段）置 false。两者都持自旋锁短临界区。
- * - 读者：audio_engine_is_running()（供 audio_service 判定 OTA/音频互斥）。
+ * - 读者：audio_engine_is_running()（供 audio_service 判定是否已有音频下载在跑；
+ *   OTA 准入一侧不查询本标志）。
  * - 锁语义：用 portMUX 自旋锁是因为可能在中断/事件上下文被读取；锁只保护这一个
  *   bool，绝不包住下载、Flash/NVS 写等耗时操作，否则会拉长中断/调度延迟。
  * - 注意：锁不是队列/信号量，不提供"等待下载完成"能力；调用方如需等待应轮询
@@ -80,11 +87,14 @@ static portMUX_TYPE s_audio_state_lock = portMUX_INITIALIZER_UNLOCKED;
  *   绝不会超前。
  * - 恢复前提：只有"清单元数据完全一致"时才允许复用前缀；恢复时仍须对清单、URL、
  *   摘要和 HTTP Content-Range 重新校验（服务器可能返回别的内容），不能盲目信任。
- * - version 字段仅用于日志/展示，不参与 audio_record_matches() 的身份判定——
- *   因为同一 audio_id + 大小 + URL + 摘要即视为同一素材内容。
+ * - version 字段只被写入、不被本文件读取，也不参与 audio_record_matches() 的身份判定
+ *   （同一 audio_id + 大小 + URL + 摘要即视为同一素材内容）；它随记录一起持久化，
+ *   供人工核对/后续版本使用。
  * - etag 是"服务器确认续传对象仍是同一版本"的凭据，仅在 resume 时传入下载器。
  * - 布局必须是定长、无指针、无 padding（见下方 _Static_assert），否则跨固件版本
- *   NVS 兼容性会被破坏。
+ *   NVS 兼容性会被破坏；改布局的同时必须递增 AUDIO_ENGINE_STORE_SCHEMA_VERSION，
+ *   这样旧记录被判为"版本不符"而不是被按新布局误读（后果是从零重下，不是数据错用）；
+ *   若改了布局却不递增版本，旧记录就会被当成本版本记录读入并按新字段语义误读。
  */
 typedef struct {
     uint32_t schema_version; /**< 记录布局版本，必须等于 AUDIO_ENGINE_STORE_SCHEMA_VERSION。 */
@@ -113,11 +123,14 @@ static void audio_download_task(void *pvParameter);
 /* 本组 NVS 辅助约定：
  * - 全部运行在音频下载任务（audio_download_task）上下文中，属普通任务，可阻塞，
  *   但不是中断安全；不持有 s_audio_state_lock。
- * - 每次"保存"都执行 nvs_set_* + nvs_commit：写与提交成对，保证重命名掉电会话后
- *   记录要么完整写入要么保持旧值（NVS 本身在此处不做跨页事务，因此以 commit 为
- *   持久化边界）。失败时把底层 esp_err_t 原样返回，由调用方决定是否中止下载。
- * - audio_record_load/audio_current_version_load 失败时返回非 OK，但绝不修改
- *   输出缓冲的前置状态；注意 nvs_get_str 可能已部分填充缓冲，调用方应自行 memset。 */
+ * - 每次"保存"都执行 nvs_set_* + nvs_commit：写与提交成对，保证掉电后记录要么完整
+ *   写入要么保持旧值（NVS 本身在此处不做跨页事务，因此以 commit 为持久化边界）。
+ *   失败时把底层 esp_err_t 原样返回，由调用方决定是否中止下载。
+ * - audio_record_load/audio_current_version_load 失败时返回非 OK，但输出缓冲不保证
+ *   保持原样：两者都是先把 NVS 内容读进输出参数、之后才校验长度/schema 或直接回传
+ *   错误，因此失败返回时输出内容可能已被改写（例如 nvs_get_blob 已写满 record 才发现
+ *   长度或 schema_version 不符）。调用方不得依赖"失败即未写入"，需要旧值时自行 memset
+ *   或另存副本。 */
 
 static esp_err_t audio_nvs_open(nvs_handle_t *handle, nvs_open_mode_t mode)
 {
@@ -471,8 +484,10 @@ static void audio_download_task(void *pvParameter)
         goto cleanup;
     }
     /* 音频素材必须能完整放进目标数据分区：清单 file_size 是校验过的正数，
-     * 且已被控制面限制在 CONFIG_AUDIO_MAX_FILE_SIZE（默认 1 MiB，与 audio_data
-     * 分区等大小）。此处再与分区实际容量比对，防御"清单大小 > 分区"导致越界写。 */
+     * 且已被控制面限制在 CONFIG_AUDIO_MAX_FILE_SIZE（本工程 sdkconfig 为 1048576
+     * 字节 = 1 MiB，Kconfig 默认值 3145728 字节 = 3 MiB；范围 64 KiB～8 MiB），
+     * 而 partitions_16mb.csv 的 audio_data 分区同样是 0x100000 = 1 MiB。
+     * 此处再与分区实际容量比对，防御"清单大小 > 分区"导致越界写。 */
     if (manifest.file_size > partition->size) {
         ESP_LOGE(TAG, "Audio file_size=%" PRIu32 " exceeds partition size=%" PRIu32,
                  manifest.file_size, partition->size);
@@ -489,9 +504,8 @@ static void audio_download_task(void *pvParameter)
             record.verified_offset > 0U &&
             record.verified_offset < manifest.file_size) {
             record_active = true;
-            /* normalize 会把 offset 向下对齐到 Flash 加密安全写入边界；若启用加密，
-             * 对齐可能丢弃尚未持久化的尾部数据，因此续传以它的返回值为准。 */
-            /* 重读最后一个未完整提交的扇区，不能原地改写尚未擦除的 NOR 数据。 */
+            /* 续传起点必须落在分区擦除块边界：NOR 只能整块擦除后重写，未对齐的尾部
+             * 字节无法原地重写，因此从该扇区起点重新下载（最多重下不到一个擦除块）。 */
             resume_offset = record.verified_offset -
                             record.verified_offset % partition->erase_size;
             resume = resume_offset > 0U;
@@ -535,7 +549,10 @@ static void audio_download_task(void *pvParameter)
 
     /* 下载器配置：expected_size / resume_offset / expected_etag 从断点恢复而来；
      * cert_pem=NULL 表示用构建嵌入的 CA；sink 与 restart 回调把"写分区 + 检查点"
-     * 注入传输核心。传输层失败的分类完全交给下载器（dl_result.failure_reason）。 */
+     * 注入传输核心。传输层失败的分类完全交给下载器（dl_result.failure_reason）。
+     * CONFIG_EXAMPLE_OTA_RECV_TIMEOUT / CONFIG_EXAMPLE_SKIP_COMMON_NAME_CHECK 沿用
+     * ESP-IDF 示例的配置名：它们由本工程 main/Kconfig.projbuild 的 EXAMPLE_* 段定义，
+     * 不属于 CONFIG_JULIA_* 系列，因此在 JULIA 配置段里搜不到，调超时/CN 校验要改那两项。 */
     (void)audio_report_status(&manifest, "downloading", 0, NATIVE_OTA_FAILURE_NONE);
 
     http_downloader_config_t dl_config = {
@@ -628,6 +645,7 @@ static void audio_download_task(void *pvParameter)
 
     (void)audio_report_status(&manifest, "ready", 100, NATIVE_OTA_FAILURE_NONE);
     /* 弱钩子：默认实现只记日志；产品板级代码可提供强符号覆盖以播放分区内容。
+     * 当前仓库内没有强符号覆盖，因此下载完成后不会播放，只完成落地与校验。
      * 这里不拿返回值中断下载流程——播放失败不影响"下载已完成"这一事实。 */
     esp_err_t play_err = native_audio_on_ready(&manifest, sink_ctx.offset);
     if (play_err != ESP_OK) {
@@ -658,9 +676,14 @@ cleanup:
 /* ------------------------------------------------------------------------- */
 
 /* 说明：头文件 audio_engine.h 已给出完整契约；此处的实现要点是——
- * 任何时候至多存在一个音频下载任务（单飞），由 s_audio_in_progress + 自旋锁保证：
- * 置位与创建任务在临界区内是原子的，且任务创建失败必须回滚置位，否则会永久占用
- * 单飞名额。任务栈 12288 B、优先级 5（与 OTA 下载任务同量级）。 */
+ * 任何时候至多存在一个音频下载任务（单飞）：临界区内只做"单飞检查 + 置位"，
+ * xTaskCreate() 在临界区之外执行；创建失败时重新进入临界区把 s_audio_in_progress
+ * 归还为 false（否则会永久占用单飞名额）。任务栈 12288 B、优先级 5，与
+ * ota_engine_task 相同。
+ * 与固件 OTA 的互斥不在这里：本函数不查询任何 OTA 状态，只保证音频自身单飞；
+ * "OTA 优先"的判定由服务层 audio_service_handle_response() 在调用本函数之前完成。
+ * 现状：本函数唯一的调用点是 audio_service_handle_response()（audio_service.c:97），
+ * 而该服务函数在当前构建内没有外部调用方——业务链尚未接通外部触发入口。 */
 esp_err_t audio_engine_start(const native_audio_manifest_t *manifest)
 {
     if (manifest == NULL) {

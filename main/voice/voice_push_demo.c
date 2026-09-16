@@ -7,16 +7,19 @@
  * - WSS 语音通道的 FILE_SEND 流程默认由服务端发起（服务端下发 FILE_SEND，
  *   设备回复 BEGIN FILE <size> <name> -> 1200 B 二进制帧 -> END <bytes>）。
  *
- * 本演示展示"设备主动写"：把 测试音频/ 目录下的固定文件列表按
+ * 本演示展示"设备主动写"：把一组写死在文件里的测试音频按
  * "SD:/<文件名>"（映射到 /sdcard/<文件名>）逐一入队，会话任务在 WSS 连接
  * 就绪后按同一协议把文件推给服务器——不等待任何服务端命令。
  *
  * 注意：
- * - 文件必须存在于 SD 卡（/sdcard 挂载由本模块或产品代码负责）；缺失时 WSS
- *   会话会向服务端回复 ERROR file_open_failed，日志同样可证明路径已打通；
+ * - 文件必须事先存在于 SD 卡（/sdcard 的挂载由 main/storage/sd_card.c 完成，本模块
+ *   不做任何挂载，也不检查挂载状态）；缺失时 WSS 会话会向服务端回复
+ *   ERROR file_open_failed，日志同样可证明路径已打通；
  * - 命令只入队不阻塞：离线时拒绝入队，演示会在会话恢复后重试；
  *   队列满时入队返回 ESP_ERR_NO_MEM，演示会等待后重试；
- * - 主动推送的服务端语义需要服务端配合（接受"不请自来"的 BEGIN FILE 流）。
+ * - 本演示发送的 BEGIN FILE 流没有对应的服务端 FILE_SEND 命令，仓库内没有记录服务端
+ *   是否接受这种主动写入。设备侧不校验服务端是否收到，也没有约定的成功回执：是否成功
+ *   只能靠会话日志判断，未在期限内收到确认只说明结果未知，不等于对端不支持该流程。
  */
 
 #include <string.h>
@@ -41,9 +44,10 @@ static portMUX_TYPE s_demo_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_demo_started;
 
 /**
- * @brief 显式传输的文件列表：与项目 测试音频/ 目录一一对应。
+ * @brief 显式传输的文件列表。
  *
- * 修改文件列表只需增删这里的条目；URI 必须匹配 SD 卡上实际存在的文件名。
+ * 文件名写死在这里，与仓库内的素材目录没有自动对应关系；修改列表只需增删这里的
+ * 条目，URI 必须匹配 SD 卡上实际存在的文件名。
  */
 static const char *const DEMO_AUDIO_FILES[] = {
     "SD:/BAC009S0002W0122.wav",
@@ -60,13 +64,18 @@ static const char *const DEMO_AUDIO_FILES[] = {
  * @brief 阻塞式入队：直到入队成功或遇到不可重试的错误。
  *
  * 只有两类错误被当作"暂时不可用"而重试：
- *   - ESP_ERR_INVALID_STATE：WSS 客户端尚未启动（等 voice_service_ip_ready 生效）；
+ *   - ESP_ERR_INVALID_STATE：WSS 客户端尚未启动、会话尚未完成 session_sync_ack，
+ *     或设备正处在 S5/S6 静默状态（voice_service.c 的 voice_service_enqueue 只在这
+ *     三种情况下返回该错误），因此等网络与服务恢复后重试；
  *   - ESP_ERR_NO_MEM：命令队列已满（等会话任务排空一个槽位）。
  * 其余错误（如参数/长度非法）立即向上返回，不做无意义重试。
  *
  * 由于同一 WSS 会话按序消费有界命令队列，这里
  * 在"入队成功"与"队列满"之间自然形成节拍：外层在已预约/活动文件释放后才提交下一项，
  * 从而在多文件之间串行且不会把队列撑爆。
+ *
+ * 文件之间的间隔完全依赖 voice_service_file_busy() 轮询——入队前和入队后各等一次，
+ * 轮询粒度 50ms 只是让出 CPU 的步长，不是传输间隔本身。
  *
  * @param[in] uri 文件 URI，不允许为 NULL。
  * @return ESP_OK 已入队；其他 esp_err_t 为不可重试的失败（参数/长度非法）。
@@ -87,6 +96,9 @@ static esp_err_t demo_enqueue_blocking(const char *uri)
  *
  * 逐一入队目录中的文件；任一不可重试错误即中止并返回 ESP_FAIL（此时已入队的
  * 文件仍会被会话任务推流，本函数只是不再排后续文件）。
+ *
+ * 每次入队前后各等一次 voice_service_file_busy()，保证文件之间串行，失败只影响
+ * 后续排队，不会取消已经成功入队或在传输中的文件。
  *
  * @return ESP_OK 全部文件都已入队；ESP_FAIL 中途遇到不可重试错误。
  */
@@ -113,7 +125,8 @@ static esp_err_t demo_push_list_once(void)
  *        > 0 时按周期重复整个列表。
  *
  * 任务在后台阻塞式入队（见 demo_enqueue_blocking）。interval==0 时分发一次后
- * 结束后删除自身任务，释放任务栈；重复启动仍由 s_demo_started 保持幂等。
+ * 结束后删除自身任务，释放任务栈；s_demo_started 不会被清回，因此之后再次调用
+ * voice_push_demo_start() 也不会重建任务——是幂等，不是可重启。
  */
 static void voice_push_demo_task(void *parameter)
 {

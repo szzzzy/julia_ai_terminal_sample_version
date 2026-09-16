@@ -27,8 +27,16 @@ extern "C" {
 void ota_boot_flow_run(void);
 
 /**
- * app_main 完成关键显示、音频、语音和 FSM 初始化后调用一次；不以联网作为条件。
- * app_healthy=false 时待验证镜像立即回滚；已确认镜像仍走应用原有故障处理。
+ * @brief app_main 完成关键显示、音频、语音和 FSM 初始化后调用一次。
+ *
+ * @param[in] app_healthy 关键本地服务是否全部就绪；只允许依据本地初始化结果判断，
+ *            不得以 Wi-Fi/MQTT/DNS 等远程可用性为条件——弱网不代表镜像不健康。
+ *
+ * app_healthy=false 时待验证镜像立即上报回滚并请求 rollback；已确认镜像仍走应用原有
+ * 故障处理。本函数只对 PENDING_VERIFY 启动生效，重复调用是空操作。
+ *
+ * @note 漏调的后果：镜像一直是 PENDING_VERIFY，本次启动不会产生 succeeded 上报，
+ *       下一次复位时 bootloader 会判其无效并回滚；因此必须在本文件约定的时机调用。
  */
 void ota_boot_flow_complete(bool app_healthy);
 

@@ -1,0 +1,4 @@
+#pragma once
+#ifndef CONFIG_JULIA_SERVER_WAKE_ENABLE
+#define CONFIG_JULIA_SERVER_WAKE_ENABLE 1
+#endif

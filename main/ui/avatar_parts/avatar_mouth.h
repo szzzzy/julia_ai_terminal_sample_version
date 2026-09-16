@@ -4,7 +4,8 @@
  *
  * 嘴型四档（avatar_mouth_shape_t）：IDLE(闭)、SPEAK1(半开)、SPEAK2(开)、SPEAK3(更大开)。
  * 资源映射在 avatar_mouth.c 的 source_for()：每档对应一张生成的 mouth_* 资源。
- * RMS→档位的换算由 set_rms 完成（档位阈值见 .c）。这是 L0/L1 的“RMS 嘴型”核心落点。
+ * 档位由调用方决定：当前 L1 链路（julia_avatar.c）自己按 RMS 门限算出 0~3 档后调用
+ * set_shape()；本文件里的 set_rms() 提供另一套 15/50/80 量化入口，当前构建内没有调用点。
  */
 #pragma once
 
@@ -24,7 +25,8 @@ typedef enum {
 void avatar_mouth_init(lv_obj_t *parent);
 /* 按 RMS 值换算成档位后切嘴型（无额外锁定，只用 set_shape 内的锁）。 */
 void avatar_mouth_set_rms(uint16_t rms);
-/* 直接切到指定档位并携带 RMS 值用于日志；转场中或档位未变则忽略。 */
+/* 直接切到指定档位并携带 RMS 值用于日志；转场中或档位未变则忽略。
+ * 内部取 lvgl_port_lock(100ms)，超时放弃本帧；调用方（avatar_l1 任务）在下一帧重试。 */
 void avatar_mouth_set_shape(avatar_mouth_shape_t shape, uint16_t rms);
 /* 转场开关：转场期间隐藏嘴部；结束恢复并强制回到闭口。 */
 void avatar_mouth_set_transition_active(bool active);

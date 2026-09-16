@@ -1,3 +1,10 @@
+/**
+ * @file download_protocol.c
+ * @brief 见 download_protocol.h 的模块约束。
+ *
+ * 三个函数都不持有全局状态、不访问网络/Flash/NVS，只做字符串与 URL 解析，因此可被
+ * 并发的下载链路直接调用；invalid 的粘滞语义由调用方通过清零结构体管理。
+ */
 #include "download_protocol.h"
 
 #include <stdint.h>
@@ -32,6 +39,8 @@ void download_response_header(download_response_headers_t *headers,
         return;
     }
     size_t length = strlen(value);
+    /* 超长和同名头冲突都只置 invalid 并保留先到的值：调用方靠该标志拒绝整次响应，
+     * 这里不能靠截断或覆盖“修好”一个已经不可信的响应。 */
     if (length >= capacity || (dest[0] != '\0' && strcmp(dest, value) != 0)) {
         headers->invalid = true;
         return;
@@ -46,6 +55,7 @@ static bool read_size(const char **cursor, size_t *value)
     size_t number = 0;
     do {
         unsigned digit = (unsigned)(*p - '0');
+        /* 溢出即失败：把超长数字截断成一个合法长度会伪造出可信的偏移。 */
         if (number > (SIZE_MAX - digit) / 10U) return false;
         number = number * 10U + digit;
         ++p;
@@ -62,6 +72,8 @@ bool download_parse_content_range(const char *value, size_t *start,
         strncmp(value, "bytes ", 6) != 0) return false;
     const char *p = value + 6;
     size_t first, last, size;
+    /* 同时拒绝 last < first 与 last >= size：越界区间会让续传偏移与实际写入范围错位，
+     * 比直接判为“响应不合规”更危险。 */
     if (!read_size(&p, &first) || *p++ != '-' ||
         !read_size(&p, &last) || *p++ != '/' ||
         !read_size(&p, &size) || *p != '\0' || last < first || last >= size) return false;
@@ -81,6 +93,7 @@ bool download_url_host_allowed(const char *url, const char *allowlist)
     if (http_parser_parse_url(url, length, 0, &parsed) != 0 ||
         !(parsed.field_set & (1U << UF_HOST)) ||
         (parsed.field_set & (1U << UF_USERINFO))) return false;
+    /* 空允许列表等于不做主机校验；这是开发默认，生产必须配置（见头文件安全约束）。 */
     if (allowlist[0] == '\0') return true;
     const char *host = url + parsed.field_data[UF_HOST].off;
     size_t host_length = parsed.field_data[UF_HOST].len;
