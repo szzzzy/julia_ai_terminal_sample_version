@@ -23,6 +23,15 @@ menu "Example Configuration"
             Keep 16 kHz PCM16. Requires the matching cloud capture-v1 receiver.
             A server without capability acknowledgement cannot receive audio.
 
+    config JULIA_CAPTURE_FFT_GATE
+        bool "Candidate spectral flatness/entropy gate for local capture"
+        depends on JULIA_LOCAL_CAPTURE_ENABLE
+        default n
+        help
+            Apply the S0002 320-point spectral envelope to onset and activity.
+            Candidate thresholds only: real noise rejection and S3 timing still
+            need hardware validation. Disable to restore energy-only endpointing.
+
     orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
 
     config JULIA_BAT_CONTROL_GPIO

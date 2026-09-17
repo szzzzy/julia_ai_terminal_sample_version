@@ -1,0 +1,6 @@
+LIBRARY ucrtbase.dll
+EXPORTS
+cosf
+sinf
+logf
+expf

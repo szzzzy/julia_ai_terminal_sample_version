@@ -28,6 +28,7 @@ static void frame(int value)
 static void scenario(const char *name, unsigned spike_period)
 {
     lc_init(&capture, output, NULL);
+    capture.fft_enabled = false; /* Historical energy-only probe; see test_fft_gate.py for FFT A/B. */
     lc_set_mode(&capture, LC_DIALOG);
     elapsed_ms = 0; ended = limited = false;
     for (unsigned i = 0; i < 6; ++i) frame(200);
@@ -44,6 +45,7 @@ static void scenario(const char *name, unsigned spike_period)
 static void hesitant_speech(void)
 {
     lc_init(&capture, output, NULL);
+    capture.fft_enabled = false;
     lc_set_mode(&capture, LC_DIALOG);
     elapsed_ms = 0; ended = limited = false;
     for (unsigned i = 0; i < 6; ++i) frame(200);

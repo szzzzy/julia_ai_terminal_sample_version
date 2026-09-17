@@ -38,7 +38,13 @@ static void event(lc_event_t e,lc_mode_t m)
 static void input(int16_t value)
 {
     uint8_t pcm1[656]={0};memcpy(pcm1,"PCM1",4);
-    for(unsigned i=0;i<320;i++){pcm1[16+i*2]=value;pcm1[17+i*2]=(uint16_t)value>>8;}
+    for(unsigned i=0;i<320;i++){
+        int16_t sample=value;
+#ifdef TEST_FFT_GATE
+        if(value>1) sample=(int16_t)lrint(value*sin(6.283185307179586*i/16));
+#endif
+        pcm1[16+i*2]=sample;pcm1[17+i*2]=(uint16_t)sample>>8;
+    }
     now+=20000;voice_local_capture_frame(pcm1,sizeof(pcm1));
 }
 static void text(const char *msg){assert(voice_local_capture_text((const uint8_t*)msg,strlen(msg)));}
@@ -56,6 +62,9 @@ static void connect(unsigned epoch_value)
 int main(int argc,char **argv)
 {
     assert(voice_local_capture_init(push,event)==ESP_OK);
+#ifdef TEST_FFT_GATE
+    s->capture.fft_enabled=true;
+#endif
     connect(10);
     if(argc>1){wire=fopen(argv[1],"wb");assert(wire);}
     for(unsigned i=0;i<25;i++)input(1);
@@ -66,6 +75,23 @@ int main(int argc,char **argv)
     assert(end_events==1 && sends==62 && s->history[first_id%4].complete);
     assert(wire_records[0][0]=='{' && !memcmp(wire_records[1],"PCM2",4));
     assert(strstr((char*)wire_records[61],"capture_end"));
+    for(unsigned frame=0;frame<60;++frame) {
+        const uint8_t *wire_pcm=wire_records[frame+1];
+        assert(wire_lengths[frame+1]==656 && !memcmp(wire_pcm,"PCM2",4));
+        assert(wire_pcm[8]==frame && wire_pcm[9]==0);
+        assert(wire_pcm[12]==0x80 && wire_pcm[13]==2);
+        unsigned checksum=0;
+        for(unsigned j=16;j<656;++j) checksum+=wire_pcm[j];
+        assert(wire_pcm[15]==(uint8_t)checksum);
+        for(unsigned i=0;i<320;++i) {
+            int16_t expected=(frame>=19 && frame<25)?200:1;
+#ifdef TEST_FFT_GATE
+            if(expected>1) expected=(int16_t)lrint(expected*sin(6.283185307179586*i/16));
+#endif
+            assert((int16_t)((uint16_t)wire_pcm[16+2*i] |
+                ((uint16_t)wire_pcm[17+2*i]<<8))==expected);
+        }
+    }
     if(wire){fclose(wire);wire=NULL;}
     char verdict[160];snprintf(verdict,sizeof(verdict),"{\"type\":\"capture_verdict\",\"session_id\":\"session-a\",\"utterance_id\":%u,\"verdict\":\"noise\"}",first_id);
     for(unsigned i=0;i<6;i++)input(200);

@@ -6,8 +6,12 @@ set(VOICE_INCLUDE_DIRS
     ../../main/voice/capture ../../main/voice/playback
     ../../main/voice/protocol ../../main/voice/uplink)
 add_executable(test_local_capture test_local_capture.c
+    ../../components/julia_board_audio/lc_spectrum.c
     ../../components/julia_board_audio/local_capture.c)
 target_include_directories(test_local_capture PRIVATE ../../components/julia_board_audio/include)
+if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "TinyCC")
+    target_link_libraries(test_local_capture PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/fft_math.def")
+endif()
 if(NOT WIN32)
     target_link_libraries(test_local_capture PRIVATE m)
 endif()
@@ -19,14 +23,31 @@ find_path(CJSON_DIR cJSON.h
     HINTS "${IDF_PATH}/components/json/cJSON" "$ENV{IDF_PATH}/components/json/cJSON")
 if(CJSON_DIR)
     add_executable(test_voice_local_capture test_voice_local_capture.c
+        ../../components/julia_board_audio/lc_spectrum.c
         ../../main/voice/protocol/voice_control_guard.c ../../components/julia_board_audio/local_capture.c
         "${CJSON_DIR}/cJSON.c")
     target_include_directories(test_voice_local_capture PRIVATE local_capture_stubs stubs
         ${VOICE_INCLUDE_DIRS} ../../components/julia_board_audio/include "${CJSON_DIR}")
+    if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "TinyCC")
+        target_link_libraries(test_voice_local_capture PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/fft_math.def")
+    endif()
     if(NOT WIN32)
         target_link_libraries(test_voice_local_capture PRIVATE m)
     endif()
     add_test(NAME voice_local_capture COMMAND test_voice_local_capture)
+    add_executable(test_voice_local_capture_fft test_voice_local_capture.c
+        ../../components/julia_board_audio/lc_spectrum.c
+        ../../components/julia_board_audio/local_capture.c
+        ../../main/voice/protocol/voice_control_guard.c "${CJSON_DIR}/cJSON.c")
+    target_compile_definitions(test_voice_local_capture_fft PRIVATE TEST_FFT_GATE=1)
+    target_include_directories(test_voice_local_capture_fft PRIVATE local_capture_stubs stubs
+        ${VOICE_INCLUDE_DIRS} ../../components/julia_board_audio/include "${CJSON_DIR}")
+    if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "TinyCC")
+        target_link_libraries(test_voice_local_capture_fft PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/fft_math.def")
+    elseif(NOT WIN32)
+        target_link_libraries(test_voice_local_capture_fft PRIVATE m)
+    endif()
+    add_test(NAME voice_local_capture_fft COMMAND test_voice_local_capture_fft)
     add_executable(test_voice_control_guard test_voice_control_guard.c
         ../../main/voice/protocol/voice_control_guard.c "${CJSON_DIR}/cJSON.c")
     target_include_directories(test_voice_control_guard PRIVATE ${VOICE_INCLUDE_DIRS} "${CJSON_DIR}")
@@ -71,6 +92,17 @@ endif()
 find_package(Python3 COMPONENTS Interpreter QUIET)
 set(JULIA_CLOUD_SOURCE_DIR "" CACHE PATH "Cloud api_server source for offline firmware/cloud interop")
 if(Python3_Interpreter_FOUND)
+    set(JULIA_NUMPY_PATH "" CACHE PATH "Optional directory containing NumPy for FFT reference tests")
+    set(FFT_NUMPY_ARGS "")
+    if(JULIA_NUMPY_PATH)
+        list(APPEND FFT_NUMPY_ARGS --numpy-path "${JULIA_NUMPY_PATH}")
+    endif()
+    add_test(NAME fft_gate COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_fft_gate.py" --cc "${CMAKE_C_COMPILER}"
+        --out "${CMAKE_CURRENT_BINARY_DIR}/fft-gate" ${FFT_NUMPY_ARGS})
+    add_test(NAME fft_gate_esp_dsp COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_fft_gate.py" --cc "${CMAKE_C_COMPILER}"
+        --out "${CMAKE_CURRENT_BINARY_DIR}/fft-gate-dsp" --esp-dsp ${FFT_NUMPY_ARGS})
     add_test(NAME imu_tuning COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/test_imu_tuning.py")
     add_test(NAME imu_logger_receiver COMMAND "${Python3_EXECUTABLE}"

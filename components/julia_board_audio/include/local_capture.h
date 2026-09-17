@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "lc_spectrum.h"
 
 #define LC_FRAME_SAMPLES 320U
 /* 正常 8 秒窗只有 401 帧；留足四段迟到回填的临时重叠，避免改变云端 deque 统计。 */
@@ -41,6 +42,9 @@ typedef struct {
 typedef bool (*lc_emit_t)(void *ctx, const lc_record_t *record);
 typedef struct {
     lc_floor_t floor;
+    lc_spectrum_t spectrum;
+    /* Set only by capture owner while LC_OFF. Off preserves energy-only behavior. */
+    bool fft_enabled;
     lc_mode_t mode;
     uint32_t next_id, id, frames;
     bool active, failed;

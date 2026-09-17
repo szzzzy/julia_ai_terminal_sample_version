@@ -2,6 +2,9 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef ESP_PLATFORM
+#include "sdkconfig.h"
+#endif
 
 /* 单位统一为 dBFS；调用方按毫秒时间轴传入，算法内不读挂钟。 */
 double lc_rms_dbfs(const int16_t *pcm, size_t count)
@@ -119,6 +122,10 @@ void lc_init(local_capture_t *c, lc_emit_t fn, void *ctx)
     lc_floor_reset(&c->floor, -60.0);
     c->emit = fn;
     c->ctx = ctx;
+#ifdef CONFIG_JULIA_CAPTURE_FFT_GATE
+    c->fft_enabled = CONFIG_JULIA_CAPTURE_FFT_GATE;
+#endif
+    if (!lc_spectrum_init(&c->spectrum) && c->fft_enabled) c->failed = true;
 }
 
 void lc_set_mode(local_capture_t *c, lc_mode_t mode)
@@ -137,6 +144,7 @@ bool lc_process(local_capture_t *c, const int16_t *pcm, int64_t ms)
 {
     if (c->failed) return false;
     if (c->mode == LC_OFF) return true;
+    if (c->fft_enabled && !c->spectrum.ready) { c->failed = true; return false; }
     double db = lc_rms_dbfs(pcm, LC_FRAME_SAMPLES);
     /* 段内帧不参与底噪跟踪：起音时冻结的底噪在整个段内保持有效。 */
     lc_floor_frame(&c->floor, db, c->active, ms);
@@ -145,7 +153,12 @@ bool lc_process(local_capture_t *c, const int16_t *pcm, int64_t ms)
         /* 普通对话降低活跃抵扣量，减少间歇噪声拖延段尾；代价是对断续讲话的停顿容忍度下降。
          * 每帧 20 ms：普通对话抵扣 40 ms（1:2），唤醒候选保留 80 ms（1:4）。 */
         const unsigned active_credit_ms = c->mode == LC_DIALOG ? 40U : 80U;
-        if (db > c->frozen + 3.0)
+        lc_spectral_features_t features;
+        bool active = db > c->frozen + 3.0;
+        if (active && c->fft_enabled)
+            active = lc_spectrum_features(&c->spectrum, pcm, &features) &&
+                     lc_spectrum_accept(&features);
+        if (active)
             c->silence = c->silence > active_credit_ms ? c->silence - active_credit_ms : 0;
         else c->silence += 20;
         /* 上限按已发送帧数计；唤醒段 400 帧/8 秒，普通段 750 帧/15 秒。 */
@@ -166,6 +179,10 @@ bool lc_process(local_capture_t *c, const int16_t *pcm, int64_t ms)
      * window[25] 的容量。 */
     unsigned window = c->mode == LC_WAKE ? 25U : 15U;
     bool active = db > c->floor.bg + (c->mode == LC_WAKE ? 3.0 : 9.0);
+    lc_spectral_features_t features;
+    if (active && c->fft_enabled)
+        active = lc_spectrum_features(&c->spectrum, pcm, &features) &&
+                 lc_spectrum_accept(&features);
     if (c->window_count == window) c->window_active -= c->window[c->window_head];
     else ++c->window_count;
     c->window[c->window_head] = active;
