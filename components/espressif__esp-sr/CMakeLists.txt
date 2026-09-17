@@ -1,4 +1,15 @@
 if(CONFIG_JULIA_SERVER_WAKE_ENABLE)
+    if(CONFIG_JULIA_CAPTURE_VAD_ENABLE)
+        # Traditional VAD only: no model packing, AFE, WakeNet or neural runtime.
+        if(NOT IDF_TARGET STREQUAL "esp32s3")
+            message(FATAL_ERROR "Julia capture VAD adapter is validated for ESP32-S3 only")
+        endif()
+        idf_component_register(INCLUDE_DIRS "include/esp32s3")
+        add_prebuilt_library(julia_webrtc_vad
+            "${CMAKE_CURRENT_SOURCE_DIR}/lib/esp32s3/libesp_audio_processor.a")
+        target_link_libraries(${COMPONENT_LIB} INTERFACE julia_webrtc_vad)
+        return()
+    endif()
     # Project-level server wake mode keeps this vendored component available
     # for rollback/custom models, but deliberately omits its libraries and the
     # srmodels.bin packing target from the active firmware build.

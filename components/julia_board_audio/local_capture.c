@@ -128,12 +128,25 @@ void lc_init(local_capture_t *c, lc_emit_t fn, void *ctx)
     if (!lc_spectrum_init(&c->spectrum) && c->fft_enabled) c->failed = true;
 }
 
+bool lc_set_voice_detector(local_capture_t *c, lc_voice_frame_t frame,
+                           lc_voice_reset_t reset, void *ctx,
+                           unsigned wake_ms, unsigned dialog_ms)
+{
+    if (c->mode != LC_OFF || !frame || !reset || !wake_ms || !dialog_ms ||
+        wake_ms % 20 || dialog_ms % 20) return false;
+    c->voice_frame = frame; c->voice_reset = reset; c->voice_ctx = ctx;
+    c->voice_end_wake_ms = wake_ms; c->voice_end_dialog_ms = dialog_ms;
+    c->voice_reset_pending = true;
+    return true;
+}
+
 void lc_set_mode(local_capture_t *c, lc_mode_t mode)
 {
     if (c->mode == mode) return;
     /* 未完成段先按 capture_abort 声明作废再清场，云端才不会把截断音频当完整段。 */
     if (c->active && !c->failed) (void)emit(c, LC_ABORT, NULL, 0, false);
     c->mode = mode;
+    c->voice_reset_pending = true;
     c->active = false;
     c->failed = false;
     c->pre_head = c->pre_count = c->window_head = c->window_count = c->window_active = 0;
@@ -144,6 +157,16 @@ bool lc_process(local_capture_t *c, const int16_t *pcm, int64_t ms)
 {
     if (c->failed) return false;
     if (c->mode == LC_OFF) return true;
+    bool speech = true;
+    if (c->voice_frame) {
+        if (c->voice_reset_pending) {
+            if (!c->voice_reset(c->voice_ctx)) { c->failed = true; return false; }
+            c->voice_reset_pending = false;
+        }
+        /* Feed every listening frame, including low energy/non-speech frames:
+         * WebRTC tracks noise and has its own bounded hangover. */
+        if (!c->voice_frame(c->voice_ctx, pcm, &speech)) { c->failed = true; return false; }
+    }
     if (c->fft_enabled && !c->spectrum.ready) { c->failed = true; return false; }
     double db = lc_rms_dbfs(pcm, LC_FRAME_SAMPLES);
     /* 段内帧不参与底噪跟踪：起音时冻结的底噪在整个段内保持有效。 */
@@ -154,7 +177,7 @@ bool lc_process(local_capture_t *c, const int16_t *pcm, int64_t ms)
          * 每帧 20 ms：普通对话抵扣 40 ms（1:2），唤醒候选保留 80 ms（1:4）。 */
         const unsigned active_credit_ms = c->mode == LC_DIALOG ? 40U : 80U;
         lc_spectral_features_t features;
-        bool active = db > c->frozen + 3.0;
+        bool active = db > c->frozen + 3.0 && speech;
         if (active && c->fft_enabled)
             active = lc_spectrum_features(&c->spectrum, pcm, &features) &&
                      lc_spectrum_accept(&features);
@@ -163,7 +186,10 @@ bool lc_process(local_capture_t *c, const int16_t *pcm, int64_t ms)
         else c->silence += 20;
         /* 上限按已发送帧数计；唤醒段 400 帧/8 秒，普通段 750 帧/15 秒。 */
         bool limit = c->frames >= (c->mode == LC_WAKE ? 400U : LC_MAX_FRAMES);
-        if (limit || c->silence >= (c->mode == LC_WAKE ? 500U : 700U)) {
+        unsigned end_ms = c->voice_frame
+            ? (c->mode == LC_WAKE ? c->voice_end_wake_ms : c->voice_end_dialog_ms)
+            : (c->mode == LC_WAKE ? 500U : 700U);
+        if (limit || c->silence >= end_ms) {
             if (!emit(c, LC_END, NULL, db, limit)) return false;
             c->active = false;
             c->pre_count = c->window_count = c->window_active = c->window_head = 0;
@@ -178,7 +204,7 @@ bool lc_process(local_capture_t *c, const int16_t *pcm, int64_t ms)
     /* 累积窗等价于 500 ms（wake，25 帧）与 300 ms（dialog，15 帧），两项都必须 ≤ 结构体内
      * window[25] 的容量。 */
     unsigned window = c->mode == LC_WAKE ? 25U : 15U;
-    bool active = db > c->floor.bg + (c->mode == LC_WAKE ? 3.0 : 9.0);
+    bool active = db > c->floor.bg + (c->mode == LC_WAKE ? 3.0 : 9.0) && speech;
     lc_spectral_features_t features;
     if (active && c->fft_enabled)
         active = lc_spectrum_features(&c->spectrum, pcm, &features) &&

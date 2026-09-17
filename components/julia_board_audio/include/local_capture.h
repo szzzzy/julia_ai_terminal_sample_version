@@ -40,11 +40,18 @@ typedef struct {
     const int16_t *pcm;
 } lc_record_t;
 typedef bool (*lc_emit_t)(void *ctx, const lc_record_t *record);
+typedef bool (*lc_voice_frame_t)(void *ctx, const int16_t *pcm, bool *speech);
+typedef bool (*lc_voice_reset_t)(void *ctx);
 typedef struct {
     lc_floor_t floor;
     lc_spectrum_t spectrum;
     /* Set only by capture owner while LC_OFF. Off preserves energy-only behavior. */
     bool fft_enabled;
+    lc_voice_frame_t voice_frame;
+    lc_voice_reset_t voice_reset;
+    void *voice_ctx;
+    bool voice_reset_pending;
+    unsigned voice_end_wake_ms, voice_end_dialog_ms;
     lc_mode_t mode;
     uint32_t next_id, id, frames;
     bool active, failed;
@@ -70,6 +77,12 @@ void lc_floor_feed_segment(lc_floor_t *floor, const double *db, unsigned count, 
 /** 返回第 10 百分位（dBFS）。会原地排序 values，调用后顺序不再保持。 */
 double lc_percentile10(double *values, unsigned count);
 void lc_init(local_capture_t *capture, lc_emit_t emit, void *ctx);
+/* Bind only while OFF, on the capture owner (or before capture starts).
+ * Continuous classifier supplements energy/FFT, never modifies PCM; false is a fatal
+ * classifier error, not a non-speech decision. Durations are multiples of 20ms. */
+bool lc_set_voice_detector(local_capture_t *capture, lc_voice_frame_t frame,
+                           lc_voice_reset_t reset, void *ctx,
+                           unsigned wake_ms, unsigned dialog_ms);
 /** 模式/连接切换丢弃预录并声明未完整段作废；底噪跨状态保留。 */
 void lc_set_mode(local_capture_t *capture, lc_mode_t mode);
 /** 输入必须恰为 320 个已应用板级增益的 PCM16 样本。ms 为单调采样时间轴的毫秒值。
