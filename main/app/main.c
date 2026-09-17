@@ -1,11 +1,4 @@
-/**
- * @file    main.c
- * @brief   按安全顺序启动屏幕、声音、网络和设备行为，并在关键能力失败时进入故障状态。
- *
- * 开机阶段按显示、音频、存储和 Wi-Fi 的顺序错峰启用高电流负载。动画结束且显示、
- * 麦克风、扬声器、语音服务和空闲策略都可用后，设备才开放 MQTT/WSS 交互并从
- * 开机进入默认待机。Wi-Fi 或服务器暂时不可用不会阻塞本地界面，后台会继续恢复。
- */
+/** 启动协调：基础准备后并行推进本地分支和 Wi-Fi；必要资源成功即握手，动画和判决完成才交出画面。 */
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -46,332 +39,249 @@
 #include "voice_push_demo.h"
 #endif
 
-static const char *TAG = "app_main";
-static portMUX_TYPE s_boot_lock = portMUX_INITIALIZER_UNLOCKED;
-/* 交互门槛：置位表示本次启动允许对应服务真正启动。两个位在启动流程末段、RF 关联稳定后
- * 才一起置位。在此之前 ip_ready 回调返回 ESP_ERR_INVALID_STATE，network_lifecycle 会把它
- * 当作“本次未启动”并按该槽位自己的退避重试，直到门槛打开；因此这不是失败返回值，
- * 而是与 network_lifecycle 的跨模块契约。 */
-static bool s_runtime_ready;
-static bool s_voice_ready;
+#include "boot_coordinator.h"
+#include "tca9554.h"
+#include "qmi8658_shared.h"
 
+static const char *TAG = "BOOT";
+static portMUX_TYPE s_boot_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_cloud_allowed;
+static bool s_runtime_failed;
+static esp_err_t s_motion_prepared = ESP_ERR_NOT_SUPPORTED;
+/* 各字段由所属分支写入，coordinator 收到该分支结果后才能读取。 */
+static julia_fault_reason_t s_audio_fault = JULIA_FAULT_AUDIO_INIT;
+static julia_fault_reason_t s_resources_fault = JULIA_FAULT_FSM_RUNTIME_INIT;
+
+static esp_err_t module_result(const char *name, esp_err_t result)
+{
+    ESP_LOGI(TAG, "module=%s result=%s t=%lldms", name, esp_err_to_name(result),
+             (long long)(esp_timer_get_time()/1000));
+    return result;
+}
+static bool cloud_allowed(void)
+{
+    portENTER_CRITICAL(&s_boot_lock);
+    bool allowed = s_cloud_allowed;
+    portEXIT_CRITICAL(&s_boot_lock);
+    return allowed;
+}
+static esp_err_t boot_mqtt_ip_ready(void *arg)
+{
+    return cloud_allowed() ? mqtt_comm_ip_ready(arg) : ESP_ERR_INVALID_STATE;
+}
+static esp_err_t boot_voice_ip_ready(void *arg)
+{
+    return cloud_allowed() ? voice_service_ip_ready(arg) : ESP_ERR_INVALID_STATE;
+}
 static void battery_status_updated(const julia_battery_status_t *status, void *ctx)
 {
     (void)ctx;
     if (status == NULL || !status->valid) return;
-    julia_avatar_set_battery_status(
-        status->present,
-        status->state == JULIA_BATTERY_STATE_LOW,
-        status->percent);
+    julia_avatar_set_battery_status(status->present,
+        status->state == JULIA_BATTERY_STATE_LOW, status->percent);
 }
-
-/* 阶段沉降：先记录一次电压再等待 CONFIG_JULIA_BOOT_STAGE_DELAY_MS，使日志反映各阶段
- * 负载切换前后的对比。该间隔用于错开显示、音频和 Wi-Fi 的上电瞬态，不是功能等待。 */
-static void boot_stage_settle(const char *stage)
+static esp_err_t display_branch(void)
 {
-    julia_battery_log_stage(stage);
-    if (CONFIG_JULIA_BOOT_STAGE_DELAY_MS > 0) {
-        vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_BOOT_STAGE_DELAY_MS));
-    }
+    esp_err_t err = module_result("backlight", julia_backlight_init());
+    if (err != ESP_OK) return err;
+    err = module_result("display", julia_display_init());
+    if (err != ESP_OK) return err;
+    err = module_result("avatar", julia_avatar_init());
+    if (err != ESP_OK) return err;
+    return ESP_OK;
 }
-
-/* 取得 IPv4 后由 network_lifecycle 在生命周期 Task 上下文调用；门槛未开时用
- * ESP_ERR_INVALID_STATE 表示“本次不启动、等待之后重试”。 */
-static esp_err_t boot_mqtt_ip_ready(void *arg)
+static esp_err_t animation_branch(void)
 {
-    portENTER_CRITICAL(&s_boot_lock);
-    bool ready = s_runtime_ready;
-    portEXIT_CRITICAL(&s_boot_lock);
-    return ready ? mqtt_comm_ip_ready(arg) : ESP_ERR_INVALID_STATE;
+    esp_err_t err = module_result("animation_finished", julia_avatar_play_boot_sequence());
+    /* 动画失败可静态交接，显示资源失败不会到达本尾段。 */
+    if (err != ESP_OK) julia_backlight_set(CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT);
+    return ESP_OK;
 }
-
-/* 语音链路还要求唤醒检测就绪（s_voice_ready 与 s_runtime_ready 在启动末段一同置位）；
- * 任一条件不满足都返回 ESP_ERR_INVALID_STATE，由 network_lifecycle 稍后重试。 */
-static esp_err_t boot_voice_ip_ready(void *arg)
+static esp_err_t audio_branch(void)
 {
-    portENTER_CRITICAL(&s_boot_lock);
-    bool ready = s_runtime_ready && s_voice_ready;
-    portEXIT_CRITICAL(&s_boot_lock);
-    return ready ? voice_service_ip_ready(arg) : ESP_ERR_INVALID_STATE;
-}
-
-/**
- * @brief 完成整机启动，并确保服务器消息不会早于本地显示和声音能力生效。
- *
- * 首先确认待验收的新固件是否可以继续运行，再按显示、声音、存储、Wi-Fi 的顺序
- * 错峰启动；每个阶段记录 BAT_ADC 电压。所有关键能力就绪后才开放交互。
- * 关键本机能力失败会留下故障记录并受控复位；网络失败仅由后台重连处理。
- */
-void app_main(void)
-{
-    esp_err_t power_hold_err = julia_power_hold_enable();
-    if (power_hold_err != ESP_OK) {
-        ESP_LOGE(TAG, "Battery power hold init failed: %s",
-                 esp_err_to_name(power_hold_err));
+    esp_err_t err = module_result("board_audio", board_audio_init());
+    if (err != ESP_OK) return err;
+    err = module_result("voice_audio", voice_service_init_board_audio());
+    if (err != ESP_OK) return err;
+    err = module_result("audio_service", audio_service_init());
+#if !CONFIG_JULIA_SERVER_WAKE_ENABLE
+    if (err == ESP_OK) {
+        s_audio_fault = JULIA_FAULT_VOICE_INIT;
+        err = module_result("wake_detector", wake_detector_init());
     }
-    esp_err_t power_management_err = julia_power_management_init();
-    if (power_management_err != ESP_OK) {
-        ESP_LOGW(TAG, "Dynamic frequency scaling init failed: %s",
-                 esp_err_to_name(power_management_err));
-    }
-    esp_err_t battery_diagnostic_err = julia_battery_diagnostics_init();
-    if (battery_diagnostic_err != ESP_OK &&
-        battery_diagnostic_err != ESP_ERR_NOT_SUPPORTED) {
-        ESP_LOGW(TAG, "Battery diagnostics unavailable: %s",
-                 esp_err_to_name(battery_diagnostic_err));
-    }
-    julia_battery_log_stage("power_hold");
-    ESP_LOGI(TAG, "Julia application start");
-
-    ota_boot_flow_run();
-    boot_stage_settle("ota_ready");
-
-#if CONFIG_JULIA_IMU_LOGGER_ENABLE
-    /* 实验模式独占 IMU：保留电源与启动验收，跳过产品语音、状态机和运动任务。 */
-    esp_err_t logger_err = imu_logger_start();
-    ota_boot_flow_complete(logger_err == ESP_OK);
-    ESP_ERROR_CHECK(logger_err);
-    return;
 #endif
-
-    esp_err_t err;
-    esp_err_t visual_error = ESP_OK;
-    esp_err_t voice_error = ESP_OK;
-    esp_err_t audio_error = ESP_OK;
-    esp_err_t idle_display_error = ESP_OK;
-    bool backlight_ready = false;
-    bool visual_ready = false;
-    int64_t boot_started = esp_timer_get_time();
-    /* 显示和动画完成后才启用音频；低亮度动画不再与其它外设上电并行。 */
-    err = julia_backlight_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Julia backlight init failed: %s", esp_err_to_name(err));
-        visual_error = err;
-    } else {
-        backlight_ready = true;
-    }
-    err = julia_display_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Julia display init failed: %s", esp_err_to_name(err));
-        if (visual_error == ESP_OK) visual_error = err;
-    } else {
-        err = julia_avatar_init();
-        if (err == ESP_OK) {
-            ESP_LOGI(TAG, "Boot animation start at limited brightness");
-            esp_err_t animation_err = julia_avatar_play_boot_sequence();
-            if (animation_err != ESP_OK) {
-                ESP_LOGW(TAG, "Boot animation incomplete: %s",
-                         esp_err_to_name(animation_err));
-                julia_backlight_set(CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT);
-            }
-        }
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Julia avatar init failed: %s", esp_err_to_name(err));
-            if (visual_error == ESP_OK) visual_error = err;
-        } else if (backlight_ready) {
-            visual_ready = true;
-        }
-    }
-    boot_stage_settle("display_ready");
-
-    /* 语音服务装配：注册 MQTT 语音命令 topic（非 critical，不影响 OTA 就绪）。
-     * WSS 客户端不在此启动：取得 IPv4 后由下方注册的 ip_ready 回调启动。 */
-    err = voice_service_init();
-    bool voice_initialized = err == ESP_OK;
-    voice_error = err;
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Voice service init failed: %s", esp_err_to_name(err));
-    }
-    /* 板级音频（最小包 mic_test.c 抽取）：MIC 走 WSS 上行、SPKS/SPKE 下行控制。 */
-    err = board_audio_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Board audio init failed: %s", esp_err_to_name(err));
-        audio_error = err;
-    } else {
-        err = voice_service_init_board_audio();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Voice-board audio wiring failed: %s", esp_err_to_name(err));
-            audio_error = err;
-        }
-    }
-    bool audio_ready = err == ESP_OK;
-    boot_stage_settle("audio_ready");
-
-    /* 音频服务装配点（当前无自有状态，与 OTA 服务层保持一致的初始化顺序）。 */
-    err = audio_service_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Audio service init failed: %s", esp_err_to_name(err));
-    }
-
-    /* RTC 恢复属于本地尽力而为操作；取得 IP 后再启动 SNTP，并把同步时间写回 PCF85063。 */
-    err = julia_time_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Julia time context init failed: %s", esp_err_to_name(err));
-    }
-    /* 暂停 SD 初始化与挂载；保留调用代码，恢复时同步启用驱动编译项和配置。
-    err = sd_card_start();
-    if (err == ESP_ERR_NOT_SUPPORTED) {
-        ESP_LOGI(TAG, "SD card disabled by configuration");
-    } else if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SD card mount failed: %s", esp_err_to_name(err));
-    }
-    */
-    boot_stage_settle("rtc_ready");
-
-    /* 取得 IPv4 后按注册顺序启动 MQTT 与 WSS 语音服务；任一启动失败都由网络
-     * 生命周期任务按独立的有界退避重试，服务之间互不干扰。 */
-    err = network_lifecycle_register_ip_ready(boot_mqtt_ip_ready, NULL);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "MQTT IP-ready callback registration failed: %s",
-                 esp_err_to_name(err));
-    }
-    err = network_lifecycle_register_ip_ready(boot_voice_ip_ready, NULL);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Voice IP-ready callback registration failed: %s",
-                 esp_err_to_name(err));
-    }
-    err = network_lifecycle_register_ip_ready(julia_time_ip_ready, NULL);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Time-sync callback registration failed: %s",
-                 esp_err_to_name(err));
-    }
-
-    ESP_LOGI(TAG, "Staged local services initialized in %lldms",
-             (long long)((esp_timer_get_time() - boot_started) / 1000));
-    err = julia_idle_display_init();
-    idle_display_error = err;
-    bool idle_display_ready = err == ESP_OK;
-    if (!idle_display_ready)
-        ESP_LOGW(TAG, "Idle display init failed: %s", esp_err_to_name(err));
-    bool boot_dependencies_ready = visual_ready && audio_ready &&
-                                   voice_initialized && idle_display_ready;
-    err = julia_fsm_runtime_init(boot_dependencies_ready);
-    esp_err_t fsm_error = err;
-    bool fsm_ready = err == ESP_OK;
-    esp_err_t wake_error = ESP_OK;
-    if (!fsm_ready) ESP_LOGW(TAG, "FSM runtime init failed: %s", esp_err_to_name(err));
-
-    if (fsm_ready && boot_dependencies_ready) {
+    return err;
+}
+static esp_err_t resources_branch(void)
+{
+    (void)module_result("rtc_attempt_finished", julia_time_init());
+    esp_err_t idle = module_result("idle", julia_idle_display_init());
+    esp_err_t fsm = module_result("fsm_prepare", julia_fsm_runtime_prepare());
+#if CONFIG_JULIA_IMU_MOTION_ENABLE
+    s_motion_prepared = module_result("imu_prepare", board_imu_init());
+#endif
+    s_resources_fault = idle != ESP_OK ? JULIA_FAULT_DISPLAY_INIT : JULIA_FAULT_FSM_RUNTIME_INIT;
+    return idle != ESP_OK ? idle : fsm;
+}
+static void behavior_start(void *arg)
+{
+    (void)arg;
 #if CONFIG_JULIA_NIGHT_SLEEP_ENABLE
-        err = julia_night_schedule_init();
-        if (err != ESP_OK) ESP_LOGW(TAG, "Night schedule init failed: %s", esp_err_to_name(err));
+    (void)module_result("night_enable", julia_night_schedule_init());
 #endif
 #if CONFIG_JULIA_IMU_MOTION_ENABLE
-        err = julia_motion_init();
-        if (err != ESP_OK) ESP_LOGW(TAG, "Motion init failed: %s", esp_err_to_name(err));
+    if (s_motion_prepared == ESP_OK)
+        (void)module_result("motion_enable", julia_motion_init());
 #endif
-#if !CONFIG_JULIA_SERVER_WAKE_ENABLE
-        if (audio_ready && voice_initialized) {
-            err = wake_detector_init();
-            wake_error = err;
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "Wake detector init failed: %s", esp_err_to_name(err));
-            }
-        }
-#endif
+    esp_err_t err = module_result("quiet_power", julia_quiet_power_init());
+    if (err != ESP_OK) {
+        /* 保留静默管理创建失败的致命语义；云分支不得随后重新打开门控。 */
+        portENTER_CRITICAL(&s_boot_lock);
+        s_runtime_failed = true;
+        s_cloud_allowed = false;
+        portEXIT_CRITICAL(&s_boot_lock);
+        (void)julia_fsm_runtime_raise_fault(JULIA_FAULT_CRITICAL_INIT, err);
     }
-    if (fsm_ready) {
-        ESP_ERROR_CHECK(julia_quiet_power_init());
-    }
-    /* 参数是关键应用初始化是否健康，必须在显示、音频、语音、FSM 和唤醒检测都尝试过之后
-     * 才调用一次；此时还没联网，网络可用性不参与确认。传 false 会让待验证镜像立即回滚。 */
-    ota_boot_flow_complete(boot_dependencies_ready && fsm_ready && wake_error == ESP_OK);
-    if (fsm_ready && wake_error != ESP_OK) {
-        (void)julia_fsm_runtime_raise_fault(JULIA_FAULT_VOICE_INIT, wake_error);
-    }
-    if (fsm_ready && !boot_dependencies_ready) {
-        /* 只记录按下面顺序找到的第一个不可用关键能力：显示 → 音频 → 语音 → 闲置显示；
-         * 四项都可用时理论上不会走到这里，兜底用 CRITICAL_INIT + ESP_FAIL。 */
-        julia_fault_reason_t reason = JULIA_FAULT_CRITICAL_INIT;
-        esp_err_t fault_error = ESP_FAIL;
-        if (!visual_ready) {
-            reason = JULIA_FAULT_DISPLAY_INIT;
-            fault_error = visual_error;
-        } else if (!audio_ready) {
-            reason = JULIA_FAULT_AUDIO_INIT;
-            fault_error = audio_error;
-        } else if (!voice_initialized) {
-            reason = JULIA_FAULT_VOICE_INIT;
-            fault_error = voice_error;
-        } else if (!idle_display_ready) {
-            reason = JULIA_FAULT_DISPLAY_INIT;
-            fault_error = idle_display_error;
-        }
-        err = julia_fsm_runtime_raise_fault(reason, fault_error);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Cannot enqueue S7.2 fault: %s", esp_err_to_name(err));
-        }
-    } else if (!fsm_ready) {
-        /* FSM 无法创建时没有运行队列可进入 S7.2；仍记录同一格式快照后直接复位。
-         * julia_fault_reset_allowed() 在快照读不到或未超过上限时返回 true，因此只有同一条
-         * 故障链连续达到上限，才停在下面的死循环里等待售后处理、不再复位。 */
-        (void)julia_fault_record(JULIA_FAULT_FSM_RUNTIME_INIT, fsm_error,
-                                 JULIA_MAIN_STATE_S0_BOOT,
-                                 JULIA_S2_SUB_STATE_NONE);
-        julia_avatar_set_dialog_phase(JULIA_AVATAR_DIALOG_IDLE);
-        julia_avatar_set_dozing(true);
-        julia_backlight_set(CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT);
-        if (!julia_fault_reset_allowed()) {
-            ESP_LOGE(TAG, "FSM 初始化连续失败，保持 S7.2 等待售后处理");
-            while (1) vTaskDelay(pdMS_TO_TICKS(1000));
-        }
+    vTaskDelete(NULL);
+}
+static void battery_start(void *arg)
+{
+    (void)arg;
+    (void)module_result("battery_monitor", julia_battery_monitor_start(battery_status_updated, NULL));
+    vTaskDelete(NULL);
+}
+static void ota_accept(void *arg)
+{
+    (void)arg;
+    portENTER_CRITICAL(&s_boot_lock);
+    bool healthy = !s_runtime_failed;
+    portEXIT_CRITICAL(&s_boot_lock);
+    ota_boot_flow_complete(healthy);
+    vTaskDelete(NULL);
+}
+static void boot_failure(julia_fault_reason_t reason, esp_err_t error, bool branches_finished)
+{
+    portENTER_CRITICAL(&s_boot_lock);
+    s_cloud_allowed = false;
+    s_runtime_failed = true;
+    portEXIT_CRITICAL(&s_boot_lock);
+    /* 超时后 worker 可能仍持有驱动锁，不抢占画面、不销毁任务、不开放云服务。 */
+    ota_boot_flow_complete(false);
+    if (branches_finished && julia_fsm_runtime_raise_fault(reason, error) == ESP_OK)
+        return;
+    (void)julia_fault_record(reason, error,
+                            JULIA_MAIN_STATE_S0_BOOT, JULIA_S2_SUB_STATE_NONE);
+    if (julia_fault_reset_allowed()) {
         vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_FAULT_RESET_DELAY_MS));
         esp_restart();
     }
-
-    /* Wi-Fi 最后启动，避免 RF 校准/扫描与显示、音频上电落在同一电流尖峰。网络
-     * 不可用仍由后台永久重试，不阻断本地应用或 pending 镜像验收。 */
-    boot_stage_settle("runtime_ready");
-    ESP_LOGI(TAG, "Starting background Wi-Fi lifecycle after local startup");
-    esp_err_t runtime_power_err = julia_power_runtime_profile_enable();
-    if (runtime_power_err != ESP_OK) {
-        ESP_LOGW(TAG, "Runtime CPU profile failed: %s",
-                 esp_err_to_name(runtime_power_err));
-    }
-    esp_err_t network_err = network_lifecycle_start();
-    err = network_err;
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Background Wi-Fi lifecycle is unavailable: %s; local application remains active",
-                 esp_err_to_name(err));
-    }
-    julia_battery_log_stage("wifi_started");
-    if (CONFIG_JULIA_BOOT_SETTLE_DELAY_MS > 0) {
-        vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_BOOT_SETTLE_DELAY_MS));
-    }
-    julia_battery_log_stage("wifi_settled");
-
-    esp_err_t battery_monitor_err = julia_battery_monitor_start(
-        battery_status_updated, NULL);
-    if (battery_monitor_err != ESP_OK &&
-        battery_monitor_err != ESP_ERR_NOT_SUPPORTED) {
-        ESP_LOGW(TAG, "Battery monitor not started: %s",
-                 esp_err_to_name(battery_monitor_err));
-    }
-    /* RF 关联稳定后才开放 MQTT/WSS，避免 TLS 与首轮 Wi-Fi 扫描/握手重叠。 */
+    for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
+}
+/* 在协调者上下文执行；显示资源、音频和 FSM 已成功，动画可能仍持有画面。 */
+static esp_err_t start_cloud_early(void)
+{
+    ESP_LOGI(TAG, "handshake_dependencies_ready t=%lldms", (long long)(esp_timer_get_time()/1000));
+    esp_err_t err = julia_fsm_runtime_start();
+    if (err != ESP_OK) return err;
+    (void)module_result("runtime_power", julia_power_runtime_profile_enable());
+    err = julia_fsm_runtime_start_cloud_window();
+    if (err != ESP_OK) return err;
     portENTER_CRITICAL(&s_boot_lock);
-    s_voice_ready = boot_dependencies_ready && fsm_ready && wake_error == ESP_OK;
-    s_runtime_ready = fsm_ready;
+    s_cloud_allowed = !s_runtime_failed;
+    bool allowed = s_cloud_allowed;
     portEXIT_CRITICAL(&s_boot_lock);
+    if (!allowed) return ESP_FAIL;
+    ESP_LOGI(TAG, "cloud_gate_open t=%lldms (animation may still be running)",
+             (long long)(esp_timer_get_time()/1000));
     network_lifecycle_retry_services();
-    ESP_LOGI(TAG, "Boot interaction gate open in %lldms (voice_ready=%u)",
-             (long long)((esp_timer_get_time() - boot_started) / 1000), (unsigned)s_voice_ready);
-
-    /* 设备主动推送演示（默认关闭）：WSS 会话默认由云端驱动（服务端发
-     * FILE_SEND，设备推送）；启用演示后设备才会主动推测试音频列表。 */
-#if CONFIG_VOICE_PUSH_DEMO_ENABLE
-    err = voice_push_demo_start();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Voice push demo not started: %s", esp_err_to_name(err));
-    }
+    return ESP_OK;
+}
+void app_main(void)
+{
+    const int64_t entered = esp_timer_get_time();
+    esp_err_t hold_error = julia_power_hold_enable();
+    ESP_LOGI(TAG, "app_main t=%lldms", (long long)(entered/1000));
+    (void)module_result("power_hold", hold_error);
+    (void)module_result("power_management", julia_power_management_init());
+    (void)module_result("battery_diagnostics", julia_battery_diagnostics_init());
+    /* 唯一启动采样点；之后 ADC 由电池监测任务独占。 */
+    julia_battery_log_stage("power_hold");
+    ota_boot_flow_run();
+#if CONFIG_JULIA_IMU_LOGGER_ENABLE
+    esp_err_t logger = imu_logger_start();
+    ota_boot_flow_complete(logger == ESP_OK);
+    ESP_ERROR_CHECK(logger);
+    return;
 #endif
-    /* 生命周期自身也可能暂时创建失败。保留 app task 重试，无需再申请监督任务栈。 */
+    esp_err_t err = module_result("shared_i2c", tca9554_init());
+    /* 首次创建失败时不启动任何总线消费者，避免各分支同时重试创建总线。 */
+    if (err != ESP_OK) { boot_failure(JULIA_FAULT_CRITICAL_INIT, err, false); return; }
+    err = module_result("voice_assembly", voice_service_init());
+    if (err != ESP_OK) { boot_failure(JULIA_FAULT_VOICE_INIT, err, false); return; }
+    err = network_lifecycle_register_ip_ready(boot_mqtt_ip_ready, NULL);
+    if (err == ESP_OK) err = network_lifecycle_register_ip_ready(boot_voice_ip_ready, NULL);
+    if (err == ESP_OK) err = network_lifecycle_register_ip_ready(julia_time_ip_ready, NULL);
+    if (err != ESP_OK) { boot_failure(JULIA_FAULT_CRITICAL_INIT, err, false); return; }
+    ESP_LOGI(TAG, "base_ready t=%lldms", (long long)(esp_timer_get_time()/1000));
+    esp_err_t network_err = module_result("wifi_start", network_lifecycle_start());
+    const boot_branch_t branches[3] = {
+        {"boot_display", display_branch, 6144, animation_branch},
+        {"boot_audio", audio_branch, 8192},
+        {"boot_resources", resources_branch, 4096},
+    };
+    boot_result_t results[3];
+    err = boot_coordinator_run(branches, results, CONFIG_JULIA_LOCAL_INIT_TIMEOUT_MS, start_cloud_early);
+    if (err != ESP_OK) { boot_failure(JULIA_FAULT_CRITICAL_INIT, err, false); return; }
+    for (unsigned i=0; i<3; ++i) {
+        if (!results[i].completed || results[i].error != ESP_OK) {
+            julia_fault_reason_t reason = i == 0 ? JULIA_FAULT_DISPLAY_INIT :
+                i == 1 ? s_audio_fault : s_resources_fault;
+            boot_failure(reason, results[i].error, true);
+            return;
+        }
+    }
+
+    ESP_LOGI(TAG, "local_ready_s0 t=%lldms elapsed=%lldms", (long long)(esp_timer_get_time()/1000),
+             (long long)((esp_timer_get_time()-entered)/1000));
+    /* 三项策略在 S0 创建；已有状态准入使夜间不计宽限、IMU 不采样、网络不暂停。
+     * S3 迁移的观察者通知唤醒这些任务，无需再次初始化。 */
+    if (xTaskCreate(behavior_start, "boot_behavior", 4096, NULL, 3, NULL) != pdPASS) {
+        boot_failure(JULIA_FAULT_CRITICAL_INIT, ESP_ERR_NO_MEM, true);
+        return;
+    }
+    /* 动画真正结束后才释放呈现；早到 ONLINE 不能提前覆盖画面或放行业务。 */
+    err = julia_fsm_runtime_finish_boot_animation();
+    if (err != ESP_OK) { boot_failure(JULIA_FAULT_CRITICAL_INIT, err, true); return; }
+    if (xTaskCreate(battery_start, "boot_battery", 3072, NULL, 2, NULL) != pdPASS)
+        (void)module_result("battery_task", ESP_ERR_NO_MEM);
+    /* 验收失败仍可回滚；待验收期间 OTA 引擎拒绝新升级。普通启动无需创建验收任务。 */
+    if (ota_boot_flow_pending()) {
+        if (xTaskCreate(ota_accept, "boot_accept", 4096, NULL, 2, NULL) != pdPASS)
+            ota_boot_flow_complete(false);
+    }
+    uint32_t boot_retry_ms = CONFIG_NETWORK_WIFI_RETRY_BASE_MS;
+    for (;;) {
+        bool retry_network = network_err != ESP_OK && network_err != ESP_ERR_NOT_SUPPORTED;
+        err = julia_fsm_runtime_wait_boot_decision(retry_network ? boot_retry_ms : UINT32_MAX);
+        if (err == ESP_OK) break;
+        if (err != ESP_ERR_TIMEOUT) { boot_failure(JULIA_FAULT_CRITICAL_INIT, err, true); return; }
+        /* 等待使用通知，不忙轮询；生命周期创建失败时沿用 app 的退避恢复。 */
+        network_err = network_lifecycle_start();
+        if (boot_retry_ms < CONFIG_NETWORK_WIFI_RETRY_MAX_MS)
+            boot_retry_ms = boot_retry_ms > CONFIG_NETWORK_WIFI_RETRY_MAX_MS / 2U
+                ? CONFIG_NETWORK_WIFI_RETRY_MAX_MS : boot_retry_ms * 2U;
+    }
+    ESP_LOGI(TAG, "local_handoff t=%lldms elapsed=%lldms", (long long)(esp_timer_get_time()/1000),
+             (long long)((esp_timer_get_time()-entered)/1000));
+#if CONFIG_VOICE_PUSH_DEMO_ENABLE
+    (void)module_result("voice_demo", voice_push_demo_start());
+#endif
     uint32_t retry_ms = CONFIG_NETWORK_WIFI_RETRY_BASE_MS;
     while (network_err != ESP_OK && network_err != ESP_ERR_NOT_SUPPORTED) {
         vTaskDelay(pdMS_TO_TICKS(retry_ms));
         network_err = network_lifecycle_start();
-        if (retry_ms < CONFIG_NETWORK_WIFI_RETRY_MAX_MS) {
+        if (retry_ms < CONFIG_NETWORK_WIFI_RETRY_MAX_MS)
             retry_ms = retry_ms > CONFIG_NETWORK_WIFI_RETRY_MAX_MS / 2U
-                           ? CONFIG_NETWORK_WIFI_RETRY_MAX_MS : retry_ms * 2U;
-        }
+                ? CONFIG_NETWORK_WIFI_RETRY_MAX_MS : retry_ms * 2U;
     }
 }
