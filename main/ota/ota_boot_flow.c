@@ -1,26 +1,12 @@
 /**
- * @file    ota_boot_flow.c
- * @brief   OTA 镜像启动验收、确认、回滚与持久化状态对账。
- *
- * 本模块在其他业务服务启动前执行。它处理 PENDING_VERIFY 镜像的本地健康检查，
- * 必要时回滚或进入安全模式，并完成 OTA 报告与断点记录的启动对账。
- *
- * 生命周期与编排（app_main 最先调用本模块）：
- *   ota_boot_health_begin() 判定启动镜像是否处于 PENDING_VERIFY →
- *   初始化 NVS / 网络接口 / 事件循环 → 上报 booted_pending_verify →
- *   本地健康检查（ota_boot_health_check + 可选 GPIO 诊断）→ 产品验收钩子
- *   （ota_boot_health_product_check）→ 通过则 confirm（esp_ota_mark_app_valid_
- *   cancel_rollback）并上报 succeeded；失败则 reject（标记无效并回滚/进入安全
- *   模式）并上报 rolled_back。最后与运行版本对账，清理已确认版本的断点记录。
- *
- * 模块边界：本模块只做“启动验收”的编排与对账，本身不解析 JSON、不上报 MQTT
- * 原始消息、不写断点记录；具体健康判定在 ota_boot_health，生命周期事件在
- * ota_report，断点/隔离在 ota_state_store，运行版本来源为 esp_ota_ops 分区描述。
- * 网络可用性刻意不作为镜像健康状况的判定条件（见 ota_boot_health）。
+ * OTA 启动分两阶段：run 在外设之前识别镜像、保护 NVS、准备网络基础并对账；
+ * complete 在本地结果确定后验收 pending 镜像，不以网络可用性判断健康。
+ * 可选 GPIO 诊断必须早于外设复用引脚；其余额外检查不阻塞正常画面交接。
  */
 #include "ota_boot_flow.h"
 
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -102,12 +88,12 @@ static bool ota_local_health_check(bool include_gpio_diagnostic)
 /**
  * @brief 已完成启动阶段 NVS 可用性判定的标志；就绪后才允许写 S7.2 故障快照。
  *
- * 与 s_pending_verify 一样只在 app_main 的启动串行阶段读写，因此不加锁。
+ * app_main 在创建验收任务前发布该值；此后只读。pending 标志另外使用原子访问。
  */
 static bool s_fault_nvs_ready;
 /** 本次启动是否在验收 PENDING_VERIFY 镜像；由 ota_boot_flow_run() 写入，
  *  ota_boot_flow_complete() 消费后清为 false。 */
-static bool s_pending_verify;
+static atomic_bool s_pending_verify;
 static void ota_reconcile_boot_state(bool pending_verify);
 
 /**
@@ -166,30 +152,7 @@ static bool ota_get_last_invalid_version(char *version, size_t version_size)
     return true;
 }
 
-/**
- * @brief 执行 OTA 启动验收与状态对账（应用初始化入口）。
- *
- * 函数在业务服务启动前，决定“刚从引擎写的镜像”是否保持有效。整体流程：
- *   1) 读取启动镜像 OTA 状态，得到 PENDING_VERIFY 标志；
- *   2) 初始化 NVS（不可恢复/不兼容时按“是否 PENDING_VERIFY”决定是否擦除）；
- *   3) 初始化状态上报与网络接口/事件循环；
- *   4) 上报 booted_pending_verify（若有待验收镜像）；
- *   5) 本地健康检查（分区/Flash/描述/堆/队列 + 可选 GPIO 诊断）与产品验收钩子；
- *   6) 通过 → confirm（标记 VALID 并取消回滚）+ 上报 succeeded；
- *      失败且可见回滚 → reject（进入回滚）+ 上报 rolled_back；
- *   7) 最后与运行版本对账：识别上次失败升级的回滚并上报，清理已确认版本的记录。
- *
- * 副作用：可能擦除/写 NVS，调用 esp_ota_mark_app_valid_cancel_rollback() 或
- * esp_ota_mark_app_invalid_rollback_and_reboot()，并上报若干生命周期事件；
- * 不可恢复错误会进入安全模式且不返回。
- *
- * 成功路径返回值为 void：不再向调用方报告错误，因为任何不可恢复错误已经
- * 在函数内部转入安全模式；只有“已确认/已对账”的正常结果才会返回，可继续启动
- * 业务服务。
- *
- * @note 必须在其他业务服务之前调用；只能在普通任务上下文调用（内部可能阻塞
- *       于 GPIO 诊断/NVS/Flash 操作）。不依赖 Wi-Fi 或 MQTT 可用性。
- */
+/* 由 app_main 串行调用。pending 下 NVS 不兼容绝不擦除；GPIO 诊断保留早期独占。 */
 void ota_boot_flow_run(void)
 {
     bool pending_verify = false;
@@ -240,31 +203,16 @@ void ota_boot_flow_run(void)
         }
     }
 
-    if (!ota_local_health_check(pending_verify)) {
-        if (pending_verify) {
-            /* 区分“新镜像事实上无效、可回滚”与“根本没有旧镜像可回滚”：
-             * 前者上报 BOOT_SELF_TEST_FAILED，后者上报 ROLLBACK_UNAVAILABLE。
-             * 该三元判定在下方 product/confirm 失败分支中重复出现，含义相同。 */
-            native_ota_failure_reason_t rollback_reason =
-                esp_ota_check_rollback_is_possible() ?
-                NATIVE_OTA_FAILURE_BOOT_SELF_TEST_FAILED :
-                NATIVE_OTA_FAILURE_ROLLBACK_UNAVAILABLE;
-            err = native_ota_report_boot_rolled_back(rollback_reason);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Could not report rolled_back: %s", esp_err_to_name(err));
-            }
-            err = ota_boot_health_reject("boot self-test failed");
-            ota_enter_safe_mode(JULIA_FAULT_OTA_ROLLBACK_UNAVAILABLE, err,
-                                err == ESP_ERR_OTA_ROLLBACK_FAILED ?
-                                "rollback unavailable after self-test" :
-                                "rollback failed after self-test");
-        }
-        /* 没有待验收镜像时本地自检失败代表当前固件本身不可继续使用：不尝试回滚（没有
-         * 可拒绝的 pending 镜像），只落盘 S7.2 并停在安全模式等待人工处理。这与上面的
-         * 分支不同——那里会先上报 rolled_back 并请求回滚。 */
-        ota_enter_safe_mode(JULIA_FAULT_CRITICAL_INIT, ESP_FAIL,
-                            "local health check failed");
+    /* GPIO 诊断会重配引脚（当前 GPIO4 与 JULIA_LED_GPIO 复用），只能在外设启用前执行。
+     * 仅 pending 镜像且显式启用诊断时保留该早期例外，不计入普通启动收益。 */
+#if CONFIG_OTA_ENABLE_GPIO_DIAGNOSTIC
+    if (pending_verify && !diagnostic()) {
+        (void)native_ota_report_boot_rolled_back(esp_ota_check_rollback_is_possible() ?
+            NATIVE_OTA_FAILURE_BOOT_SELF_TEST_FAILED : NATIVE_OTA_FAILURE_ROLLBACK_UNAVAILABLE);
+        err = ota_boot_health_reject("early GPIO diagnostic failed");
+        ota_enter_safe_mode(JULIA_FAULT_OTA_ROLLBACK_UNAVAILABLE, err, "GPIO diagnostic rejected");
     }
+#endif
 
     s_pending_verify = pending_verify;
     if (!pending_verify) ota_reconcile_boot_state(false);
@@ -316,7 +264,7 @@ void ota_boot_flow_complete(bool app_healthy)
     if (!pending_verify) return;
     esp_err_t err;
     /* 产品验收钩子必须先完成关键本地业务初始化；远程连通性刻意不作为验收条件。 */
-    if (!app_healthy || !ota_boot_health_product_check()) {
+    if (!app_healthy || !ota_local_health_check(false) || !ota_boot_health_product_check()) {
         native_ota_failure_reason_t rollback_reason =
             esp_ota_check_rollback_is_possible() ?
             NATIVE_OTA_FAILURE_BOOT_SELF_TEST_FAILED :
@@ -351,6 +299,11 @@ void ota_boot_flow_complete(bool app_healthy)
         }
     }
 
-    s_pending_verify = false;
     ota_reconcile_boot_state(true);
+    s_pending_verify = false;
+}
+
+bool ota_boot_flow_pending(void)
+{
+    return atomic_load(&s_pending_verify);
 }

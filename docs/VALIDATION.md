@@ -39,17 +39,20 @@
 
 ## 4. 启动与显示
 
+2026-09-17 并行重构的已执行主机/构建记录与硬件待测边界见 [启动验证](BOOT_INITIALIZATION.md)。下面的设备场景仍需实机执行。
+
 | 编号 | 场景 | 核对内容 |
 | --- | --- | --- |
-| BOOT-01 | 正常冷启动 | 80MHz、25%背光下显示→音频→存储顺序启动，Wi-Fi最后启动；初始化完成后 S0→S3并等待唤醒词；记录各阶段耗时与电压 |
+| BOOT-01 | 正常冷启动 | 基础准备后动画、音频、本地资源与 Wi-Fi 并行；必要资源成功后 MQTT/WSS 与动画尾段并行；动画结束且云连接成功或超时后 S0→S3，仍未判决时 S0 固定亮度等待；记录单调里程碑，分别计算本地就绪和云可交互耗时 |
 | BOOT-02 | 无 Wi-Fi、错误密码或服务端不可达 | 本地显示可工作；记录各连接的重试行为，不将失败连接视为启动成功 |
-| BOOT-03 | 显示初始化失败、网络很快取得 IP | 关键显示初始化失败进入 S7.2；Wi-Fi仍在本地运行时处理之后启动，网络回调不能提前开放交互 |
-| BOOT-03A | 电池供电冷启动，分别启用显示、音频和 Wi-Fi | 串口依次出现 `power_hold`、`ota_ready`、`display_ready`、`audio_ready`、`storage_ready`、`runtime_ready`、`wifi_started`、`wifi_settled`；记录最低电压和首次缺失阶段，禁止插 USB 掩盖压降 |
+| BOOT-03 | 显示初始化失败、网络很快取得 IP | Wi-Fi 可以提前取得 IP；关键显示初始化失败走 S7.2，MQTT/WSS 门控始终不开放 |
+| BOOT-03A | 电池供电冷启动，分别启用显示、音频和 Wi-Fi | 串口记录 `power_hold` 电压、BOOT 分支结果与交接时间；供电瞬态需外部采集，阶段不再重复阻塞 ADC 采样，禁止插 USB 掩盖压降 |
 | BOOT-04 | 板级音频、语音服务或 FSM 初始化失败 | 待验证新镜像应回滚；已确认镜像保存 `julia_fault` 快照并按 S7.2 策略处理 |
-| BOOT-05 | 启动后 MQTT/WSS 持续不可用超过初始连接期限 | `CONNECTING` 超时后只进入一次 S7.1并播放本地提示；随后 S3 显示 `offline`，服务全部恢复后标签消失 |
+| BOOT-05 | 启动后 MQTT/WSS 持续不可用超过初始连接期限 | 首次在 S0 等待 `CONNECTING`，超时才进入 S3（显示 offline）；服务全部恢复后清除 offline 标签，S3 文字保持不变；后续断线仍验证 S7.1 及本地提示 |
 | BOOT-06 | 连续制造相同关键初始化故障 | 每次记录递增 sequence；核对不会被误分类为普通网络故障 |
 | UI-01 | S4 中有效话语 MIC_START → MIC_STOP → SPKS／PCM → SPKE | MIC_START 保持 S4；MIC_STOP 进入 S2.2；正常 SPKS 进入 S2.3；实际播完回 S1 |
-| UI-01A | S3/S5/S6 收到 `wake_detected` | 先提交 S4 并回匹配 `interaction_id` 的 `state_ready`；唤醒回应期间闭眼底图上的独立嘴型随 PCM 动作；播完闭嘴并仍保持 S4 |
+| UI-01A | S3/S5/S6 收到 `wake_detected` | 本地收音版本提交 S4 后立即播放内嵌唤醒 WAV，同时按原流程回匹配 `interaction_id` 的 `state_ready`；嘴型随本地 PCM 动作；播完闭嘴并保持 S4，约 600ms 防回声间隔后收音；无云端 TTS／音频或新增就绪等待 |
+| VOICE-WAKE-LOCAL | 本地唤醒应答期间收到重复 wake／迟到 SPKS、PCM、SPKE；断线或退出 S4 | 重复 wake 不重播，网络音频不覆盖或截断本地应答；断线／退出取消应答；应答启动或输出失败触发会话恢复，不当作正常播完开放首句 |
 | UI-01B | 收到 MQTT `intent_result` | `normal` 不改变状态；`goodnight` 零语音进入 S6；`dismiss` 零语音进入 S5，背光固定为配置值（默认 50%）；随后 `MIC_STOP` 不再推进对话 |
 | UI-02 | 非 busy 陪伴达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 600 秒） | 从 S1 的 50% 固定背光进入 S3 待机、闭眼与 5%–30% 背光呼吸；同时检查 MIC 仍按服务器模式上传 |
 | UI-02A | S3 连续驻留达到 `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS`（默认 300 秒） | 投递 `EVT_STANDBY_TIMEOUT` 并进入 S6，停止呼吸、背光熄灭且面板进入睡眠；中途唤醒会取消旧计时 |

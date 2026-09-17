@@ -1,3 +1,4 @@
+#include "ota_boot_flow.h"
 /**
  * @file    ota_engine.c
  * @brief   下载新固件并在所有完整性检查通过后安全切换启动版本。
@@ -233,6 +234,7 @@ bool ota_engine_is_running(void)
  */
 esp_err_t ota_engine_handle_server_json(const char *json, size_t json_len)
 {
+    if (ota_boot_flow_pending()) return ESP_ERR_INVALID_STATE;
     ota_request_t manifest;
     bool download_requested = false;
     esp_err_t err = ota_control_plane_parse_server_response(json, json_len, &manifest,

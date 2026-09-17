@@ -23,6 +23,33 @@ menu "Example Configuration"
             Keep 16 kHz PCM16. Requires the matching cloud capture-v1 receiver.
             A server without capability acknowledgement cannot receive audio.
 
+    config JULIA_CAPTURE_VAD_ENABLE
+        bool "WebRTC VAD for local capture onset and endpointing"
+        depends on JULIA_LOCAL_CAPTURE_ENABLE
+        default y
+        help
+            Use the traditional ESP-SR 1.9.4 WebRTC VAD without AFE or models.
+            Adds speech evidence to the energy and optional FFT gates.
+            Raw PCM and preroll remain unchanged.
+
+    config JULIA_CAPTURE_VAD_MODE
+        int "WebRTC VAD aggressiveness (0 permissive, 3 restrictive)"
+        depends on JULIA_CAPTURE_VAD_ENABLE
+        range 0 3
+        default 1
+
+    config JULIA_CAPTURE_VAD_WAKE_TAIL_MS
+        int "Wake non-speech tail (ms, rounded up to 20 ms)"
+        depends on JULIA_CAPTURE_VAD_ENABLE
+        range 200 1500
+        default 500
+
+    config JULIA_CAPTURE_VAD_DIALOG_TAIL_MS
+        int "Dialog non-speech tail (ms, rounded up to 20 ms)"
+        depends on JULIA_CAPTURE_VAD_ENABLE
+        range 200 1500
+        default 700
+
     config JULIA_CAPTURE_FFT_GATE
         bool "Candidate spectral flatness/entropy gate for local capture"
         depends on JULIA_LOCAL_CAPTURE_ENABLE
@@ -30,7 +57,8 @@ menu "Example Configuration"
         help
             Apply the S0002 320-point spectral envelope to onset and activity.
             Candidate thresholds only: real noise rejection and S3 timing still
-            need hardware validation. Disable to restore energy-only endpointing.
+            need hardware validation. Disable removes the FFT condition;
+            disable VAD as well to restore energy-only endpointing.
 
     orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
 
@@ -79,21 +107,14 @@ menu "Example Configuration"
         default 160 if JULIA_RUNTIME_CPU_MAX_FREQ_160
         default 240 if JULIA_RUNTIME_CPU_MAX_FREQ_240
 
-    config JULIA_BOOT_STAGE_DELAY_MS
-        int "Delay between high-current startup stages (ms)"
-        range 0 2000
-        default 250
+    config JULIA_LOCAL_INIT_TIMEOUT_MS
+        int "Local initialization completion deadline (ms)"
+        range 5000 60000
+        default 20000
         help
-            Separates display, audio and Wi-Fi startup transients. Zero restores the
-            shortest sequential startup without an intentional settling interval.
-
-    config JULIA_BOOT_SETTLE_DELAY_MS
-        int "Delay before restoring the runtime CPU ceiling (ms)"
-        range 0 10000
-        default 1500
-        help
-            Leaves the boot CPU ceiling active briefly after Wi-Fi starts. The network
-            lifecycle continues in its background task during this interval.
+            Independent of cloud connection timeout. The boot animation takes 3300ms;
+            allow LCD reset/init, audio allocation and bounded I2C transfers plus
+            scheduler margin. A stuck local branch must never open the cloud gate.
 
     config JULIA_BOOT_BRIGHTNESS_PERCENT
         int "Maximum backlight brightness during boot animation (percent)"

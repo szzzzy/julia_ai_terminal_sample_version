@@ -61,12 +61,20 @@ static void connect(unsigned epoch_value)
 }
 int main(int argc,char **argv)
 {
+    bool vad_init_failure = argc>1 && !strcmp(argv[1], "--vad-init-fail");
+#if CONFIG_JULIA_CAPTURE_VAD_ENABLE
+    extern int vad_test_fail_create;
+    vad_test_fail_create = vad_init_failure;
+#endif
     assert(voice_local_capture_init(push,event)==ESP_OK);
+#if CONFIG_JULIA_CAPTURE_VAD_ENABLE
+    assert((s->capture.voice_frame == NULL) == vad_init_failure);
+#endif
 #ifdef TEST_FFT_GATE
     s->capture.fft_enabled=true;
 #endif
     connect(10);
-    if(argc>1){wire=fopen(argv[1],"wb");assert(wire);}
+    if(argc>1 && !vad_init_failure){wire=fopen(argv[1],"wb");assert(wire);}
     for(unsigned i=0;i<25;i++)input(1);
     for(unsigned i=0;i<6;i++)input(200);
     assert(start_events==1 && sends==26);

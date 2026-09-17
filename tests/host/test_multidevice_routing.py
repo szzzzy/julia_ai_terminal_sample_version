@@ -64,6 +64,7 @@ capture_fixture = r'''
 '''
 capture_main = main[:main.index('int main(void)')] + r'''
 int main(void){
+ capture_ready=true;
  s_control_guard.active=true;
  state=JULIA_MAIN_STATE_S2_DIALOG;sub=JULIA_S2_SUB_STATE_S2_2_THINKING;
  barrier(1,"speech-1","speech");
@@ -83,15 +84,23 @@ int main(void){
  state=JULIA_MAIN_STATE_S3_STANDBY;sub=0;s_playback_role=VOICE_PLAYBACK_ROLE_NONE;
  barrier(2,"wake-2","wake");assert(s_round_pending);
  voice_service_on_server_text((const uint8_t*)"SPKS 24000",10);assert(!playing);
+ const char *wake="{\"type\":\"wake_detected\",\"device_id\":\"esp-001122334455\",\"session_id\":\"session-a\",\"interaction_id\":\"wake-2\",\"interaction_seq\":2,\"request_id\":\"wake-2\"}";
+ voice_service_on_server_text((const uint8_t*)wake,strlen(wake));
+ assert(playing && state==JULIA_MAIN_STATE_S4_INTERACTION && !s_round_pending);
+ assert(s_playback_role==VOICE_PLAYBACK_ROLE_WAKE_REPLY);
+ uint32_t local_generation=s_playback_generation;
+ voice_service_on_server_text((const uint8_t*)wake,strlen(wake));
+ voice_service_on_server_text((const uint8_t*)"SPKS 24000",10);
+ voice_service_on_server_text((const uint8_t*)"SPKE",4);
+ assert(playing && s_playback_generation==local_generation);
  assert(!failures);puts("PASS: capture-v1 playback without MIC_START, duplicate sync, obsolete MIC rejection, wake barrier");
  return 0;
 }
 '''
 names = ("voice_service_handle_control_json", "voice_service_apply_scoped_control",
-         "interaction_id_is_valid", "voice_service_handle_wake_json",
+         "interaction_id_is_valid", "voice_service_start_wake_prompt", "voice_service_handle_wake_json",
          "voice_service_on_server_text", "voice_service_on_mqtt_command")
-capture_common = '#define CONFIG_JULIA_LOCAL_CAPTURE_ENABLE 1\n' + COMMON.replace(
-    'voice_local_capture_ready(void){return false;}', 'voice_local_capture_ready(void){return true;}')
+capture_common = '#define CONFIG_JULIA_LOCAL_CAPTURE_ENABLE 1\n' + COMMON
 code.write_text(capture_common + capture_fixture + '\n'.join(function(source, n) for n in names) + capture_main,
                 encoding="utf-8")
 subprocess.run([a.cc, *["-I"+str(d) for d in (root/"tests/host", root/"tests/host/stubs",

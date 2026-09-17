@@ -9,6 +9,7 @@
 #include "julia_fsm_runtime.h"
 
 #include <string.h>
+#include <stdatomic.h>
 
 #include "esp_log.h"
 #include "esp_system.h"
@@ -39,6 +40,9 @@
 typedef enum {
     FSM_RUNTIME_MESSAGE_EVENT = 0,
     FSM_RUNTIME_MESSAGE_FAULT,
+    FSM_RUNTIME_MESSAGE_START,
+    FSM_RUNTIME_MESSAGE_CLOUD_START,
+    FSM_RUNTIME_MESSAGE_ANIMATION_DONE,
 } fsm_runtime_message_type_t;
 
 typedef struct {
@@ -67,6 +71,14 @@ typedef enum {
 static const char *TAG = "JULIA_FSM_RT";
 static QueueHandle_t s_event_queue;
 static TaskHandle_t s_task;
+static atomic_bool s_active;
+static bool s_cloud_started;
+static bool s_boot_waiting;
+static bool s_boot_visual_ready;
+/* 与 FSM 同寿命，app 的有限等待不会留下失效确认对象。 */
+static StaticSemaphore_t s_boot_decision_storage;
+static SemaphoreHandle_t s_boot_decision;
+static esp_err_t s_boot_decision_error = ESP_ERR_INVALID_STATE;
 static julia_fsm_t s_fsm;
 /* s_fsm 仅由 FSM Task 修改；下列快照与链路位图供其它任务无阻塞查询。 */
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -149,7 +161,7 @@ static bool play_local_prompt(const uint8_t *wav, size_t wav_bytes, const char *
  *     EVT_DISCONNECT_NOTICE_TIMEOUT 回到 s7_return_state；
  *   - service_init_timer_callback：开机后业务连接汇合超时
  *     （CONFIG_JULIA_SERVICE_INIT_TIMEOUT_SECONDS），投递 EVT_SERVICE_CONNECT_TIMEOUT，
- *     触发一次 S7.1 并保留 offline 标签。
+ *     保持行为状态并显示 OFFLINE；运行期断线仍可进入 S7.1。
  * 投递失败只记日志：owner 同时持有各自的截止时间，会在巡检时补发同一事件。
  */
 static void standby_timer_callback(void *argument)
@@ -194,8 +206,26 @@ static void service_init_timer_callback(void *argument)
  * 离开 CONNECTING 后不会再回到该状态，直到下次复位：之后的抖动只在 ONLINE/OFFLINE
  * 之间切换，初始连接超时也只会判定一次。
  */
+static void boot_try_handoff(void)
+{
+    julia_service_state_t state = julia_fsm_runtime_get_service_state();
+    if (s_boot_waiting && s_boot_visual_ready && s_cloud_started && state != JULIA_SERVICE_CONNECTING) {
+        s_boot_waiting = false;
+        bool entered = julia_fsm_transition_to(&s_fsm, JULIA_MAIN_STATE_S3_STANDBY,
+                                               JULIA_S2_SUB_STATE_NONE, EVT_NONE);
+        ESP_LOGI(TAG, "BOOT connection_decision=%s handoff=%u t=%lldms",
+                 state == JULIA_SERVICE_ONLINE ? "ONLINE" : "OFFLINE", (unsigned)entered,
+                 (long long)(esp_timer_get_time()/1000));
+        s_boot_decision_error = entered ? ESP_OK : ESP_ERR_INVALID_STATE;
+        xSemaphoreGive(s_boot_decision);
+    }
+}
+
 static bool service_state_apply_event(fsm_event_t event)
 {
+    if (event == EVT_WSS_CONNECTED &&
+        (!wss_transport_is_ready() || !voice_state_sync_is_ready())) return true;
+    if (event == EVT_MQTT_CONNECTED && !mqtt_comm_is_ready()) return true;
     uint8_t bit = 0;
     bool connected = false;
     switch (event) {
@@ -232,7 +262,9 @@ static bool service_state_apply_event(fsm_event_t event)
     portEXIT_CRITICAL(&s_state_lock);
 
     if (changed) {
-        julia_avatar_set_offline(state == JULIA_SERVICE_OFFLINE);
+        if (s_boot_visual_ready) julia_avatar_set_offline(state == JULIA_SERVICE_OFFLINE);
+        if (state == JULIA_SERVICE_ONLINE && previous_state != state)
+            ESP_LOGI(TAG, "BOOT cloud_business_ready t=%lldms", (long long)(esp_timer_get_time()/1000));
         const char *name = state == JULIA_SERVICE_ONLINE ? "ONLINE" :
                            state == JULIA_SERVICE_OFFLINE ? "OFFLINE" : "CONNECTING";
         ESP_LOGI(TAG, "service=%s online_links=0x%02x by %s behavior=%s/%s", name,
@@ -244,6 +276,7 @@ static bool service_state_apply_event(fsm_event_t event)
         (void)esp_timer_stop(s_service_init_timer);
     }
     if (state == JULIA_SERVICE_ONLINE) s_service_deadline_us = 0;
+    boot_try_handoff();
     return true;
 }
 
@@ -286,7 +319,6 @@ static void service_state_reconcile(void)
     if (mqtt_ready && wss_ready && s_quiet_recovery) {
         s_quiet_recovery = false;
         if (s_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY) {
-            julia_avatar_set_status_text("S3 STANDBY");
             s_standby_deadline_us = esp_timer_get_time() +
                 (int64_t)CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS * 1000000LL;
         }
@@ -571,8 +603,6 @@ static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
              julia_fsm_event_name(event));
     julia_avatar_set_status_text(
         state_status_text(main_state, s2_sub_state, fsm->s7_sub_state));
-    if (main_state == JULIA_MAIN_STATE_S3_STANDBY && s_quiet_recovery)
-        julia_avatar_set_status_text("CONNECTING...");
     apply_presentation(main_state, s2_sub_state, fsm->s7_sub_state);
     if (main_state == JULIA_MAIN_STATE_S8_OTA) {
         play_ota_prompt(upgrade_start_wav_start, upgrade_start_wav_end, "OTA start");
@@ -677,6 +707,23 @@ static int64_t *event_deadline(fsm_event_t event)
     }
 }
 
+/* 生产和消费两端均检查；联网恢复不能让离线时产生的唤醒补执行。 */
+static bool interaction_event_allowed(fsm_event_t event)
+{
+    /* S0 只消费连接判决所需事件。唤醒、OTA 和行为事件不积压到 S3。 */
+    if (julia_fsm_runtime_get_state() == JULIA_MAIN_STATE_S0_BOOT)
+        return event == EVT_MQTT_CONNECTED || event == EVT_MQTT_DISCONNECTED ||
+               event == EVT_WSS_CONNECTED || event == EVT_WSS_DISCONNECTED ||
+               event == EVT_SERVICE_CONNECT_TIMEOUT || event == EVT_VOICE_SESSION_RESET;
+    if (event != EVT_WAKEUP
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+        && event != EVT_MOTION_WAKE
+#endif
+        ) return true;
+    return julia_fsm_runtime_get_service_state() == JULIA_SERVICE_ONLINE &&
+           mqtt_comm_is_ready() && wss_transport_is_ready() && voice_state_sync_is_ready();
+}
+
 /**
  * owner 的事件总入口；返回 false 表示本次事件被拒绝或尚未到期。
  *
@@ -685,22 +732,8 @@ static int64_t *event_deadline(fsm_event_t event)
  */
 static bool runtime_process_event(fsm_event_t event)
 {
-#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
-    /* IMU 是本地入口，不能像服务端唤醒词一样以收到事件作为会话可用的依据。
-     * 在消费时检查而非仅在采样时检查，覆盖排队期间断线、初始同步尚未完成和
-     * OFFLINE 提示结束后回到 S3 的情况；拒绝即丢弃，不在恢复联网后补触发。
-     * 聚合状态可能落后于连接，因此还要核对实际链路与会话同步快照。
-     * 兼容配置的搬动只回 S3，不需要云端，不能套用这个 S4 准入限制。 */
-    if (event == EVT_MOTION_WAKE &&
-        (s_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY ||
-         julia_fsm_is_quiet(s_fsm.main_state)) &&
-        (julia_fsm_runtime_get_service_state() != JULIA_SERVICE_ONLINE ||
-         !mqtt_comm_is_ready() || !wss_transport_is_ready() ||
-         !voice_state_sync_is_ready())) {
-        ESP_LOGD(TAG, "motion wake ignored: interaction services not ready");
-        return false;
-    }
-#endif
+    if (!interaction_event_allowed(event)) return false;
+
     /* 安静恢复期间 S3 的驻留计时还没重新开始，忽略这次到期。 */
     if (s_quiet_recovery && s_fsm.main_state == JULIA_MAIN_STATE_S3_STANDBY &&
         event == EVT_STANDBY_TIMEOUT) return false;
@@ -729,6 +762,7 @@ static bool runtime_process_event(fsm_event_t event)
     }
     julia_service_state_t previous = julia_fsm_runtime_get_service_state();
     bool service_event = service_state_apply_event(event);
+    if (service_event && s_boot_waiting) return true;
     if (s_quiet_recovery && service_event) {
         /* 快照巡检在两条实际链路均就绪后结束恢复并重新开始 S3 驻留计时。 */
         return true;
@@ -742,6 +776,7 @@ static bool runtime_process_event(fsm_event_t event)
      * 交给 FSM，产生一次 S7.1 提示。 */
     if (service_event && (julia_fsm_runtime_get_service_state() != JULIA_SERVICE_OFFLINE ||
                           previous == JULIA_SERVICE_OFFLINE)) return true;
+    if (event == EVT_SERVICE_CONNECT_TIMEOUT) return true;
     bool applied = julia_fsm_handle_event(&s_fsm, event, NULL);
     if (service_event && !applied) {
         ESP_LOGW(TAG, "offline notice skipped: event=%s state=%s/%s",
@@ -817,6 +852,45 @@ static void play_fault_restart_prompt(void)
     if (!voice_playback_is_active()) julia_avatar_talking_stop();
 }
 
+/* 仅 FSM owner 调用；测试也通过同一命令路径检查交接和计时顺序。 */
+static bool runtime_process_control(const fsm_runtime_message_t *message)
+{
+    bool ok = true;
+    if (message->type == FSM_RUNTIME_MESSAGE_START && !atomic_load(&s_active)) {
+        s_boot_waiting = true;
+        portENTER_CRITICAL(&s_state_lock);
+        if (++s_committed_revision == 0) ++s_committed_revision;
+        s_committed_enter_us = esp_timer_get_time();
+        s_committed_reason = EVT_NONE;
+        portEXIT_CRITICAL(&s_state_lock);
+        atomic_store(&s_active, true);
+    } else if (message->type == FSM_RUNTIME_MESSAGE_ANIMATION_DONE) {
+        ok = atomic_load(&s_active) && (s_boot_visual_ready || s_fsm.main_state == JULIA_MAIN_STATE_S0_BOOT);
+        if (ok && !s_boot_visual_ready) {
+            s_boot_visual_ready = true;
+            julia_backlight_breathe_stop();
+            julia_backlight_set(CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT);
+            julia_avatar_set_status_text("S0 CONNECTING");
+            julia_avatar_set_offline(julia_fsm_runtime_get_service_state() == JULIA_SERVICE_OFFLINE);
+            if (s_state_observer != NULL)
+                s_state_observer(JULIA_MAIN_STATE_S0_BOOT, JULIA_S2_SUB_STATE_NONE,
+                                 EVT_NONE, s_state_observer_ctx);
+            boot_try_handoff();
+        }
+    } else if (message->type == FSM_RUNTIME_MESSAGE_CLOUD_START) {
+        ok = atomic_load(&s_active);
+        if (ok && !s_cloud_started) {
+            s_cloud_started = true;
+            s_service_deadline_us = esp_timer_get_time() +
+                (int64_t)CONFIG_JULIA_SERVICE_INIT_TIMEOUT_SECONDS * 1000000LL;
+            if (s_service_init_timer != NULL)
+                (void)esp_timer_start_once(s_service_init_timer,
+                    (uint64_t)CONFIG_JULIA_SERVICE_INIT_TIMEOUT_SECONDS * 1000000ULL);
+        }
+    }
+    return ok;
+}
+
 static void fsm_task(void *argument)
 {
     (void)argument;
@@ -826,9 +900,11 @@ static void fsm_task(void *argument)
     bool ota_result_started = false;
     for (;;) {
         /* 即使事件持续到达也要先巡检一次：队列不空闲时同样需要补齐连接状态与超时。 */
-        service_state_reconcile();
-        runtime_check_deadlines();
-        local_prompt_poll();
+        if (atomic_load(&s_active)) {
+            service_state_reconcile();
+            runtime_check_deadlines();
+            local_prompt_poll();
+        }
         /* 两种提示播放期间继续处理队列；S8 的同步收尾确认要保留到声音排空，
          * 否则 OTA 会提前复位。下载成功或失败过快时同样要先等开场提示播完。 */
         bool terminal_ready = false;
@@ -837,10 +913,17 @@ static void fsm_task(void *argument)
             ota_terminal_pending = false;
             terminal_ready = true;
         }
-        /* 有界等待兼作连接状态巡检周期，不能改回 portMAX_DELAY。 */
+        /* 激活后有界等待兼作连接巡检；准备期只等待 owner 控制命令。 */
         if (!terminal_ready && xQueueReceive(s_event_queue, &message,
-                pdMS_TO_TICKS(s_local_prompt_generation != 0 || ota_terminal_pending ? 20 : 1000)) != pdTRUE) {
+                (atomic_load(&s_active) ? pdMS_TO_TICKS(s_local_prompt_generation != 0 || ota_terminal_pending ? 20 : 1000) : portMAX_DELAY)) != pdTRUE) {
             local_prompt_poll();
+            continue;
+        }
+        if (message.type == FSM_RUNTIME_MESSAGE_START ||
+            message.type == FSM_RUNTIME_MESSAGE_CLOUD_START ||
+            message.type == FSM_RUNTIME_MESSAGE_ANIMATION_DONE) {
+            *message.applied = runtime_process_control(&message);
+            xSemaphoreGive(message.completed);
             continue;
         }
         /* S8 期间先扣住升级结果与故障消息，交给 ota_terminal_poll 决定何时处理，
@@ -869,6 +952,10 @@ static void fsm_task(void *argument)
                 s_fsm.s7_sub_state != JULIA_S7_SUB_STATE_S7_2_FAULT) {
                 (void)julia_fsm_transition_to(&s_fsm, JULIA_MAIN_STATE_S7_FAULT,
                                               JULIA_S2_SUB_STATE_NONE, EVT_NONE);
+            }
+            if (s_boot_waiting) {
+                s_boot_waiting = false;
+                xSemaphoreGive(s_boot_decision);
             }
             /* 两条自动复位路径的非对称语义，后续“简化”时必须保留：
              *   - 快照写盘成功且重复次数已超过 CONFIG_JULIA_FAULT_AUTO_RESET_LIMIT：
@@ -914,12 +1001,67 @@ static void fsm_task(void *argument)
     vTaskDelete(NULL);
 }
 
-esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready)
+static esp_err_t runtime_control_sync(fsm_runtime_message_type_t type)
+{
+    if (s_task == NULL || xTaskGetCurrentTaskHandle() == s_task) return ESP_ERR_INVALID_STATE;
+    StaticSemaphore_t storage;
+    SemaphoreHandle_t done = xSemaphoreCreateBinaryStatic(&storage);
+    if (done == NULL) return ESP_ERR_NO_MEM;
+    bool applied = false;
+    fsm_runtime_message_t message = {.type = type, .completed = done, .applied = &applied};
+    if (xQueueSend(s_event_queue, &message, portMAX_DELAY) != pdTRUE) {
+        vSemaphoreDelete(done);
+        return ESP_ERR_NO_MEM;
+    }
+    /* owner 消费后才释放确认对象，不能因调用者超时留下悬空指针。 */
+    (void)xSemaphoreTake(done, portMAX_DELAY);
+    vSemaphoreDelete(done);
+    return applied ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t julia_fsm_runtime_start(void)
+{
+    return runtime_control_sync(FSM_RUNTIME_MESSAGE_START);
+}
+
+esp_err_t julia_fsm_runtime_finish_boot_animation(void)
+{
+    return runtime_control_sync(FSM_RUNTIME_MESSAGE_ANIMATION_DONE);
+}
+
+esp_err_t julia_fsm_runtime_wait_boot_decision(uint32_t timeout_ms)
+{
+    if (s_boot_decision == NULL || xTaskGetCurrentTaskHandle() == s_task)
+        return ESP_ERR_INVALID_STATE;
+    TickType_t wait = timeout_ms == UINT32_MAX ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+    if (xSemaphoreTake(s_boot_decision, wait) != pdTRUE) return ESP_ERR_TIMEOUT;
+    /* S3 后可能已经收到有效唤醒；返回交接结果，不能用此刻行为状态误判失败。 */
+    return s_boot_decision_error;
+}
+
+esp_err_t julia_fsm_runtime_start_cloud_window(void)
+{
+    return runtime_control_sync(FSM_RUNTIME_MESSAGE_CLOUD_START);
+}
+
+esp_err_t julia_fsm_runtime_init(bool ready)
+{
+    esp_err_t err = julia_fsm_runtime_prepare();
+    return err == ESP_OK && ready ? julia_fsm_runtime_start() : err;
+}
+
+esp_err_t julia_fsm_runtime_prepare(void)
 {
     if (s_task != NULL) return ESP_OK;
     s_event_queue = xQueueCreate(FSM_EVENT_QUEUE_DEPTH, sizeof(fsm_runtime_message_t));
     if (s_event_queue == NULL) return ESP_ERR_NO_MEM;
 
+    s_boot_decision = xSemaphoreCreateBinaryStatic(&s_boot_decision_storage);
+    if (s_boot_decision == NULL) {
+        vQueueDelete(s_event_queue);
+        s_event_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
     julia_fsm_init(&s_fsm);
     s_fsm.on_enter = runtime_on_enter;
     s_fsm.on_exit = runtime_on_exit;
@@ -970,24 +1112,6 @@ esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready)
     s_online_links = 0;
     s_committed_service_state = JULIA_SERVICE_CONNECTING;
     portEXIT_CRITICAL(&s_state_lock);
-    julia_avatar_set_offline(false);
-    if (boot_dependencies_ready) {
-        /* 初始化完成后进入待唤醒的 S3；S1 只保留会话后的免唤醒陪伴语义。 */
-        if (!julia_fsm_transition_to(&s_fsm, JULIA_MAIN_STATE_S3_STANDBY,
-                                     JULIA_S2_SUB_STATE_NONE, EVT_NONE)) {
-            vQueueDelete(s_event_queue);
-            s_event_queue = NULL;
-            return ESP_ERR_INVALID_STATE;
-        }
-    } else {
-        /* 关键依赖缺失时留在 S0 并只应用呈现；故障记录与复位由 app_main 负责，
-         * 运行时这里不自行升级为 S7.2。 */
-        apply_presentation(s_fsm.main_state, s_fsm.s2_sub_state,
-                           s_fsm.s7_sub_state);
-    }
-
-    s_service_deadline_us = esp_timer_get_time() +
-        (int64_t)CONFIG_JULIA_SERVICE_INIT_TIMEOUT_SECONDS * 1000000LL;
     if (xTaskCreate(fsm_task, "julia_fsm", FSM_TASK_STACK_SIZE, NULL,
                     FSM_TASK_PRIORITY, &s_task) != pdPASS) {
         if (s_standby_timer != NULL) {
@@ -1006,17 +1130,13 @@ esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready)
             (void)esp_timer_delete(s_service_init_timer);
             s_service_init_timer = NULL;
         }
+        vSemaphoreDelete(s_boot_decision);
+        s_boot_decision = NULL;
         vQueueDelete(s_event_queue);
         s_event_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
-    if (s_service_init_timer == NULL ||
-        esp_timer_start_once(
-            s_service_init_timer,
-            (uint64_t)CONFIG_JULIA_SERVICE_INIT_TIMEOUT_SECONDS * 1000000ULL) != ESP_OK) {
-        ESP_LOGW(TAG, "初始业务连接计时器不可用，owner 将按截止时间巡检");
-    }
-    ESP_LOGI(TAG, "ready initial=%s/%s/%s queue=%u s1_bl=%d%% "
+    ESP_LOGI(TAG, "prepared initial=%s/%s/%s queue=%u s1_bl=%d%% "
                   "s3_breathe=%d-%d%% s3_sleep=%ds s5_standby=%ds "
                   "s6_bl=0%% fault_reset=%dms quick_fault=%ds/%d",
              julia_fsm_main_state_name(s_fsm.main_state),
@@ -1048,7 +1168,8 @@ void julia_fsm_runtime_set_state_observer(julia_fsm_state_observer_t observer,
 esp_err_t julia_fsm_runtime_post(fsm_event_t event)
 {
     if (event <= EVT_NONE || event >= EVT_COUNT) return ESP_ERR_INVALID_ARG;
-    if (s_event_queue == NULL) return ESP_ERR_INVALID_STATE;
+    if (!atomic_load(&s_active)) return ESP_ERR_INVALID_STATE;
+    if (!interaction_event_allowed(event)) return ESP_ERR_INVALID_STATE;
     fsm_runtime_message_t message = {
         .type = FSM_RUNTIME_MESSAGE_EVENT,
         .event = event,
@@ -1061,7 +1182,8 @@ static esp_err_t runtime_post_sync_checked(fsm_event_t event, bool check_revisio
 {
     if (event <= EVT_NONE || event >= EVT_COUNT) return ESP_ERR_INVALID_ARG;
     /* owner 自己调用会等待自己，直接拒绝；队列或 Task 尚未创建同样没有可等待的对象。 */
-    if (s_event_queue == NULL || s_task == NULL || xTaskGetCurrentTaskHandle() == s_task)
+    if (!atomic_load(&s_active) || !interaction_event_allowed(event) ||
+        s_event_queue == NULL || s_task == NULL || xTaskGetCurrentTaskHandle() == s_task)
         return ESP_ERR_INVALID_STATE;
     /* 调用方一直阻塞到 FSM 释放这块存储；不用堆分配，因为即使 OTA 任务创建失败
      * 也必须还能发出离开 S8 的事件。 */

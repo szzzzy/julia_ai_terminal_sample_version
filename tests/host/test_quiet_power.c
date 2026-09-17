@@ -12,7 +12,7 @@ BaseType_t xTaskCreate(void (*fn)(void *), const char *, unsigned, void *, unsig
 static jmp_buf done;
 static unsigned step;
 static int64_t clock_us;
-static julia_main_state_t test_state = JULIA_MAIN_STATE_S3_STANDBY;
+static julia_main_state_t test_state = JULIA_MAIN_STATE_S0_BOOT;
 static bool mic_on = true, radio_paused, imu_ready, playing, online = true;
 static unsigned imu_failures;
 static bool wake_paused;
@@ -43,6 +43,11 @@ BaseType_t xTaskCreate(void (*fn)(void *), const char *name, unsigned size,
 }
 void vTaskDelay(TickType_t ticks)
 {
+    if (test_state == JULIA_MAIN_STATE_S0_BOOT) {
+        assert(step==0 && !radio_paused && imu_failures==0);
+        test_state=JULIA_MAIN_STATE_S3_STANDBY;
+        return;
+    }
     clock_us += (int64_t)ticks * 1000;
     ++step;
     switch (step) {
@@ -107,6 +112,11 @@ void vTaskDelay(TickType_t ticks)
 unsigned ulTaskNotifyTake(int clear, TickType_t ticks)
 {
     assert(ticks == portMAX_DELAY && !radio_paused);
+    if (test_state == JULIA_MAIN_STATE_S0_BOOT) {
+        assert(step==0 && !mic_on && imu_failures==0);
+        test_state=JULIA_MAIN_STATE_S3_STANDBY;
+        return 1;
+    }
     switch (++step) {
     case 1: assert(mic_on); test_state=JULIA_MAIN_STATE_S5_SILENT; break;
     case 2: assert(mic_on); test_state=JULIA_MAIN_STATE_S6_SLEEP; break;

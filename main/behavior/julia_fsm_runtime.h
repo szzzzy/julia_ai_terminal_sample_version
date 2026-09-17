@@ -46,13 +46,17 @@ typedef struct {
  */
 void julia_fsm_runtime_get_snapshot(julia_fsm_snapshot_t *snapshot);
 
-/**
- * 初始化设备行为管理。显示、声音和语音服务都可用时，开机完成后直接进入
- * 等待唤醒状态；关键能力不可用时仍保持开机状态，由应用报告严重故障。
- *
- * 同时创建事件队列、状态任务和各状态计时器。云端从 CONNECTING 开始，超过配置
- * 期限仍未完成 MQTT/WSS 汇合时才进入一次 S7.1。重复调用不会创建第二套实例。
- */
+/** 准备队列、未启动计时器和等待命令的 owner；不接管画面，不接收业务事件。 */
+esp_err_t julia_fsm_runtime_prepare(void);
+/** 必要本地资源成功后激活 S0 握手；允许与动画重叠，不修改画面。 */
+esp_err_t julia_fsm_runtime_start(void);
+/** 全部分支和动画结束后交出画面；连接已判决则进入 S3，否则固定亮度等待。 */
+esp_err_t julia_fsm_runtime_finish_boot_animation(void);
+/** 单一启动协调者等待判决后的 S3 交接；UINT32_MAX 无限等通知，有限超时允许重试网络创建。 */
+esp_err_t julia_fsm_runtime_wait_boot_decision(uint32_t timeout_ms);
+/** 开放云门控前调用一次；owner 幂等建立首次云连接期限，重试不重置。 */
+esp_err_t julia_fsm_runtime_start_cloud_window(void);
+/** 兼容入口：prepare 后按参数 start；不隐式建立云连接期限。 */
 esp_err_t julia_fsm_runtime_init(bool boot_dependencies_ready);
 /** 注册一个状态变化通知接收方；可在设备行为管理启动前调用。 */
 void julia_fsm_runtime_set_state_observer(julia_fsm_state_observer_t observer,

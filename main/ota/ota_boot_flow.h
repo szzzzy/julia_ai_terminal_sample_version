@@ -11,18 +11,9 @@ extern "C" {
 #endif
 
 /**
- * @brief 在屏幕、语音和网络业务启动前确认当前固件是否可以继续运行。
- *
- * 如果当前是刚升级的新固件，则执行本地健康检查；通过后仍保持待确认，失败时立即
- * 请求回滚。已经由 bootloader 回滚的情况会与之前任务对账并报告服务器。
- * 没有可恢复版本或连本地状态都无法确认时进入安全模式，不继续启动业务。
- *
- * 服务器会先看到“新固件等待确认”，随后看到成功或回滚。下载失败和暂缓重启发生
- * 在升级任务阶段，不由本函数产生。
- *
- * @note 本函数由 app_main 最先调用（早于网络与业务服务）；其内部可能因 GPIO
- *       诊断阻塞约 5 s，且不可恢复错误会调用 ota_boot_health_enter_safe_mode()
- *       永久停留，因此只能在普通任务上下文调用。
+ * 外设启动前完成镜像识别、NVS 保护、netif/event loop 与回滚记录对账。
+ * 仅 pending 镜像的可选 GPIO 诊断在此执行，避免运行期重配复用引脚。
+ * 其余验收由 complete 在本地结果明确后执行；基础设施失败进入安全模式。
  */
 void ota_boot_flow_run(void);
 
@@ -39,6 +30,9 @@ void ota_boot_flow_run(void);
  *       下一次复位时 bootloader 会判其无效并回滚；因此必须在本文件约定的时机调用。
  */
 void ota_boot_flow_complete(bool app_healthy);
+
+/** 线程安全：镜像确认和对账结束前拒绝下一次升级。 */
+bool ota_boot_flow_pending(void);
 
 #ifdef __cplusplus
 }

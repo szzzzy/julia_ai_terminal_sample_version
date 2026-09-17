@@ -13,6 +13,7 @@
  *   - 本模块是当前构建里唯一写 PCF85063 的路径：开机从 RTC 恢复，SNTP 同步后写回。
  */
 #include "julia_time.h"
+#include "network_lifecycle.h"
 
 #include <stdlib.h>
 #include <sys/time.h>
@@ -40,7 +41,8 @@ static const char *TAG = "JULIA_CONTEXT";
 static bool s_time_valid;
 /* SNTP 是否已经发起过（用于防止 ip_ready 回调重复启动）。 */
 static bool s_sntp_started;
-/* 保护上面两个布尔量的临界区锁。进入者都是任务上下文（网络任务与查询方），
+static bool s_restore_complete;
+/* 保护时间有效、恢复完成及 SNTP 启动标志的临界区锁。进入者都是任务上下文（网络任务与查询方），
  * 因此用 portMUX 而不是 mutex 即可满足要求，也不会在临界区里阻塞。 */
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -161,13 +163,17 @@ esp_err_t julia_time_init(void)
     esp_err_t err = board_rtc_init();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "RTC unavailable: %s", esp_err_to_name(err));
-        return ESP_OK;
-    }
-    err = restore_system_time_from_rtc();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "RTC restore failed: %s", esp_err_to_name(err));
+    } else {
+        err = restore_system_time_from_rtc();
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "RTC restore failed: %s", esp_err_to_name(err));
+        }
     }
 #endif
+    portENTER_CRITICAL(&s_lock);
+    s_restore_complete = true;
+    portEXIT_CRITICAL(&s_lock);
+    network_lifecycle_retry_services();
     return ESP_OK;
 }
 
@@ -185,6 +191,10 @@ esp_err_t julia_time_ip_ready(void *arg)
 {
     (void)arg;
     portENTER_CRITICAL(&s_lock);
+    if (!s_restore_complete) {
+        portEXIT_CRITICAL(&s_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
     bool already_started = s_sntp_started;
     if (!already_started) s_sntp_started = true;
     portEXIT_CRITICAL(&s_lock);

@@ -2,6 +2,10 @@
 #include <inttypes.h>
 #include "voice_control_guard.h"
 #include "julia_fsm_runtime.h"
+/* Business dependencies are ready in routing fixtures; boot gating is tested separately. */
+julia_service_state_t julia_fsm_runtime_get_service_state(void) { return JULIA_SERVICE_ONLINE; }
+static bool mqtt_comm_is_ready(void) { return true; }
+static bool wss_transport_is_ready(void) { return true; }
 #define CONFIG_JULIA_MULTI_DEVICE_ENABLE 1
 #ifndef CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
 #define CONFIG_JULIA_LOCAL_CAPTURE_ENABLE 0
@@ -37,6 +41,7 @@ julia_main_state_t julia_fsm_runtime_get_state(void){return state;}
 julia_s2_sub_state_t julia_fsm_runtime_get_s2_sub_state(void){return sub;}
 void julia_fsm_runtime_get_snapshot(julia_fsm_snapshot_t *s){memset(s,0,sizeof(*s));s->revision=revision;s->main_state=state;s->s2_sub_state=sub;}
 static void post_fsm_event(fsm_event_t e){++revision;if(e==EVT_WAKEUP)state=JULIA_MAIN_STATE_S4_INTERACTION;else if(e==EVT_MULTI_TURN_DETECTED){state=JULIA_MAIN_STATE_S2_DIALOG;sub=JULIA_S2_SUB_STATE_S2_3_SPEAKING;}else if(e==EVT_VOICE_BUSY){state=JULIA_MAIN_STATE_S3_STANDBY;sub=0;}}
+esp_err_t julia_fsm_runtime_post_sync(fsm_event_t e){post_fsm_event(e);return ESP_OK;}
 static bool playback_role_is_terminal(voice_playback_role_t r){return r==VOICE_PLAYBACK_ROLE_GOODNIGHT_REPLY || r==VOICE_PLAYBACK_ROLE_DISMISS_REPLY;}
 static void voice_service_apply_terminal_intent(fsm_event_t e,const char *intent){if(e==EVT_INTENT_GOODNIGHT){sleeps++;s_playback_role=VOICE_PLAYBACK_ROLE_GOODNIGHT_REPLY;}else{dismisses++;s_playback_role=VOICE_PLAYBACK_ROLE_DISMISS_REPLY;}playing=true;s_dialog_listening=false;}
 static void voice_service_apply_mic_start(void){starts++;s_dialog_listening=true;}
@@ -55,6 +60,9 @@ static bool voice_state_sync_is_ready(void){return true;}
 static bool voice_state_sync_handle_text(const uint8_t *s,size_t n){return false;}
 static esp_err_t voice_service_send_error(const char *e){return ESP_OK;}
 static esp_err_t voice_playback_start(uint32_t r,bool test,uint32_t *g){if(r!=16000 && r!=24000)return ESP_ERR_INVALID_ARG;playing=true;*g=++s_playback_generation;return ESP_OK;}
+static const uint8_t wake_prompt_wav_start[44]={0};
+#define wake_prompt_wav_end (wake_prompt_wav_start+44)
+static esp_err_t voice_playback_start_local_wav(const uint8_t *p,size_t n,bool idle,uint32_t *g){return voice_playback_start(16000,false,g);}
 static void voice_playback_finish(void){playing=false;}
 static void julia_idle_display_set_busy(bool b){}
 static void julia_idle_display_note_activity(void){}

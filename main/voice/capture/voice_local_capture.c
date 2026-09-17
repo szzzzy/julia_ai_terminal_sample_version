@@ -8,6 +8,9 @@
  * 结束会话，由 WSS owner 统一重连，绝不静默丢音继续识别。
  */
 #include "voice_local_capture.h"
+#if CONFIG_JULIA_CAPTURE_VAD_ENABLE
+#include "lc_vad.h"
+#endif
 #include "voice_state_sync.h"
 #include "voice_control_guard.h"
 #include "wss_transport.h"
@@ -40,6 +43,9 @@ typedef struct {
  * 只用于识别采音是否停顿。 */
 typedef struct {
     local_capture_t capture;
+#if CONFIG_JULIA_CAPTURE_VAD_ENABLE
+    lc_vad_t vad;
+#endif
     history_t history[4];
     double scratch[LC_MAX_FRAMES];
     int16_t pcm[LC_FRAME_SAMPLES];
@@ -154,6 +160,23 @@ esp_err_t voice_local_capture_init(voice_capture_send_t send, voice_capture_even
     }
     send_record = send; state_event = event;
     lc_init(&s->capture, output, NULL);
+#if CONFIG_JULIA_CAPTURE_VAD_ENABLE
+    int64_t init_started = esp_timer_get_time();
+    bool vad_ready = lc_vad_init(&s->vad, CONFIG_JULIA_CAPTURE_VAD_MODE);
+    if (vad_ready)
+        vad_ready = lc_set_voice_detector(&s->capture, lc_vad_frame, lc_vad_reset, &s->vad,
+            ((CONFIG_JULIA_CAPTURE_VAD_WAKE_TAIL_MS + 19) / 20) * 20,
+            ((CONFIG_JULIA_CAPTURE_VAD_DIALOG_TAIL_MS + 19) / 20) * 20);
+    if (!vad_ready) {
+        /* Preserve the existing energy/FFT gate if optional VAD cannot start. */
+        lc_vad_destroy(&s->vad);
+        ESP_LOGE("local_capture", "WebRTC VAD init failed; using existing energy/FFT gate");
+    } else {
+        ESP_LOGI("local_capture", "gate=energy+fft(%d)+webrtc mode=%d frame_ms=20 tail_wake=%u tail_dialog=%u init_us=%lld",
+            s->capture.fft_enabled, CONFIG_JULIA_CAPTURE_VAD_MODE, s->capture.voice_end_wake_ms,
+            s->capture.voice_end_dialog_ms, (long long)(esp_timer_get_time()-init_started));
+    }
+#endif
     return ESP_OK;
 }
 
@@ -252,6 +275,7 @@ void voice_local_capture_frame(const uint8_t *frame, size_t len)
     if (producer_epoch != current) {
         /* 换代即复位：模式、失败位、判决历史和采样时间轴全部重来，旧代数据不得参与新连接。 */
         lc_set_mode(&s->capture, LC_OFF);
+        s->capture.voice_reset_pending = true;
         s->capture.failed = false;
         memset(s->history, 0, sizeof(s->history));
         producer_epoch = current; last_applied = 0;
@@ -260,6 +284,7 @@ void voice_local_capture_frame(const uint8_t *frame, size_t len)
     /* 采样时间轴按 20 ms/帧单调推进，与云端 floor_epoch + total_samples/sr 同口径；
      * 网络和任务抖动不改变帧间隔。采音停顿超过 100 ms 时按当前挂钟重新对齐，阈值来源未确认，
      * 这里只保证“停顿后不把积压的墙钟时间算进统计”。 */
+    if (wall_ms - s->last_wall_ms > 100) s->capture.voice_reset_pending = true;
     if (s->capture.mode == LC_OFF && wall_ms - s->last_wall_ms > 100)
         s->sample_ms = wall_ms - 20;
     s->last_wall_ms = wall_ms;

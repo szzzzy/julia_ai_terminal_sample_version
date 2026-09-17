@@ -1,0 +1,676 @@
+Start testing: Sep 16 23:22 中国标准时间
+----------------------------------------------------------
+1/41 Testing: local_capture
+1/41 Test: local_capture
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_local_capture.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"local_capture" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+local capture: RMS, p10, freeze, windows, endpoints, tail, limit, abort and failure passed
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"local_capture" end time: Sep 16 23:22 中国标准时间
+"local_capture" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/41 Testing: wss_auth_policy
+2/41 Test: wss_auth_policy
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_wss_auth_policy.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"wss_auth_policy" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: missing/invalid credentials and bounded HTTP auth status parsing
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"wss_auth_policy" end time: Sep 16 23:22 中国标准时间
+"wss_auth_policy" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/41 Testing: voice_local_capture
+3/41 Test: voice_local_capture
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_voice_local_capture.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"voice_local_capture" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+voice capture owner: negotiation, wire FIFO, frozen/deferred verdict, duplicate and epoch isolation passed
+<end of output>
+Test time =   0.09 sec
+----------------------------------------------------------
+Test Passed.
+"voice_local_capture" end time: Sep 16 23:22 中国标准时间
+"voice_local_capture" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/41 Testing: voice_local_capture_fft
+4/41 Test: voice_local_capture_fft
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_voice_local_capture_fft.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"voice_local_capture_fft" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+voice capture owner: negotiation, wire FIFO, frozen/deferred verdict, duplicate and epoch isolation passed
+<end of output>
+Test time =   0.08 sec
+----------------------------------------------------------
+Test Passed.
+"voice_local_capture_fft" end time: Sep 16 23:22 中国标准时间
+"voice_local_capture_fft" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/41 Testing: voice_control_guard
+5/41 Test: voice_control_guard
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_voice_control_guard.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"voice_control_guard" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: bounded result cache, 200+ rounds, 10000+ controls, sequence eviction safety, expiry, conflict and device/session isolation
+<end of output>
+Test time =   0.06 sec
+----------------------------------------------------------
+Test Passed.
+"voice_control_guard" end time: Sep 16 23:22 中国标准时间
+"voice_control_guard" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/41 Testing: voice_state_sync
+6/41 Test: voice_state_sync
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_voice_state_sync.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"voice_state_sync" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: v2 handshake, revisions, state ACKs, stale sessions, bounded retries and idempotent require_wake
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"voice_state_sync" end time: Sep 16 23:22 中国标准时间
+"voice_state_sync" time elapsed: 00:00:00
+----------------------------------------------------------
+
+7/41 Testing: voice_state_sync_strict
+7/41 Test: voice_state_sync_strict
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_voice_state_sync_strict.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"voice_state_sync_strict" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: v2 handshake, revisions, state ACKs, stale sessions, bounded retries and idempotent require_wake
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"voice_state_sync_strict" end time: Sep 16 23:22 中国标准时间
+"voice_state_sync_strict" time elapsed: 00:00:00
+----------------------------------------------------------
+
+8/41 Testing: pcm_buffer
+8/41 Test: pcm_buffer
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_pcm_buffer.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"pcm_buffer" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: FIFO wrap, ordered END, cancellation, overflow, PCM16 alignment, 20000-byte stream
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"pcm_buffer" end time: Sep 16 23:22 中国标准时间
+"pcm_buffer" time elapsed: 00:00:00
+----------------------------------------------------------
+
+9/41 Testing: fft_gate
+9/41 Test: fft_gate
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_fft_gate.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/fft-gate" "--numpy-path" "D:/Espressif/projects/julia-fused-base/build/local-capture-deps"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"fft_gate" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+portable radix-2: synthetic tests passed; report: D:\Espressif\projects\julia-fused-base\build-host-state-recovery\fft-gate\validation.json
+<end of output>
+Test time =   0.35 sec
+----------------------------------------------------------
+Test Passed.
+"fft_gate" end time: Sep 16 23:22 中国标准时间
+"fft_gate" time elapsed: 00:00:00
+----------------------------------------------------------
+
+10/41 Testing: fft_gate_esp_dsp
+10/41 Test: fft_gate_esp_dsp
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_fft_gate.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/fft-gate-dsp" "--esp-dsp" "--numpy-path" "D:/Espressif/projects/julia-fused-base/build/local-capture-deps"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"fft_gate_esp_dsp" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+ESP-DSP ANSI: synthetic tests passed; report: D:\Espressif\projects\julia-fused-base\build-host-state-recovery\fft-gate-dsp\validation.json
+<end of output>
+Test time =   0.33 sec
+----------------------------------------------------------
+Test Passed.
+"fft_gate_esp_dsp" end time: Sep 16 23:22 中国标准时间
+"fft_gate_esp_dsp" time elapsed: 00:00:00
+----------------------------------------------------------
+
+11/41 Testing: imu_tuning
+11/41 Test: imu_tuning
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_imu_tuning.py"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"imu_tuning" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+............
+----------------------------------------------------------------------
+Ran 12 tests in 0.006s
+
+OK
+<end of output>
+Test time =   0.25 sec
+----------------------------------------------------------
+Test Passed.
+"imu_tuning" end time: Sep 16 23:22 中国标准时间
+"imu_tuning" time elapsed: 00:00:00
+----------------------------------------------------------
+
+12/41 Testing: imu_logger_receiver
+12/41 Test: imu_logger_receiver
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_imu_logger.py"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"imu_logger_receiver" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 0.571s
+
+OK
+<end of output>
+Test time =   0.80 sec
+----------------------------------------------------------
+Test Passed.
+"imu_logger_receiver" end time: Sep 16 23:22 中国标准时间
+"imu_logger_receiver" time elapsed: 00:00:00
+----------------------------------------------------------
+
+13/41 Testing: imu_logger_driver
+13/41 Test: imu_logger_driver
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_imu_logger_driver.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/imu-logger"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"imu_logger_driver" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: logger profile, raw conversion, timestamp race and I2C failures
+PASS: native and IPv4-mapped IPv6 client addresses
+<end of output>
+Test time =   0.22 sec
+----------------------------------------------------------
+Test Passed.
+"imu_logger_driver" end time: Sep 16 23:22 中国标准时间
+"imu_logger_driver" time elapsed: 00:00:00
+----------------------------------------------------------
+
+14/41 Testing: multidevice_routing
+14/41 Test: multidevice_routing
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_multidevice_routing.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--cjson" "D:/Espressif/v5.5.4/esp-idf/components/json/cJSON" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/multidevice-routing"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"multidevice_routing" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: actual round barrier/control ACK dispatch, duplicate result, 50 controls, stale queue, expiry and real busy event routing
+PASS: capture-v1 playback without MIC_START, duplicate sync, obsolete MIC rejection, wake barrier
+PASS: strict credential selection rejects anonymous/missing credentials without legacy fallback
+PASS: strict credential selection rejects anonymous/missing credentials without legacy fallback
+PASS: strict credential selection rejects anonymous/missing credentials without legacy fallback
+<end of output>
+Test time =   0.70 sec
+----------------------------------------------------------
+Test Passed.
+"multidevice_routing" end time: Sep 16 23:22 中国标准时间
+"multidevice_routing" time elapsed: 00:00:00
+----------------------------------------------------------
+
+15/41 Testing: fault_restart_prompt
+15/41 Test: fault_restart_prompt
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_fault_restart_prompt.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/fault-prompt"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"fault_restart_prompt" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: fault notice drains before restart, skips unavailable audio, bounds stalled playback
+<end of output>
+Test time =   0.16 sec
+----------------------------------------------------------
+Test Passed.
+"fault_restart_prompt" end time: Sep 16 23:22 中国标准时间
+"fault_restart_prompt" time elapsed: 00:00:00
+----------------------------------------------------------
+
+16/41 Testing: prompt_mouth
+16/41 Test: prompt_mouth
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_prompt_mouth.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/prompt-mouth"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"prompt_mouth" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: local prompt mouth, stop, UI lock retry, stale PCM and sleep visibility
+<end of output>
+Test time =   0.17 sec
+----------------------------------------------------------
+Test Passed.
+"prompt_mouth" end time: Sep 16 23:22 中国标准时间
+"prompt_mouth" time elapsed: 00:00:00
+----------------------------------------------------------
+
+17/41 Testing: ota_tls_memory
+17/41 Test: ota_tls_memory
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_ota_tls_memory.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/ota-memory"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"ota_tls_memory" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: TLS allocation, certificate and network failures stay distinct
+<end of output>
+Test time =   0.17 sec
+----------------------------------------------------------
+Test Passed.
+"ota_tls_memory" end time: Sep 16 23:22 中国标准时间
+"ota_tls_memory" time elapsed: 00:00:00
+----------------------------------------------------------
+
+18/41 Testing: recovery_backlight
+18/41 Test: recovery_backlight
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/recovery" "--case" "backlight"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"recovery_backlight" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: concurrent sleep wins over old fade; legal short periods use nonzero ticks
+<end of output>
+Test time =   0.17 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_backlight" end time: Sep 16 23:22 中国标准时间
+"recovery_backlight" time elapsed: 00:00:00
+----------------------------------------------------------
+
+19/41 Testing: recovery_rtc
+19/41 Test: recovery_rtc
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/recovery" "--case" "rtc"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"recovery_rtc" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: RTC retains legacy encoding, rejects stopped/invalid clocks and propagates I/O failures
+<end of output>
+Test time =   0.15 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_rtc" end time: Sep 16 23:22 中国标准时间
+"recovery_rtc" time elapsed: 00:00:00
+----------------------------------------------------------
+
+20/41 Testing: recovery_display
+20/41 Test: recovery_display
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/recovery" "--case" "display"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"recovery_display" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: LCD hardware failures remain pending and are retried
+<end of output>
+Test time =   0.15 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_display" end time: Sep 16 23:22 中国标准时间
+"recovery_display" time elapsed: 00:00:00
+----------------------------------------------------------
+
+21/41 Testing: recovery_mqtt
+21/41 Test: recovery_mqtt
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/recovery" "--case" "mqtt"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"recovery_mqtt" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: PUBACK binding survives lock contention, expired tracks retry, rejected SUBACK stays offline
+<end of output>
+Test time =   0.17 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_mqtt" end time: Sep 16 23:22 中国标准时间
+"recovery_mqtt" time elapsed: 00:00:00
+----------------------------------------------------------
+
+22/41 Testing: recovery_fsm
+22/41 Test: recovery_fsm
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/recovery" "--case" "fsm"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"recovery_fsm" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: FSM acknowledgements, OTA admission/exit, approved night edges and dropped timer recovery
+<end of output>
+Test time =   0.21 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_fsm" end time: Sep 16 23:22 中国标准时间
+"recovery_fsm" time elapsed: 00:00:00
+----------------------------------------------------------
+
+23/41 Testing: recovery_wifi_profiles
+23/41 Test: recovery_wifi_profiles
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/recovery" "--case" "wifi_profiles"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"recovery_wifi_profiles" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: primary/backup rotation, successful-network retry and credential isolation
+<end of output>
+Test time =   0.19 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_wifi_profiles" end time: Sep 16 23:22 中国标准时间
+"recovery_wifi_profiles" time elapsed: 00:00:00
+----------------------------------------------------------
+
+24/41 Testing: recovery_offline_ui
+24/41 Test: recovery_offline_ui
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/recovery" "--case" "offline_ui"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"recovery_offline_ui" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: offline label retries failed UI locks and applies latest state
+<end of output>
+Test time =   0.16 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_offline_ui" end time: Sep 16 23:22 中国标准时间
+"recovery_offline_ui" time elapsed: 00:00:00
+----------------------------------------------------------
+
+25/41 Testing: recovery_boot
+25/41 Test: recovery_boot
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/recovery" "--case" "boot"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"recovery_boot" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: boot never confirms before application health; application/product/confirm failures roll back
+<end of output>
+Test time =   0.16 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_boot" end time: Sep 16 23:22 中国标准时间
+"recovery_boot" time elapsed: 00:00:00
+----------------------------------------------------------
+
+26/41 Testing: recovery_storage
+26/41 Test: recovery_storage
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/recovery" "--case" "storage"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"recovery_storage" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: audio replacement erases NOR sectors and resume preserves the committed prefix
+PASS: concurrent activity survives snapshot commit and remains dirty until saved
+PASS: clear executes after prior queued writes; old events cannot reappear after acknowledgement
+<end of output>
+Test time =   0.30 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_storage" end time: Sep 16 23:22 中国标准时间
+"recovery_storage" time elapsed: 00:00:00
+----------------------------------------------------------
+
+27/41 Testing: recovery_fault
+27/41 Test: recovery_fault
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/recovery" "--case" "fault"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"recovery_fault" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: healthy uptime and firmware change reset quick-fault chains; uptime does not wrap
+<end of output>
+Test time =   0.16 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_fault" end time: Sep 16 23:22 中国标准时间
+"recovery_fault" time elapsed: 00:00:00
+----------------------------------------------------------
+
+28/41 Testing: recovery_voice
+28/41 Test: recovery_voice
+Command: "D:/Espressif/python_env/idf5.5_py3.13_env/Scripts/python.exe" "D:/Espressif/projects/julia-fused-base/tests/host/test_recovery_paths.py" "--cc" "D:/Espressif/projects/julia-fused-base/build-ota-name/host-tools/tcc/tcc.exe" "--out" "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/recovery" "--case" "voice"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"recovery_voice" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: local capture/SPKS, ignored old MIC commands, retained state_ready, bounded reply wait and deadline cancellation
+<end of output>
+Test time =   0.20 sec
+----------------------------------------------------------
+Test Passed.
+"recovery_voice" end time: Sep 16 23:22 中国标准时间
+"recovery_voice" time elapsed: 00:00:00
+----------------------------------------------------------
+
+29/41 Testing: voice_playback
+29/41 Test: voice_playback
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_voice_playback.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"voice_playback" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: short END drains the entire tail without prebuffer delay
+PASS: embedded local PCM bypasses the network buffer and drains fully
+PASS: interrupt/restart suppresses old buffered PCM and stale completion
+PASS: bounded prebuffer wait and recovery after a one-second gap
+PASS: no-input starvation returns an explicit timeout
+PASS: overflow aborts explicitly without silently dropping a middle packet
+PASS: I2S failure terminates and reports the active generation
+PASS: END can stop an asynchronous self-test before tone generation
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"voice_playback" end time: Sep 16 23:22 中国标准时间
+"voice_playback" time elapsed: 00:00:00
+----------------------------------------------------------
+
+30/41 Testing: julia_fsm
+30/41 Test: julia_fsm
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_julia_fsm.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"julia_fsm" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"julia_fsm" end time: Sep 16 23:22 中国标准时间
+"julia_fsm" time elapsed: 00:00:00
+----------------------------------------------------------
+
+31/41 Testing: quiet_power_server
+31/41 Test: quiet_power_server
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_quiet_power_server.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"quiet_power_server" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"quiet_power_server" end time: Sep 16 23:22 中国标准时间
+"quiet_power_server" time elapsed: 00:00:00
+----------------------------------------------------------
+
+32/41 Testing: quiet_power_local
+32/41 Test: quiet_power_local
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_quiet_power_local.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"quiet_power_local" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"quiet_power_local" end time: Sep 16 23:22 中国标准时间
+"quiet_power_local" time elapsed: 00:00:00
+----------------------------------------------------------
+
+33/41 Testing: quiet_power_capture
+33/41 Test: quiet_power_capture
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_quiet_power_capture.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"quiet_power_capture" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"quiet_power_capture" end time: Sep 16 23:22 中国标准时间
+"quiet_power_capture" time elapsed: 00:00:00
+----------------------------------------------------------
+
+34/41 Testing: transport_disconnect_fsm
+34/41 Test: transport_disconnect_fsm
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_transport_disconnect_fsm.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"transport_disconnect_fsm" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"transport_disconnect_fsm" end time: Sep 16 23:22 中国标准时间
+"transport_disconnect_fsm" time elapsed: 00:00:00
+----------------------------------------------------------
+
+35/41 Testing: wss_tx_writer
+35/41 Test: wss_tx_writer
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_wss_tx_writer.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"wss_tx_writer" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: bounded TLS writes preserve offsets across transient states
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"wss_tx_writer" end time: Sep 16 23:22 中国标准时间
+"wss_tx_writer" time elapsed: 00:00:00
+----------------------------------------------------------
+
+36/41 Testing: voice_uplink_ring
+36/41 Test: voice_uplink_ring
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_voice_uplink_ring.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"voice_uplink_ring" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: uplink ring preserves frames and rejects old connection generations
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"voice_uplink_ring" end time: Sep 16 23:22 中国标准时间
+"voice_uplink_ring" time elapsed: 00:00:00
+----------------------------------------------------------
+
+37/41 Testing: voice_uplink_pump
+37/41 Test: voice_uplink_pump
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_voice_uplink_pump.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"voice_uplink_pump" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: uplink pump catches up within batch/time budgets without early consume
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"voice_uplink_pump" end time: Sep 16 23:22 中国标准时间
+"voice_uplink_pump" time elapsed: 00:00:00
+----------------------------------------------------------
+
+38/41 Testing: voice_session_recovery
+38/41 Test: voice_session_recovery
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_voice_session_recovery.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"voice_session_recovery" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: overflow teardown is owner-only and old PCM is never replayed
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"voice_session_recovery" end time: Sep 16 23:22 中国标准时间
+"voice_session_recovery" time elapsed: 00:00:00
+----------------------------------------------------------
+
+39/41 Testing: display_ownership
+39/41 Test: display_ownership
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_display_ownership.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"display_ownership" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: display ownership and voltage-only battery UI constraints hold
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"display_ownership" end time: Sep 16 23:22 中国标准时间
+"display_ownership" time elapsed: 00:00:00
+----------------------------------------------------------
+
+40/41 Testing: rtc_calendar
+40/41 Test: rtc_calendar
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_rtc_calendar.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"rtc_calendar" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: RTC calendar, legacy year decoding, stop flag and leap days
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"rtc_calendar" end time: Sep 16 23:22 中国标准时间
+"rtc_calendar" time elapsed: 00:00:00
+----------------------------------------------------------
+
+41/41 Testing: download_protocol
+41/41 Test: download_protocol
+Command: "D:/Espressif/projects/julia-fused-base/build-host-state-recovery/test_download_protocol.exe"
+Directory: D:/Espressif/projects/julia-fused-base/build-host-state-recovery
+"download_protocol" start time: Sep 16 23:22 中国标准时间
+Output:
+----------------------------------------------------------
+PASS: URL authority, strict Content-Range and bounded response headers
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"download_protocol" end time: Sep 16 23:22 中国标准时间
+"download_protocol" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 16 23:22 中国标准时间

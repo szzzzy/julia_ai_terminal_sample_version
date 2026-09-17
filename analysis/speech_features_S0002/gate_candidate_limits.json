@@ -1,0 +1,78 @@
+{
+  "population": "Complete 20ms frames with RMS >= -50dBFS, not frame-level speech labels",
+  "n": 51557,
+  "quantile_levels": [
+    0.01,
+    0.05,
+    0.5,
+    0.95,
+    0.99
+  ],
+  "feature_order": [
+    "band_300_4000_ratio",
+    "flatness",
+    "spectral_entropy"
+  ],
+  "quantiles": [
+    [
+      0.00031527225484,
+      5.9174027960000004e-05,
+      0.07076721796
+    ],
+    [
+      0.0053527506760000015,
+      0.000189097984,
+      0.14810822400000004
+    ],
+    [
+      0.4348740255,
+      0.0033110086,
+      0.37507641
+    ],
+    [
+      0.92775615496,
+      0.130304756,
+      0.749082552
+    ],
+    [
+      0.9703868221840001,
+      0.19860354720000012,
+      0.8081666476
+    ]
+  ],
+  "exact_limits": {
+    "band_300_4000_min_ratio": 0.00031527225484,
+    "flatness_max": 0.19860354720000012,
+    "entropy_min": 0.07076721796,
+    "entropy_max": 0.8081666476
+  },
+  "exact_replay": {
+    "individual_rejected": [
+      516,
+      516,
+      516,
+      516
+    ],
+    "combined_rejected": 1662,
+    "combined_retained_percent": 96.7763834202921,
+    "voiced_candidates_retained_percent": 100.0
+  },
+  "outward_rounded_limits": {
+    "band_300_4000_min_ratio": 0.0003,
+    "flatness_max": 0.199,
+    "entropy_min": 0.07,
+    "entropy_max": 0.809
+  },
+  "rounded_replay": {
+    "individual_rejected": [
+      483,
+      511,
+      473,
+      498
+    ],
+    "combined_rejected": 1586,
+    "combined_retained_percent": 96.92379308338343,
+    "voiced_candidates_retained_percent": 100.0
+  },
+  "scope": "Positive-reference envelope only; no noise rejection measured. Not enabled in firmware."
+}

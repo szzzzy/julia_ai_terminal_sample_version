@@ -25,7 +25,7 @@ from mqtt_adapter import MqttAdapter
 
 src=(root/'main/voice/voice_service.c').read_text(encoding='utf-8')
 names=['voice_service_handle_control_json','voice_service_apply_scoped_control',
-       'interaction_id_is_valid','voice_service_handle_wake_json','voice_service_on_server_text']
+       'interaction_id_is_valid','voice_service_start_wake_prompt','voice_service_handle_wake_json','voice_service_on_server_text']
 driver=COMMON+'\n#include "control_service_fixture.h"\n'+'\n'.join(function(src,n) for n in names)+r'''
 int main(int argc,char **argv){assert(argc==3);snprintf(s_voice_device_id,sizeof(s_voice_device_id),"%s",argv[1]);snprintf(session,sizeof(session),"%s",argv[2]);s_control_guard.active=true;
 char input[1400];while(fgets(input,sizeof(input),stdin)){

@@ -143,6 +143,10 @@ extern const uint8_t goodnight_wav_start[]
     asm("_binary_goodnight_16k_mono_16bit_wav_start");
 extern const uint8_t goodnight_wav_end[]
     asm("_binary_goodnight_16k_mono_16bit_wav_end");
+extern const uint8_t wake_prompt_wav_start[]
+    asm("_binary_wake_prompt_16k_mono_16bit_wav_start");
+extern const uint8_t wake_prompt_wav_end[]
+    asm("_binary_wake_prompt_16k_mono_16bit_wav_end");
 
 /* 下列播放、文件和上传进度只由负责语音连接的任务修改，避免跨任务互相覆盖。 */
 static uint32_t s_playback_generation;
@@ -392,7 +396,12 @@ static void voice_service_on_board_audio_frame(const uint8_t *frame, size_t byte
     else if (state == JULIA_MAIN_STATE_S1_COMPANION || state == JULIA_MAIN_STATE_S4_INTERACTION ||
              (state == JULIA_MAIN_STATE_S2_DIALOG &&
               julia_fsm_runtime_get_s2_sub_state() == JULIA_S2_SUB_STATE_S2_1_LISTENING)) mode = LC_DIALOG;
-    if (now_us < playback_guard_until_us) mode = LC_OFF;
+    /* S4 提交与播放任务启动之间也不能开麦；回执发出前保留门控，避免首句先于云端握手。 */
+    portENTER_CRITICAL(&s_mic_state_lock);
+    bool wake_pending = s_wake_reply_expected || s_s4_ready_pending;
+    portEXIT_CRITICAL(&s_mic_state_lock);
+    if (now_us < playback_guard_until_us ||
+        (state == JULIA_MAIN_STATE_S4_INTERACTION && wake_pending)) mode = LC_OFF;
     voice_local_capture_mode(mode);
     voice_local_capture_frame(frame, bytes);
     return;
@@ -596,9 +605,10 @@ static void voice_service_speaker_done(void)
     }
 
     if (completed_role == VOICE_PLAYBACK_ROLE_WAKE_REPLY) {
-        /* 唤醒回应属于 S4 交互建立，不是 S2 正常回答。播放结束后保持 S4，
-         * 等服务器确认实际话语开始时再接收 MIC_START。 */
+        /* 本地收音在播放结束、防回声间隔及 S4 回执发送完成后放行；不等待旧 MIC_START。 */
+        portENTER_CRITICAL(&s_mic_state_lock);
         s_wake_reply_expected = false;
+        portEXIT_CRITICAL(&s_mic_state_lock);
         julia_idle_display_note_activity();
         julia_idle_display_set_busy(false);
         ESP_LOGI(TAG, "Wake reply completed; remaining in S4");
@@ -763,7 +773,8 @@ static void voice_service_poll(void)
     if (voice_service_reply_timeout_poll()) return;
     /* 关键确认由 WSS owner 直接发送，不与可丢弃的四槽控制作业竞争。 */
     voice_service_state_ready_poll();
-    if (playback_role_is_terminal(s_playback_role) &&
+    if ((playback_role_is_terminal(s_playback_role) ||
+         (CONFIG_JULIA_LOCAL_CAPTURE_ENABLE && s_playback_role == VOICE_PLAYBACK_ROLE_WAKE_REPLY)) &&
         julia_fsm_runtime_get_state() != JULIA_MAIN_STATE_S4_INTERACTION) {
         bool stopped = voice_playback_stop_generation(s_playback_generation);
         s_playback_generation = 0;
@@ -779,6 +790,15 @@ static void voice_service_poll(void)
         generation == s_playback_generation) {
         voice_service_timing_poll(true);
         bool local_terminal = playback_role_is_terminal(s_playback_role);
+        bool local_wake = CONFIG_JULIA_LOCAL_CAPTURE_ENABLE &&
+                          s_playback_role == VOICE_PLAYBACK_ROLE_WAKE_REPLY;
+        if (result != ESP_OK && local_wake) {
+            /* 应答失败不能被当成正常播完而开放首句；保留门控直至会话清场。 */
+            julia_avatar_talking_stop();
+            ESP_LOGW(TAG, "Local wake prompt playback failed: %s", esp_err_to_name(result));
+            wss_transport_fail_session();
+            return;
+        }
         voice_service_speaker_done();
         if (result != ESP_OK && local_terminal) {
             ESP_LOGW(TAG, "Terminal prompt playback failed: %s", esp_err_to_name(result));
@@ -805,6 +825,9 @@ static void voice_service_played_pcm(const int16_t *pcm, size_t samples, void *c
 /** “开始说话”确认用户已经进入本轮表达；必要时同时开始上传麦克风。 */
 static void voice_service_apply_mic_start(void)
 {
+    if (julia_fsm_runtime_get_state() == JULIA_MAIN_STATE_S0_BOOT ||
+        julia_fsm_runtime_get_service_state() != JULIA_SERVICE_ONLINE ||
+        !mqtt_comm_is_ready() || !wss_transport_is_ready() || !voice_state_sync_is_ready()) return;
 #if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
     /* 本地收音版本不接受云端起音，包括能力协商尚未完成时。 */
     return;
@@ -929,6 +952,32 @@ static bool interaction_id_is_valid(const char *value)
     return true;
 }
 
+/** 本地唤醒应答与现有 state_ready 回执并行，不等待网络音频。 */
+static void voice_service_start_wake_prompt(void)
+{
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+    /* WSS owner 在同步提交 S4 后启动；FSM 观察者不操作播放器或网络。 */
+    if (julia_fsm_runtime_get_state() != JULIA_MAIN_STATE_S4_INTERACTION) return;
+    julia_avatar_talking_start();
+    esp_err_t err = voice_playback_start_local_wav(wake_prompt_wav_start,
+        (size_t)(wake_prompt_wav_end - wake_prompt_wav_start), false, &s_playback_generation);
+    if (err != ESP_OK) {
+        julia_avatar_talking_stop();
+        ESP_LOGW(TAG, "Local wake prompt start failed: %s", esp_err_to_name(err));
+        /* 不在应答缺失时悄悄开放收音；由连接恢复清理本轮门控。 */
+        wss_transport_fail_session();
+        return;
+    }
+    s_playback_role = VOICE_PLAYBACK_ROLE_WAKE_REPLY;
+    memset(&s_audio_timing, 0, sizeof(s_audio_timing));
+    s_audio_timing.generation = s_playback_generation;
+    s_audio_timing.spks_us = esp_timer_get_time();
+    snprintf(s_audio_timing.session, sizeof(s_audio_timing.session), "%s", voice_state_sync_session_id());
+    snprintf(s_audio_timing.interaction, sizeof(s_audio_timing.interaction), "%s", s_interaction_id);
+    ESP_LOGI(TAG, "Local wake prompt started generation=%" PRIu32, s_playback_generation);
+#endif
+}
+
 /** 识别服务器的唤醒确认消息；识别成功后不再把它当作普通文本命令。 */
 static bool voice_service_handle_wake_json(const uint8_t *text, size_t len)
 {
@@ -943,6 +992,19 @@ static bool voice_service_handle_wake_json(const uint8_t *text, size_t len)
         cJSON_Delete(root);
         return false;
     }
+    /* 拒绝时不改变 round、busy 或播放状态，恢复后也不重放该次唤醒。 */
+    if (julia_fsm_runtime_get_state() == JULIA_MAIN_STATE_S0_BOOT ||
+        julia_fsm_runtime_get_service_state() != JULIA_SERVICE_ONLINE ||
+        !mqtt_comm_is_ready() || !wss_transport_is_ready() || !voice_state_sync_is_ready()) {
+        cJSON_Delete(root);
+        return true;
+    }
+#if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
+    if (!voice_local_capture_ready()) {
+        cJSON_Delete(root);
+        return true;
+    }
+#endif
     const cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "interaction_id");
     if (!cJSON_IsString(id) || !interaction_id_is_valid(id->valuestring)) {
         ESP_LOGW(TAG, "Ignoring wake_detected with invalid interaction_id");
@@ -991,7 +1053,13 @@ static bool voice_service_handle_wake_json(const uint8_t *text, size_t len)
 
     julia_idle_display_note_activity();
     julia_idle_display_set_busy(true);
-    post_fsm_event(EVT_WAKEUP);
+    if (julia_fsm_runtime_post_sync(EVT_WAKEUP) != ESP_OK ||
+        julia_fsm_runtime_get_state() != JULIA_MAIN_STATE_S4_INTERACTION) {
+        wss_transport_fail_session();
+        cJSON_Delete(root);
+        return true;
+    }
+    voice_service_start_wake_prompt();
 #if CONFIG_JULIA_MULTI_DEVICE_ENABLE
     s_round_pending=false;
 #endif
@@ -1030,6 +1098,8 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
         ESP_LOGW(TAG, "Ignoring business command before session_sync_ack");
         return;
     }
+    /* S0 允许握手和能力协商，但不能让播放/业务命令覆盖连接等待画面。 */
+    if (julia_fsm_runtime_get_state() == JULIA_MAIN_STATE_S0_BOOT) return;
 #if CONFIG_JULIA_MULTI_DEVICE_ENABLE
     if (voice_service_handle_control_json(text,len)) return;
     if (s_busy_until_us) return;
@@ -1080,7 +1150,9 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
     if (len == 4 && memcmp(text, "SPKE", 4) == 0) {
         /* END 排在所有已接收 PCM 之后；播放任务负责报告完成。
          * 已被打断或不存在的播放代次无需执行结束动作。 */
-        if (s_playback_generation != 0) voice_playback_finish();
+        if (s_playback_generation != 0 &&
+            !(CONFIG_JULIA_LOCAL_CAPTURE_ENABLE && s_playback_role == VOICE_PLAYBACK_ROLE_WAKE_REPLY))
+            voice_playback_finish();
         ESP_LOGI(TAG, "SPKE: draining accepted playback");
     } else if (len == 4 && memcmp(text, "SPKT", 4) == 0) {
         voice_service_disarm_companion_timer();
@@ -1102,7 +1174,8 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
         julia_main_state_t state = julia_fsm_runtime_get_state();
         julia_s2_sub_state_t sub_state = julia_fsm_runtime_get_s2_sub_state();
         voice_playback_role_t role = VOICE_PLAYBACK_ROLE_NONE;
-        if (state == JULIA_MAIN_STATE_S4_INTERACTION && s_wake_reply_expected) {
+        if (!CONFIG_JULIA_LOCAL_CAPTURE_ENABLE &&
+            state == JULIA_MAIN_STATE_S4_INTERACTION && s_wake_reply_expected) {
             role = VOICE_PLAYBACK_ROLE_WAKE_REPLY;
         } else if (state == JULIA_MAIN_STATE_S2_DIALOG &&
                    sub_state == JULIA_S2_SUB_STATE_S2_2_THINKING) {
@@ -1180,7 +1253,8 @@ static void voice_service_on_binary(const uint8_t *data, size_t len)
 #endif
     int64_t received_us = esp_timer_get_time();
     if (!voice_state_sync_is_ready()) return;
-    if (playback_role_is_terminal(s_playback_role)) return;
+    if (playback_role_is_terminal(s_playback_role) ||
+        (CONFIG_JULIA_LOCAL_CAPTURE_ENABLE && s_playback_role == VOICE_PLAYBACK_ROLE_WAKE_REPLY)) return;
     if (data == NULL || len == 0U || (len & 1U) != 0U) {
         return;
     }
@@ -1403,6 +1477,11 @@ static void voice_service_on_fsm_state(julia_main_state_t main_state,
         board_audio_enable_wss_mic(false);
     }
     portENTER_CRITICAL(&s_mic_state_lock);
+    if (main_state != JULIA_MAIN_STATE_S4_INTERACTION) {
+        s_s4_ready_pending = false;
+        s_s4_ready_committed = false;
+        s_wake_reply_expected = false;
+    }
     s_reply_deadline_us =
         main_state == JULIA_MAIN_STATE_S2_DIALOG &&
         s2_sub_state == JULIA_S2_SUB_STATE_S2_2_THINKING
@@ -1913,6 +1992,10 @@ static esp_err_t voice_service_send_capture_record(const uint8_t *buf, size_t le
 
 esp_err_t voice_service_mic_start(void)
 {
+    if (julia_fsm_runtime_get_state() == JULIA_MAIN_STATE_S0_BOOT ||
+        julia_fsm_runtime_get_service_state() != JULIA_SERVICE_ONLINE ||
+        !mqtt_comm_is_ready() || !wss_transport_is_ready() || !voice_state_sync_is_ready())
+        return ESP_ERR_INVALID_STATE;
     return voice_service_enqueue(VOICE_JOB_MIC_START, NULL, 0);
 }
 

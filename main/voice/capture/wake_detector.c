@@ -97,7 +97,18 @@ static int64_t s_wake_cooldown_until_us;      /* 下一次允许唤醒的时间�
 static void wake_afe_feed(const int16_t *pcm, size_t samples, void *ctx)
 {
     (void)ctx;
-    if (atomic_load(&s_paused)) return;
+    static bool business_feed_ready;
+    if (atomic_load(&s_paused) ||
+        julia_fsm_runtime_get_state() == JULIA_MAIN_STATE_S0_BOOT ||
+        julia_fsm_runtime_get_service_state() != JULIA_SERVICE_ONLINE) {
+        business_feed_ready = false;
+        return;
+    }
+    if (!business_feed_ready) {
+        /* 喂数任务独占此标志；恢复时换代清空旧音频，不能补触发离线期间的唤醒。 */
+        atomic_fetch_add(&s_capture_epoch, 1);
+        business_feed_ready = true;
+    }
     /* 初始化未完成或参数异常时静默丢弃本帧，不阻塞 mic_task。 */
     if (s_afe_data == NULL || s_feed_buffer == NULL || pcm == NULL || samples == 0) {
         return;
@@ -171,7 +182,9 @@ static void wake_detect_task(void *arg)
          * 以抑制只有能量突起的误唤醒。 */
         if (result->wakeup_state == WAKENET_DETECTED &&
             result->vad_state == AFE_VAD_SPEECH &&
-            now_us >= s_wake_cooldown_until_us) {
+            now_us >= s_wake_cooldown_until_us &&
+            julia_fsm_runtime_get_state() != JULIA_MAIN_STATE_S0_BOOT &&
+            julia_fsm_runtime_get_service_state() == JULIA_SERVICE_ONLINE) {
             s_wake_cooldown_until_us = now_us + WAKE_COOLDOWN_US;
             ESP_LOGI(TAG, "Wake word detected [%s] vad=speech volume=%.1fdB",
                      WAKE_WORD_DISPLAY_TEXT, (double)result->data_volume);

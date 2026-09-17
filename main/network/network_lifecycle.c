@@ -398,6 +398,7 @@ static void network_got_ip_handler(void *arg, esp_event_base_t event_base,
     s_next_retry_us = INT64_MAX;
     network_reset_service_slots_locked();
     portEXIT_CRITICAL(&s_state_lock);
+    ESP_LOGI(TAG, "BOOT ip_ready t=%lldms", (long long)(esp_timer_get_time()/1000));
     ESP_LOGI(TAG, "Wi-Fi has IPv4 address " IPSTR "; dispatching registered services",
              IP2STR(&got_ip->ip_info.ip));
     xTaskNotifyGive(s_network_task);

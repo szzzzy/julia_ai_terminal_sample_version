@@ -1,0 +1,20 @@
+{
+  "active_complete_frames": 51557,
+  "low_0_1000_energy_fraction_percentiles": {
+    "p01": 0.013728799029410668,
+    "p05": 0.11360818334930138,
+    "median": 0.9679777746054621,
+    "p95": 0.9995286861757857,
+    "p99": 0.999903978538732
+  },
+  "reject_if_low_band_below_50pct_percent": 9.719339759877418,
+  "reject_if_low_band_below_80pct_percent": 18.674476792676067,
+  "flatness_50_8000_percentiles": {
+    "p01": 5.9174028286177816e-05,
+    "p05": 0.00018909798398271602,
+    "median": 0.0033110086093855007,
+    "p95": 0.13030475277061246,
+    "p99": 0.19860354841189118
+  },
+  "scope": "365 speech recordings, RMS >= -50 dBFS complete 20ms frames; not annotated speech-only frames; no negative examples."
+}

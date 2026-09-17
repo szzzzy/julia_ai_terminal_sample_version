@@ -98,15 +98,17 @@ esp_err_t board_imu_init(void)
     if (err != ESP_OK) err = try_address(bus, QMI8658_ADDR_HIGH);
     ESP_RETURN_ON_ERROR(err, TAG, "QMI8658 not found");
 
-    ESP_RETURN_ON_ERROR(board_imu_set_enabled(false), TAG, "disable accel/gyro");
-    ESP_RETURN_ON_ERROR(write_reg(QMI8658_CTRL1, QMI8658_AUTO_INCREMENT), TAG,
-                        "configure CTRL1");
-    ESP_RETURN_ON_ERROR(write_reg(QMI8658_CTRL2, QMI8658_ACC_4G_30HZ), TAG,
-                        "configure accelerometer");
-    ESP_RETURN_ON_ERROR(write_reg(QMI8658_CTRL3, QMI8658_GYR_64DPS_30HZ), TAG,
-                        "configure gyroscope");
-    ESP_RETURN_ON_ERROR(write_reg(QMI8658_CTRL6, 0x00), TAG,
-                        "disable attitude engine");
+    err = board_imu_set_enabled(false);
+    if (err == ESP_OK) err = write_reg(QMI8658_CTRL1, QMI8658_AUTO_INCREMENT);
+    if (err == ESP_OK) err = write_reg(QMI8658_CTRL2, QMI8658_ACC_4G_30HZ);
+    if (err == ESP_OK) err = write_reg(QMI8658_CTRL3, QMI8658_GYR_64DPS_30HZ);
+    if (err == ESP_OK) err = write_reg(QMI8658_CTRL6, 0x00);
+    if (err != ESP_OK) {
+        /* 句柄存在不代表配置成功；下一次必须重新探测和配置。 */
+        (void)i2c_master_bus_rm_device(s_dev);
+        s_dev = NULL;
+        return err;
+    }
 
     ESP_LOGI(TAG, "ready address=0x%02x odr=30Hz accel=+/-4g gyro=+/-64dps sampling=off", s_address);
     return ESP_OK;

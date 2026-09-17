@@ -14,6 +14,7 @@ set(embed_binary_files
     ${project_dir}/low_battery_16k_mono_16bit.wav
     ${project_dir}/bye_no_bother_16k_mono_16bit.wav
     ${project_dir}/goodnight_16k_mono_16bit.wav
+    ${project_dir}/wake_prompt_16k_mono_16bit.wav
     ${project_dir}/upgrade_start_16k_mono_16bit.wav
     ${project_dir}/upgrade_success_16k_mono_16bit.wav
     ${project_dir}/upgrade_failed_16k_mono_16bit.wav
@@ -30,6 +31,7 @@ endif()
 set(srcs
     # 应用入口与启动装配。
     "app/main.c"
+    "app/boot_coordinator.c"
 
     # 行为状态、故障恢复与本地行为策略。
     "behavior/julia_fault.c"

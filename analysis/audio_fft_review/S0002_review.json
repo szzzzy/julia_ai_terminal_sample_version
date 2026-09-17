@@ -1,0 +1,19 @@
+{
+  "files": 365,
+  "duration_s": 1760.9918125,
+  "full_frames": 87865,
+  "active_frames": 51557,
+  "active_threshold_dbfs": -50,
+  "active_with_f0": 25100,
+  "active_without_f0_pct": 51.32,
+  "active_centroid_above1500_pct": 10.12,
+  "active_rolloff_above1500_pct": 23.25,
+  "active_peak_outside150_250_pct": 51.21,
+  "file_0_1000_pct_range": [
+    79.10953457669947,
+    98.31403098179113
+  ],
+  "files_rolloff_above1500": 163,
+  "file_summary_sha256": "9a6e0b93756ee18e70fce00d6bd5a57b4f2f4043e1efd94c360e1cff94b6ad17",
+  "scope": "Speech-recording frames, not frame-level ground-truth speech labels. No negative noise recordings. Rejection percentages are NOT speech false-rejection rates."
+}

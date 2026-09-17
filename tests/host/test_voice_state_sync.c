@@ -137,6 +137,15 @@ int main(void)
     send_fails=true;voice_state_sync_start();assert(failures==3 && !voice_state_sync_is_ready());
     send_fails=false;identity_fails=true;count=sends;
     voice_state_sync_start();assert(failures==4 && sends==count && !voice_state_sync_is_ready());
+    /* Initial synchronization can acknowledge S0; the following S3 gets a fresh revision. */
+    identity_fails=false;
+    snapshot=(julia_fsm_snapshot_t){.main_state=JULIA_MAIN_STATE_S0_BOOT,.revision=1};
+    voice_state_sync_start();session_id(next);
+    assert(strstr(sent,"\"state\":\"S0\""));
+    ack("session_sync_ack",next,1);assert(voice_state_sync_is_ready());
+    snapshot.main_state=JULIA_MAIN_STATE_S3_STANDBY;snapshot.revision=2;
+    voice_state_sync_poll();assert(strstr(sent,"\"state\":\"S3\""));
+    ack("device_state_ack",next,2);
     puts("PASS: v2 handshake, revisions, state ACKs, stale sessions, bounded retries and idempotent require_wake");
     return 0;
 }

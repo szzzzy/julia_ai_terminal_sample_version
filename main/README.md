@@ -46,22 +46,20 @@
 
 ## 应用启动顺序
 
-以 [app/main.c](app/main.c) 的实际调用顺序为准：
+以 [app/main.c](app/main.c) 和 [启动协调器](app/boot_coordinator.c) 为准，完整依赖、故障策略和验证记录见 [并行启动说明](../docs/BOOT_INITIALIZATION.md)。
 
-1. 进入 `app_main()` 后立即把当前板卡验证的 GPIO7 `BAT_Control` 拉高以锁存电池供电（可由 `CONFIG_JULIA_BAT_CONTROL_GPIO` 适配其它批次），将 CPU 上限限制为80MHz，并初始化 GPIO8 `BAT_ADC`；然后由 `ota_boot_flow_run()` 初始化 NVS、网络基础设施与事件循环，处理镜像健康检查、启动确认／回滚和报告对账。
-2. 初始化背光、LCD、LVGL、Avatar，以最高 `CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT`（当前 50%）背光顺序执行眨眼序列。
-3. 动画完成后依次注册语音命令、初始化板级音频与独立播放任务、音频素材服务和 RTC，并挂载 SD；高电流阶段之间默认间隔250ms。
-4. 启动闲置显示和 FSM；关键显示、音频或语音依赖失败时进入 S7.2，否则由 S0 直接进入等待唤醒词的 S3。
-5. FSM 就绪后启动夜间、运动及可选本地唤醒输入。
-6. 注册的 IP-ready 回调保持关闭，直到本地运行时就绪后才最后启动 Wi-Fi；额外诊断扫描默认关闭，发射功率上限默认14dBm。
-7. 启动 Wi-Fi 之前先把 CPU 上限从 `CONFIG_JULIA_BOOT_CPU_MAX_FREQ_MHZ`（80MHz）切到 `CONFIG_JULIA_RUNTIME_CPU_MAX_FREQ_MHZ`（160MHz）；Wi-Fi 启动后再等待 `CONFIG_JULIA_BOOT_SETTLE_DELAY_MS`（默认1500ms）稳定，最后打开交互启动门槛；MQTT／WSS 仅在此前置条件满足后启动。
-8. 仅在 `CONFIG_VOICE_PUSH_DEMO_ENABLE` 启用时启动文件推送演示。
+1. 电源保持、电源管理、一次电池诊断；识别 OTA 镜像，完成 NVS 保护、netif 和事件循环。pending 镜像的可选 GPIO 诊断仍在外设启用前执行，避免重配 GPIO4 LED 引脚。
+2. 串行创建共享 I²C，装配语音观察者和主题，注册 MQTT/WSS/SNTP 回调。总线失败时不启动消费者。
+3. 启动 Wi-Fi 已有生命周期；并行执行显示/Avatar/动画、音频/播放/可选本地唤醒、RTC/Idle/FSM 资源/IMU 硬件三条分支。
+4. SNTP 只等待时区和 RTC 恢复尝试结束，RTC 失败不阻止 SNTP；MQTT/WSS 此时保持关闭。
+5. 协调器按默认 20 秒期限收集资源/完成结果。背光、LCD、Avatar、音频和 FSM 等资源成功后就提交运行期电源档位、建立首次云期限并开放 MQTT/WSS，不等待动画尾段。
+6. 握手期间 FSM 保持 S0，不修改动画画面、不接受业务交互。全部本地分支和动画完成后，在 S0 初始化夜间→运动→静默管理并交出画面；电池监测异步启动。
+7. 动画结束且业务连接已判决后，FSM 才进入 S3；云端先成功不会提前进入。若连接尚未判决，固定开机亮度显示 S0 CONNECTING，动画结束不重置云期限。
+8. pending 镜像在全部本地结果明确后异步验收、确认或回滚；确认和对账完成前拒绝新 OTA。网络不可用不影响镜像健康判断。
 
-启动流程刻意用更长时间换取较低的重叠峰值；网络不可达不阻塞本地运行时。OTA 通用检查在最前执行；新镜像在关键应用初始化完成后才确认，验收失败保留回滚路径。RTC 年份编码仍保留旧格式，格式迁移待多版本联调。`JULIA_BATTERY` 的 `power_hold`、`ota_ready`、`display_ready`、`audio_ready`、`storage_ready`、`runtime_ready`、`wifi_started` 与 `wifi_settled` 日志用于比较各阶段电池电压，不能据此直接计算电流或充电状态。进入运行期后 `battery_monitor` 默认每10秒更新滤波电压，并维护 NORMAL／LOW 提示状态；它不进入行为FSM。当前采用单节3.7V、750mAh锂电池，保留老师指定的3.40V=0%、3.55V=15%标定点，按非线性表插值并以5%步进显示。有效电池始终在状态文字上方显示百分比：正常为黑色 `BAT xx%`，低电量为红色 `LOW xx%`；仅电压无效时隐藏。软件不再根据电压趋势推测充电，充电中／充满以ETA6098板载红灯为准。
+首次云连接期限默认 30 秒，从开放门控前由 FSM owner 在 S0 建立；成功才进入 S3（不显示 offline），超时才进入 S3（显示 offline） 并继续后台重连。之后的断线仍保留 S7.1 提示和原运行期恢复逻辑。联网创建失败时 app task 保留指数退避重试。当前 SD 初始化仍暂停。
 
-Wi-Fi 关联失败后从约 1 秒开始指数退避，最大 60 秒并带最多 20% 的负向随机抖动，重试次数不封顶；取得 IPv4 后退避清零并重新确认所有 IP-ready 服务。单次 `esp_wifi_connect()` 默认最多等待 20 秒，若 GOT_IP和断开事件都未到达，会主动结束卡住的尝试并继续重连。`ESP_ERR_WIFI_STATE` 不再被误当成已成功发起连接。
-
-共享 LCD／I2C 基础设施在启动动画前建立，避免外设初始化重复创建总线。夜间和运动任务在 FSM 就绪后启动，防止向不存在的状态实例投递事件。MQTT 等待 `s_runtime_ready`；WSS 还要求语音注册、板级音频／播放任务和 FSM 初始化成功。门槛开放后调用 `network_lifecycle_retry_services()`，使已有 IP 的待启动服务尽快重试。
+启动只保留一次 `power_hold` 电压采样，之后 ADC 由电池监测任务使用；电量显示和低电量策略不变。`BOOT` 日志分别给出 app 入口、基础完成、分支开始/结束/错误、动画结束、IP、本地交接、云门控和全部业务就绪时间。不能由移除的固定等待推断实机供电稳定或实际提速。
 
 ## 任务与所有权
 
@@ -109,7 +107,7 @@ MIC 使用 256 槽（约 5.12 秒、168KB）的 PSRAM SPSC ring，MQTT 控制作
 
 FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发起交互、S5 静默、S6 睡眠、S7 异常、S8 OTA。S2 有 S2.1“听”、S2.2“想”、S2.3“说”三个对话阶段；S7.1 表示 WSS 或 MQTT 刚刚断开并播放本地提示，三秒后按来源策略返回稳定状态；S7.2 表示核心能力不可用，需要保存故障并受控复位。S7 本身不作为可驻留状态。
 
-当前背光策略以 `julia_fsm_runtime.c` 的呈现表为准：S1 固定 `CONFIG_JULIA_COMPANION_BRIGHTNESS_PERCENT`（当前 50%），S3 在 `CONFIG_JULIA_DISPLAY_BREATHE_MIN/MAX_PERCENT`（当前 0%–30%，周期 4000ms）间呼吸，S5 固定 `CONFIG_JULIA_SILENT_BRIGHTNESS_PERCENT`（当前 30%），S6 熄灭并关闭显示；S2 三个阶段为 70%，S4 与 S2.1 共用呈现时为 100%，S0/S7.2/S8 走默认 100%；S7.1 使用基础立绘、状态字幕和本地语音并固定 50% 亮度。运行时以 `CONNECTING` 开始等待 MQTT/WSS；默认 30 秒仍未全部就绪时进入一次 S7.1并叠加红色 `offline`。相关连接全部恢复后删除标签，主状态切换不会清除该标签。
+当前背光策略以 `julia_fsm_runtime.c` 的呈现表为准：S1 固定 `CONFIG_JULIA_COMPANION_BRIGHTNESS_PERCENT`（当前 50%），S3 在 `CONFIG_JULIA_DISPLAY_BREATHE_MIN/MAX_PERCENT`（当前 0%–30%，周期 4000ms）间呼吸，S5 固定 `CONFIG_JULIA_SILENT_BRIGHTNESS_PERCENT`（当前 30%），S6 熄灭并关闭显示；S2 三个阶段为 70%，S4 与 S2.1 共用呈现时为 100%，S0 连接等待固定为开机亮度（当前 50%），S7.2/S8 走默认 100%；S7.1 使用基础立绘、状态字幕和本地语音并固定 50% 亮度。本地资源就绪后在 S0 以固定亮度等待 MQTT/WSS 和语音会话同步；门控开放前开始默认 30 秒期限，成功进入 S3（不显示 offline），超时进入 S3 并叠加红色 `offline`。相关连接全部恢复后删除标签，主状态切换不会清除该标签。
 
 | 当前来源 | 生效状态 | 目标状态 |
 | --- | --- | --- |
@@ -125,8 +123,8 @@ FSM 有九个主状态：S0 开机、S1 陪伴、S2 对话、S3 待机、S4 发�
 | 断联提示完成 `EVT_DISCONNECT_NOTICE_TIMEOUT` | 来自 S3 的 S7.1 | 返回来源稳定状态 |
 | 断联提示完成 `EVT_DISCONNECT_NOTICE_TIMEOUT` | 来自 S1/S2/S4 的 S7.1 | S3，不恢复旧会话 |
 | MQTT/WSS 重连 | 任意行为状态 | 清除对应离线原因；全部恢复后删除 `offline` |
-| 初始业务连接超时 `EVT_SERVICE_CONNECT_TIMEOUT` | S1～S4（非主动休眠恢复期间） | S7.1，并置 `offline` |
-| 唤醒词 `EVT_WAKEUP` | S1／S3 | S4 |
+| 初始业务连接超时 `EVT_SERVICE_CONNECT_TIMEOUT` | 初始 CONNECTING | S0 → S3（显示 offline），继续后台重连 |
+| 唤醒词 `EVT_WAKEUP` | S1／S3，且业务 ONLINE | S4；未就绪时丢弃 |
 | IMU明显运动 `EVT_MOTION_WAKE` | S3/S5/S6 | S4，发起交互（capture-v1 本地入口） |
 | `EVT_NIGHT_TIME`／`EVT_STANDBY_TIMEOUT` | S3 | S6 |
 | MQTT `intent_result=goodnight` | S4／S2 任一阶段 | S2 先回 S4，在 S4 播“好的，晚安”并动嘴，播完进入 S6 |

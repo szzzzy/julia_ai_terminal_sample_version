@@ -16,6 +16,17 @@ if(NOT WIN32)
     target_link_libraries(test_local_capture PRIVATE m)
 endif()
 add_test(NAME local_capture COMMAND test_local_capture)
+add_executable(test_vad_capture test_vad_capture.c vad_test_backend.c
+    ../../components/julia_board_audio/local_capture.c
+    ../../components/julia_board_audio/lc_spectrum.c
+    ../../components/julia_board_audio/lc_vad.c)
+target_include_directories(test_vad_capture PRIVATE local_capture_stubs ../../components/julia_board_audio/include)
+if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "TinyCC")
+    target_link_libraries(test_vad_capture PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/fft_math.def")
+elseif(NOT WIN32)
+    target_link_libraries(test_vad_capture PRIVATE m)
+endif()
+add_test(NAME vad_capture COMMAND test_vad_capture)
 add_executable(test_wss_auth_policy test_wss_auth_policy.c)
 target_include_directories(test_wss_auth_policy PRIVATE ${VOICE_INCLUDE_DIRS})
 add_test(NAME wss_auth_policy COMMAND test_wss_auth_policy)
@@ -48,6 +59,24 @@ if(CJSON_DIR)
         target_link_libraries(test_voice_local_capture_fft PRIVATE m)
     endif()
     add_test(NAME voice_local_capture_fft COMMAND test_voice_local_capture_fft)
+    add_executable(test_voice_local_capture_vad test_voice_local_capture.c vad_test_backend.c
+        ../../components/julia_board_audio/lc_vad.c
+        ../../components/julia_board_audio/lc_spectrum.c
+        ../../components/julia_board_audio/local_capture.c
+        ../../main/voice/protocol/voice_control_guard.c "${CJSON_DIR}/cJSON.c")
+    target_compile_definitions(test_voice_local_capture_vad PRIVATE TEST_FFT_GATE=1
+        CONFIG_JULIA_CAPTURE_FFT_GATE=1 CONFIG_JULIA_CAPTURE_VAD_ENABLE=1
+        CONFIG_JULIA_CAPTURE_VAD_MODE=1 CONFIG_JULIA_CAPTURE_VAD_WAKE_TAIL_MS=500
+        CONFIG_JULIA_CAPTURE_VAD_DIALOG_TAIL_MS=700)
+    target_include_directories(test_voice_local_capture_vad PRIVATE local_capture_stubs stubs
+        ${VOICE_INCLUDE_DIRS} ../../components/julia_board_audio/include "${CJSON_DIR}")
+    if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "TinyCC")
+        target_link_libraries(test_voice_local_capture_vad PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/fft_math.def")
+    elseif(NOT WIN32)
+        target_link_libraries(test_voice_local_capture_vad PRIVATE m)
+    endif()
+    add_test(NAME voice_local_capture_vad COMMAND test_voice_local_capture_vad)
+    add_test(NAME voice_local_capture_vad_fallback COMMAND test_voice_local_capture_vad --vad-init-fail)
     add_executable(test_voice_control_guard test_voice_control_guard.c
         ../../main/voice/protocol/voice_control_guard.c "${CJSON_DIR}/cJSON.c")
     target_include_directories(test_voice_control_guard PRIVATE ${VOICE_INCLUDE_DIRS} "${CJSON_DIR}")
@@ -134,6 +163,9 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME ota_tls_memory
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ota_tls_memory.py"
             --cc "${CMAKE_C_COMPILER}" --out "${CMAKE_CURRENT_BINARY_DIR}/ota-memory")
+    add_test(NAME boot_parallel COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_boot_parallel.py"
+        --cc "${CMAKE_C_COMPILER}" --out "${CMAKE_CURRENT_BINARY_DIR}/boot-parallel")
     foreach(recovery_case backlight rtc display mqtt fsm wifi_profiles offline_ui boot storage fault voice)
         add_test(NAME recovery_${recovery_case}
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_recovery_paths.py"
