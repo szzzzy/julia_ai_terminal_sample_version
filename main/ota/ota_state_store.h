@@ -30,7 +30,9 @@ extern "C" {
  *  ota_stability_save_checkpoint() 用作下载检查点的间隔判断。 */
 #define OTA_STATE_STORE_CHECKPOINT_BYTES (16U * 1024U)
 
-/** 下载恢复最多允许的网络类失败次数；达到后由 OTA 任务隔离 artifact。 */
+/** 下载恢复允许的连续网络类失败次数上限。达到后 OTA 任务不是永久隔离 artifact，而是进入
+ *  COOLING_DOWN：按 cooldown_count 递增冷却时长（见 ota_engine.c 的 ota_cooldown_seconds()），
+ *  冷却结束后回到 DOWNLOADING 并清零 retry_count。 */
 #define OTA_STATE_STORE_NETWORK_RETRY_THRESHOLD CONFIG_OTA_DOWNLOAD_RETRY_THRESHOLD
 
 /** 输出默认 NVS 分区水位，并关联最近一次存储操作结果。 */

@@ -14,7 +14,7 @@
 
 | 通道 | 设备侧用途 | 当前连接方式 |
 | --- | --- | --- |
-| MQTT | OTA 检查、响应、通知、状态，以及三类语音作业命令 | `CONFIG_COMM_MQTT_BROKER_URI`；开发配置为 `mqtt://`，不加密 |
+| MQTT | OTA 检查、响应、通知、状态，以及三类语音作业命令 | `CONFIG_COMM_MQTT_BROKER_URI`；当前默认档为 `mqtts://…:11883`（TLS，校验内嵌 `ca_cert.pem`），只有 legacy 端口档才是 `mqtts://…:1883` |
 | WSS | MIC PCM1 上行、PCM 下行、语音控制和 WAV 文件外发 | TLS + WebSocket，Bearer 认证头 |
 | HTTPS | 下载 OTA 镜像 | 清单中的 `url`，内嵌根证书 |
 
@@ -22,7 +22,7 @@ MQTT 与 WSS 各自配置地址，不存在统一的 `JULIA_SERVER_ADDR` 配置�
 
 ## 2. WSS 建连与消息
 
-地址由 `CONFIG_WSS_SERVER_HOST`、`CONFIG_WSS_SERVER_PORT`、`CONFIG_WSS_PATH` 组成，端口默认 9443，路径默认 `/voice`。
+地址由 `CONFIG_WSS_SERVER_HOST`、`CONFIG_WSS_SERVER_PORT`、`CONFIG_WSS_PATH` 组成，当前默认端口 19443（只有 `CONFIG_JULIA_LEGACY_SERVER_PORTS` 打开时才是 9443），路径默认 `/voice`。
 
 设备发送 `Authorization: Bearer <token>`，token 优先取 `CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE`，为空时取 `CONFIG_WSS_TOKEN`。该选择独立于 MQTT 的认证模式；空或非法 token 由设备在 TLS 建连前本地拒绝并进入重试退避（`wss_transport.c` 的 `wss_auth_token_valid()`），服务器仍应负责拒绝无效认证。
 
@@ -207,7 +207,7 @@ MQTT 语音作业和终止语义进入独立 4 槽控制队列，不与 MIC 的 
 
 ### 7.1 设备检查请求
 
-MQTT 连接并收到 critical 主题的 SUBACK 后执行检查；默认周期为 21600 秒，附加 0–1800 秒抖动。默认响应等待 15 秒，后续重试与恢复由配置控制。
+MQTT 连接并收到 critical 主题的 SUBACK 后开始周期检查；默认周期为 21600 秒，附加 0–1800 秒抖动。默认响应等待 15 秒，后续重试与恢复由配置控制。周期到点并不等于一定发出检查：`mqtt_comm.c` 只在**设备处于 S3 待机、服务状态为 ONLINE 且当前没有本地播放**时才发布 `/device/ota/check`；其余状态下本次检查被跳过，等下一个周期再试。
 
 行为 FSM 在 OTA 任务被接受时进入 S8。Wi‑Fi、TLS、HTTP 等临时链路失败保留 S8 和断点；镜像处理、NVS 检查点、目标分区、启动分区设置或任务创建失败回到 S3 并继续运行当前固件、等待唤醒；提交成功进入 S0 后由现有流程复位。只有已经无法回滚到可用固件时才进入 S7.2。启动早期连当前固件、NVS 或 Flash 健康都无法确认的情况仍由 OTA 安全模式记录为 S7.2。
 

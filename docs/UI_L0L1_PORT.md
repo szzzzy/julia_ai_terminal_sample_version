@@ -83,7 +83,7 @@ app_main
 | S2.1 听 | 复用现有 LISTEN 呈现 |
 | S2.2 想 | 复用现有 THINK 呈现 |
 | S2.3 说 | 复用现有 SPEAK 呈现和 PCM 嘴型 |
-| S3 待机 | 闭眼与 5%–30% 背光呼吸 |
+| S3 待机 | 闭眼与 0%–30% 背光呼吸 |
 | S6 睡眠 | 闭眼且背光熄灭 |
 | S4 发起交互 | 暂时复用 S2.1 的 LISTEN 呈现；正常话语结束进入 S2.2，特殊语义可进入 S5 |
 | S7.1 断联 | 基础立绘、状态字幕和本地提示语音，固定 50% 背光；三秒后 S3/S5/S6 返回来源，S1/S2/S4 返回 S3 |
@@ -97,13 +97,13 @@ app_main
 
 ### 活动时间
 
-`julia_idle_display.c` 按 `CONFIG_JULIA_DISPLAY_ACTIVITY_POLL_MS` 检查活动时间。非 busy 且连续达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 300 秒）无交互时投递 `EVT_USER_LEAVE`，由 S1 陪伴进入 S3 待机；FSM 自身也保存 S1 截止时间，保证通知丢失时仍能到期退出。闲置任务不直接操作立绘；FSM 运行时在进入 S3 后统一应用闭眼和背光呼吸。听音／思考／说话期间 busy 为真，普通闲置逻辑不降档。
+`julia_idle_display.c` 按 `CONFIG_JULIA_DISPLAY_ACTIVITY_POLL_MS` 检查活动时间。非 busy 且连续达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 10 秒）无交互时投递 `EVT_USER_LEAVE`，由 S1 陪伴进入 S3 待机；FSM 自身也保存 S1 截止时间，保证通知丢失时仍能到期退出。闲置任务不直接操作立绘；FSM 运行时在进入 S3 后统一应用闭眼和背光呼吸。听音／思考／说话期间 busy 为真，普通闲置逻辑不降档。
 
 进入 S3 后由 FSM 运行时启动独立的一次性计时器；连续驻留达到 `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS`（默认 300 秒）仍未唤醒时投递 `EVT_STANDBY_TIMEOUT`，由 S3 进入 S6。默认 23:00～07:00 的 RTC 夜间事件仍独立生效，可在驻留计时到期前先进入 S6。
 
-进入 S5 后同样启动由 `CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS` 控制的一次性计时器（默认 1800 秒）；期间没有唤醒词时投递 `EVT_SILENT_TIMEOUT`，由 S5 回到 S3。S3 和 S5 计时器在离开各自状态时立即取消。
+进入 S5 后同样启动由 `CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS` 控制的一次性计时器（默认 300 秒）；期间没有唤醒词时投递 `EVT_SILENT_TIMEOUT`，由 S5 回到 S3。S3 和 S5 计时器在离开各自状态时立即取消。
 
-默认 S3 背光呼吸范围为 5%–30%，周期 4000ms；S6 停止呼吸、将背光置为 0%，并让 ST77916 执行 `DISPOFF + SLPIN`。只有 FSM 离开 S6 才执行 `SLPOUT + DISPON`，面板稳定等待约 120ms；运动任务也只能投递事件，不能旁路点亮。这仍不等于芯片进入硬件深度睡眠。
+默认 S3 背光呼吸范围为 0%–30%（`JULIA_DISPLAY_BREATHE_MIN/MAX_PERCENT`），周期 4000ms；下限为 0 时驱动按 `BREATHE_ZERO_HOLD_PERCENT=60` 让每个周期的 60% 保持全黑，其余时间走升余弦曲线在 0%–30% 间往复，因此亮度不是线性三角波。S6 停止呼吸、将背光置为 0%，并让 ST77916 执行 `DISPOFF + SLPIN`。只有 FSM 离开 S6 才执行 `SLPOUT + DISPON`，面板稳定等待约 120ms；运动任务也只能投递事件，不能旁路点亮。这仍不等于芯片进入硬件深度睡眠。
 
 ### 墙钟调度
 
@@ -113,7 +113,7 @@ app_main
 
 ### 运动输入
 
-`julia_motion.c` 在非 S6 时不读取 QMI8658；进入 S6 后每 200ms 采样，当前调试门限为加速度三轴差值合计0.20g或陀螺仪模长25°/s，并要求连续4次（约800ms）命中。确认后投递 `EVT_MOTION_WAKE`，由FSM执行 S6→S3并恢复待机画面；任务自身不操作屏幕。事件投递成功后进入10秒冷却，轻微桌面振动仍不应唤醒。
+`julia_motion.c` 监测哪些状态取决于 `CONFIG_JULIA_LOCAL_CAPTURE_ENABLE`：该选项开启（当前生效）时 S3/S5/S6 都监测，关闭时只监测 S5/S6。采样周期、连续确认帧数、冷却时间与门限分别来自 `CONFIG_JULIA_IMU_MOTION_SAMPLE_MS`、`CONFIG_JULIA_IMU_MOTION_CONFIRM_FRAMES`、`CONFIG_JULIA_IMU_MOTION_COOLDOWN_MS`、`CONFIG_JULIA_IMU_ACCEL_DELTA_MG` 与 `CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS`；这几项已在 Kconfig 默认、`sdkconfig.defaults` 与生效 `sdkconfig` 三处统一（扫描周期 20 ms、连续 10 帧、冷却 0 ms、加速度 450 mg、角速度 400 dps）。取值依据是 `tools/imu_logger/tune_motion.py` 对 `imu_records/latest` 11 段典型场景的回放（`imu_records/tuning/replay.json`，误报 0／漏报 0），属同数据拟合、无留出集验证，需上板复核（见 [工程边界](COMMENT_AUDIT_FINDINGS.md) HW-01）。产品驱动的陀螺仪量程为每轴 ±1024 dps（±1024 dps 是 QMI8658C Rev A 的上限），与录制量程一致，三轴合成模长上界约 1773.6 dps，门限 400 dps 可达；不要收窄量程，否则该支路恒不成立。注意扫描周期与传感器 ODR 是两个参数：驱动 ODR 固定在 30 Hz（约 33 ms 一个新样本），20 ms 周期会重复读到同一批样本；重复采样会让加速度差分归零并清零连续帧计数，目前靠角速度支路兜住。确认条件满足后投递 `EVT_MOTION_WAKE`：capture-v1 下由 FSM 进入 S4 发起交互，兼容配置才回到 S3 恢复待机；任务自身不操作屏幕。事件投递成功后才开始冷却计时，投递失败下一轮可直接重试。
 
 运动检测是短时活动判断，不是姿态解算、用户定位或有人／无人识别。
 

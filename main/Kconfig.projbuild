@@ -1,487 +1,1188 @@
 menu "Example Configuration"
 
     config JULIA_LEGACY_SERVER_PORTS
-        bool "Legacy customer test server ports (9443/8443/1883)"
+        bool "使用旧版客户测试服务器端口（9443/8443/1883）"
         default n
         help
-            Keep legacy HTTPS URLs unchanged. Use the matching endpoint profile
-            for WSS and MQTT; this option does not change the voice protocol.
+            打开后保持旧服务端点不改写：HTTPS OTA 不做旧端口到 18443 的映射（main/network/
+            download_protocol.c 的 download_server_url()，由 main/ota/ota_engine.c 与
+            main/network/http_downloader.c 调用），WSS 使用旧端口 9443，MQTT 则回落到旧端口
+            1883。WSS 与 MQTT 需要配套的端点配置，本项不改变语音协议。取值范围为开/关；默认
+            关（Kconfig 默认）表示使用新端点 18443/19443/11883（sdkconfig.defaults 同此）。
+            仅在同一端点组合已确认可用时打开；打开会使设备回到旧服务，新服务器上可能连不上。
 
     config JULIA_IMU_LOGGER_ENABLE
-        bool "Standalone IMU experiment firmware (no product voice/FSM)"
+        bool "独立 IMU 实验固件（不使用产品语音/FSM）"
         default n
         help
-            Trusted LAN only. Exposes HTTP start/status/retry on port 8080.
-            Records one 8-second action in RAM, then uploads to the requesting PC.
-            Build separately with sdkconfig.imu-test.defaults; do not deploy as product firmware.
+            仅供可信局域网使用的实验固件（main/diagnostics/imu_logger.c）：在 8080 端口提供
+            HTTP /start、/status、/retry；把一次 8 秒动作记录在 RAM，再上传到发起请求的电脑。
+            打开后 app_main 只启动 IMU 记录，不再启动产品语音、显示与行为 FSM。取值范围为
+            开/关；默认关（Kconfig 默认）。需要用 sdkconfig.imu-test.defaults 单独构建；不要
+            当作产品固件部署，其间设备上的录音接口对同网段主机是开放的。
 
     config JULIA_LOCAL_CAPTURE_ENABLE
-        bool "Device endpointing with negotiated capture-v1 protocol"
+        bool "设备端分段收音（协商 capture-v1 协议）"
         depends on JULIA_SERVER_WAKE_ENABLE && JULIA_CLOUD_STATE_SYNC_ENABLE
         default y
         help
-            Keep 16 kHz PCM16. Requires the matching cloud capture-v1 receiver.
-            A server without capability acknowledgement cannot receive audio.
+            启用设备端分段收音：main/voice/capture/voice_local_capture.c 与
+            components/julia_board_audio/local_capture.c 保持 16 kHz PCM16、20 ms 帧在设备侧
+            判定起音与结束。取值只有开/关，默认开（Kconfig 默认，sdkconfig.defaults 同此）。
+            开始收音前必须先与云端完成 capture_hello / capture_ready 能力协商，对端必须是配套
+            的 capture-v1 接收端；协商失败会结束本次会话并向旧服务器退避，无法接收音频。
+            关闭后回到纯服务器侧端点判定（见 main/network/wss/wss_transport.c）。
 
     config JULIA_CAPTURE_VAD_ENABLE
-        bool "WebRTC VAD for local capture onset and endpointing"
+        bool "本地收音起音与收尾使用 WebRTC VAD"
         depends on JULIA_LOCAL_CAPTURE_ENABLE
         default y
         help
-            Use the traditional ESP-SR 1.9.4 WebRTC VAD without AFE or models.
-            Adds speech evidence to the energy and optional FFT gates.
-            Raw PCM and preroll remain unchanged.
+            在本地收音判定中启用传统 ESP-SR 1.9.4 WebRTC VAD（components/julia_board_audio/
+            lc_vad.c），不初始化 AFE、模型或神经网络运行时。VAD 只补充证据：起音与收尾仍需
+            同时满足能量门限和可选的 FFT 条件（components/julia_board_audio/local_capture.c）。
+            原始 PCM、预录 25 帧/500 ms 和 PCM2 线上格式都不变。默认开（Kconfig 默认，
+            sdkconfig.defaults 同此）。初始化失败时打印错误并回退到原能量/FFT 路径；关闭则完全
+            使用固定 500/700 ms 尾长与能量/FFT 逻辑。
 
     config JULIA_CAPTURE_VAD_MODE
-        int "WebRTC VAD aggressiveness (0 permissive, 3 restrictive)"
+        int "WebRTC VAD 激进程度（0 最宽松，3 最严格）"
         depends on JULIA_CAPTURE_VAD_ENABLE
         range 0 3
         default 1
+        help
+            传给 WebRTC VAD 的激进程度模式，作用于本地收音的逐帧人声判定
+            （main/voice/capture/voice_local_capture.c 调用 lc_vad_init()，
+            实现见 components/julia_board_audio/lc_vad.c）。整数 0～3，0 最宽松、3 最严格，
+            不取整、不换算；取值非法时适配器拒绝初始化并回退到原能量/FFT 路径。默认 1 属于
+            Kconfig 默认，与组件内候选起点一致，但未经实机标定。调高更严格：更不易因噪声起音，
+            也更容易把轻声说话判为非人声而漏唤醒或提前收尾；调低相反，更容易起音、误唤醒更多。
 
     config JULIA_CAPTURE_VAD_WAKE_TAIL_MS
-        int "Wake non-speech tail (ms, rounded up to 20 ms)"
+        int "唤醒模式下非语音尾部静音累计时长（ms，按 20 ms 帧向上取整）"
         depends on JULIA_CAPTURE_VAD_ENABLE
         range 200 1500
         default 500
+        help
+            唤醒段（LC_WAKE）在起音之后，连续累计多少毫秒非语音音频就结束该段；生效于
+            main/voice/capture/voice_local_capture.c 的 lc_set_voice_detector() 与
+            components/julia_board_audio/local_capture.c 的段尾判断。单位 ms，范围 200～1500，
+            不是 20 的整数倍时按 20 ms 帧向上取整；默认 500 与代码内未接 VAD 时的固定门限一致
+            （Kconfig 默认，sdkconfig.defaults 同此）。调大更容易保留句尾和慢速停顿，代价是段
+            更长、上行流量与端侧结束延迟增加；调小更容易提前收尾，可能截掉轻声尾音。
 
     config JULIA_CAPTURE_VAD_DIALOG_TAIL_MS
-        int "Dialog non-speech tail (ms, rounded up to 20 ms)"
+        int "对话模式下非语音尾部静音累计时长（ms，按 20 ms 帧向上取整）"
         depends on JULIA_CAPTURE_VAD_ENABLE
         range 200 1500
         default 700
+        help
+            对话段（LC_DIALOG）在起音之后，连续累计多少毫秒非语音音频就结束该段；生效点同
+            JULIA_CAPTURE_VAD_WAKE_TAIL_MS。单位 ms，范围 200～1500，按 20 ms 帧向上取整；默认
+            700 沿用代码内固定的对话尾长 700 ms（Kconfig 默认，sdkconfig.defaults 同此）。
+            调大更耐句中停顿、段更长，代价是响应更慢；调小更容易切断长句和句中停顿。
 
     config JULIA_CAPTURE_FFT_GATE
-        bool "Candidate spectral flatness/entropy gate for local capture"
+        bool "本地收音的候选频谱平坦度/熵门限"
         depends on JULIA_LOCAL_CAPTURE_ENABLE
         default n
         help
-            Apply the S0002 320-point spectral envelope to onset and activity.
-            Candidate thresholds only: real noise rejection and S3 timing still
-            need hardware validation. Disable removes the FFT condition;
-            disable VAD as well to restore energy-only endpointing.
+            把 S0002 的 320 点频谱包络用于起音与段内活跃判定（components/julia_board_audio/
+            lc_spectrum.c：平坦度、熵，实际门限常量 LC_FLATNESS_MAX=0.199、LC_ENTROPY_MIN=
+            0.070、LC_ENTROPY_MAX=0.809）。取值只有开/关，默认关（Kconfig 默认）。门限是候选
+            值：真实噪声抑制效果与 S3 时序仍待上板验证。关闭即去掉 FFT 条件；同时再关闭 VAD
+            可回到只靠能量的端点判定（见 components/julia_board_audio/local_capture.c）。
+
+    config JULIA_CAPTURE_NOISE_WINDOW
+        bool "实验性键盘频谱历史门控（未验证）"
+        depends on JULIA_CAPTURE_FFT_GATE && JULIA_CAPTURE_VAD_ENABLE
+        default n
+        help
+            只作为候选方案（components/julia_board_audio/local_capture.c 的 lc_noise_observe()）：
+            用近期能量/VAD 历史配合高频占比与频谱质心，抑制有证据的噪声起音和噪声帧的静音抵扣，
+            绝不取消一段已起音的话语，也不会自动 capture_abort。取值只有开/关，默认关
+            （Kconfig 默认）。示例构建 sdkconfig.keyboard-trial.defaults 打开的是文档里的激进
+            组合；本机生效的 sdkconfig 也已打开本项与 JULIA_CAPTURE_NOISE_TAIL，因此该门控
+            当前是生效状态，只是参数属实验值（见 docs/KEYBOARD_GATE_REVIEW_20260918.md 与
+            docs/NOISE_TAIL.md）。默认关的依据类别：Kconfig 默认，文档明确说明示例参数只是
+            可复现实验的固定参考，不是经过选择的产品配置。在拿到独立的带标注上板录音、验证门限
+            与轻声保留之前应保持关闭；打开后噪声更不易起音、键盘声不易拖长段尾，但轻声说话和
+            低频尾音更容易被误判。
+
+    config JULIA_CAPTURE_NOISE_RATIO_PERMILLE
+        int "实验性高频占比门限（per mille）"
+        depends on JULIA_CAPTURE_NOISE_WINDOW
+        range 0 1000
+        default 600
+        help
+            判定疑似噪声的高频占比门限：单边 PSD 的 1000～8000 Hz 之和除以含 DC 的全带之和
+            （components/julia_board_audio/lc_spectrum.c 的 band_1000_8000_ratio），在
+            components/julia_board_audio/local_capture.c 中除以 1000 后与门限比较，须与质心门限
+            同时严格满足。单位 per mille，范围 0～1000，不做取整。默认 600 与组件内
+            lc_init() 的 noise_config 常量 0.6 一致（代码常量；Kconfig 默认同值），文档说明它是
+            实验参考值而非产品定值。调低会有更多帧被判疑似噪声：更容易切断键盘声，也更容易把
+            轻声说话误判成噪声；调高则相反，可能漏检键盘噪声。
+
+    config JULIA_CAPTURE_NOISE_CENTROID_HZ
+        int "实验性频谱质心门限（Hz）"
+        depends on JULIA_CAPTURE_NOISE_WINDOW
+        range 0 8000
+        default 1800
+        help
+            判定疑似噪声的频谱质心门限，单位 Hz：sum(PSD[k]*k*50 Hz)/sum(PSD[k])，k=0～160
+            （components/julia_board_audio/lc_spectrum.c 的 centroid_hz），须与
+            JULIA_CAPTURE_NOISE_RATIO_PERMILLE 同时严格满足才标为疑似噪声。范围 0～8000，不做
+            取整；默认 1800 与组件内 lc_init() 的 noise_config 常量 1800 Hz 一致（代码常量；
+            Kconfig 默认同值），是实验参考值，不是已经选定的产品配置。调低会有更多带高频成分
+            的帧被判疑似噪声，动作更快也更易误判轻声；调高则相反，可能漏检键盘噪声。
+
+    config JULIA_CAPTURE_NOISE_WINDOW_FRAMES
+        int "实验性历史窗口长度（20 ms 帧）"
+        depends on JULIA_CAPTURE_NOISE_WINDOW
+        range 1 25
+        default 15
+        help
+            观察近期证据的滑动窗口长度，单位是 20 ms 帧；窗口内每帧记为低能量、有能量或疑似
+            噪声（components/julia_board_audio/local_capture.c 的 lc_noise_observe()）。范围
+            1～25（上限是结构体内 frames[25] 的容量，越界会写坏后续预录缓冲），按帧计数、不做
+            取整；默认 15 与组件内 lc_init() 的 noise_config 常量一致（代码常量；Kconfig 默认
+            同值），是实验参考值。必须不小于 JULIA_CAPTURE_NOISE_MIN_ENERGY_FRAMES。窗口越长
+            判决越稳定但反应越慢（低能量帧也会占时间并挤出旧证据）；越短反应越快也越易抖动。
+
+    config JULIA_CAPTURE_NOISE_MIN_ENERGY_FRAMES
+        int "实验性最少有能量帧数"
+        depends on JULIA_CAPTURE_NOISE_WINDOW
+        range 1 25
+        default 5
+        help
+            在窗口内至少要有多少个有能量帧，才评估噪声占比是否占优（components/julia_board_audio/
+            local_capture.c 的 lc_noise_observe()）。有能量帧指帧电平高于底噪 3 dB（dBFS），
+            单位为帧，按帧计数、不做取整，范围 1～25，且不能大于
+            JULIA_CAPTURE_NOISE_WINDOW_FRAMES。默认 5 与组件内 lc_init() 的 noise_config
+            常量一致（代码常量；Kconfig 默认同值），是实验参考值。调大要求更多证据，键盘噪声更
+            不易进入收尾状态，判决延迟也更大；调小更容易触发，也更容易被零散噪声误触发。
+
+    config JULIA_CAPTURE_NOISE_PERCENT
+        int "实验性噪声占优百分比"
+        depends on JULIA_CAPTURE_NOISE_WINDOW
+        range 1 100
+        default 80
+        help
+            噪声占优所需的占比：窗口内疑似噪声帧占窗口有能量帧的比例达到该百分比即视为占优
+            （components/julia_board_audio/local_capture.c 的 lc_noise_observe()，分母是有能量帧，
+            不是全窗口帧）。单位 percent，范围 1～100，按整数百分比比较、不做取整；默认 80 与
+            组件内 lc_init() 的 noise_config 常量一致（代码常量；Kconfig 默认同值），是实验参考
+            值。调高要求噪声证据更集中，键盘噪声更难进入收尾；调低更易触发，也更易把短暂噪声判
+            为占优而提前收尾。
+
+    config JULIA_CAPTURE_NOISE_CONFIRM_FRAMES
+        int "实验性尾部确认帧数（20 ms 帧）"
+        depends on JULIA_CAPTURE_NOISE_WINDOW
+        range 1 25
+        default 5
+        help
+            在已经有活动段时，占优条件需要连续满足多少帧才启用噪声判决（components/julia_board_audio/
+            local_capture.c 的 lc_noise_observe()）；候选帧出现会立即把确认计数清零。单位为帧，
+            按帧计数、不做取整，范围 1～25；默认 5 与组件内 lc_init() 的 noise_config 常量一致
+            （代码常量；Kconfig 默认同值），是实验参考值。调大确认更慢，收尾启动更晚；调小能更
+            快切断，但更容易被一两帧噪声提前带偏。
+
+    config JULIA_CAPTURE_NOISE_TAIL
+        bool "对话段噪声收尾（持续候选帧可恢复）"
+        depends on JULIA_CAPTURE_NOISE_WINDOW
+        default n
+        help
+            只在对话模式（LC_DIALOG）起音之后生效（components/julia_board_audio/local_capture.c
+            的 lc_noise_tail_step()）：确认噪声占优后，孤立候选帧不能再抵扣静音额度，改为在最近
+            5 帧内出现 4 帧恢复候选才恢复，每次噪声收尾过程只有一次 100 ms 豁免额度。PCM 始终
+            保留，结束走 capture_end，绝不自动 capture_abort。取值只有开/关，默认关（Kconfig
+            默认）；本机生效的 sdkconfig 已打开本项，docs/NOISE_TAIL.md 说明本地实验用 y，
+            只关闭本项即回到原先的逐帧收尾规则，因此开关本身可作为对照。唤醒段不受本项影响。
+            打开后键盘等持续噪声更易收尾，代价是低声尾音可能被切断；关闭则维持旧规则的长尾行为。
+
+    config JULIA_CAPTURE_NOISE_RECOVERY_RATIO_PERMILLE
+        int "恢复候选的高频占比上限（per mille）"
+        depends on JULIA_CAPTURE_NOISE_TAIL
+        range 0 1000
+        default 200
+        help
+            恢复候选的高频占比上限：1000～8000 Hz 能量占比必须小于等于该值，才可能解除噪声收尾
+            状态（components/julia_board_audio/local_capture.c 中除以 1000 后与
+            noise_recovery_ratio 比较，由 lc_spectrum_features() 提供占比）。单位 per mille，
+            范围 0～1000，不做取整；默认 200 取自 docs/NOISE_TAIL.md 在旧键盘录音上选定的实验值
+            200 per mille（经验值；亦为 Kconfig 默认）。该文档说明这是实验性、候选值，需上板标定
+            后才能定为产品参数；恢复还必须同时满足质心上限和原能量/VAD/FFT 条件。调高更容易解除
+            收尾状态，也更易被低频噪声尾部拉回原规则而拖长；调低更难恢复，更像一直按噪声收尾。
+
+    config JULIA_CAPTURE_NOISE_RECOVERY_CENTROID_HZ
+        int "恢复候选的频谱质心上限（Hz，联合条件）"
+        depends on JULIA_CAPTURE_NOISE_TAIL
+        range 0 8000
+        default 700
+        help
+            恢复候选的频谱质心上限，单位 Hz：与 JULIA_CAPTURE_NOISE_RECOVERY_RATIO_PERMILLE 是
+            联合条件，两项都满足才算恢复候选（components/julia_board_audio/local_capture.c 的
+            noise_recovery_centroid 比较）。范围 0～8000，不做取整；默认 700 取自
+            docs/NOISE_TAIL.md 在旧键盘录音上选定的实验值 700 Hz（经验值；亦为 Kconfig 默认）。
+            该文档说明这是实验性、候选值，需上板标定后才能定为产品参数。调高更容易恢复、更快回到
+            原逐帧规则；调低更难恢复，更容易长时间停在噪声收尾状态。
+
+    config JULIA_CAPTURE_NOISE_END_GUARD_MS
+        int "噪声收尾时追加的尾部 PCM 保护时长（ms）"
+        depends on JULIA_CAPTURE_NOISE_TAIL
+        range 0 1000
+        default 500
+        help
+            只在对话噪声收尾状态被锁存期间，给段尾静音门限追加的保护时长
+            （components/julia_board_audio/local_capture.c：加到 voice_end_dialog_ms 上，并先按
+            20 ms 帧向上取整）。单位 ms，范围 0～1000，按 20 ms 帧向上取整；默认 500 取自
+            docs/NOISE_TAIL.md 在旧键盘录音上扫描尾部保护后选定的实验值（经验值；亦为 Kconfig
+            默认），文档将整组参数标为实验性、候选值，需上板标定后才能定为产品参数。期间恢复仍
+            可能发生，且原有 750 帧最大段长始终优先，因此不会无限延长；调大保留更多尾音、代价是
+            收尾更晚、上行流量更多，调小则更快结束但也可能截掉尾音。
+
+    config JULIA_VOICE_TIMING
+        bool "输出会话时序事件供本地串口日志采集"
+        default y
+        help
+            在采音与语音通路上记录有界、非阻塞的时序事件（main/voice/voice_timing.c，事件在
+            main/voice/capture/voice_local_capture.c 与 main/voice/voice_service.c 中登记），
+            由一个低优先级任务打印 VT1 记录；电脑端用 tools/voice_timing/record.py 保存原始日志
+            并按轮次统计时序。不记录 PCM。取值只有开/关，默认开（Kconfig 默认，示例配置
+            sdkconfig.keyboard-trial.defaults 亦为 y）。要求日志级别为 INFO 才能看到 VT1；
+            队列满时只统计 dropped 计数，不改变协议、不影响云端部署。关闭后不再打印时序事件，
+            现场诊断可用的时序证据会随之消失。
 
     orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
 
     config JULIA_BAT_CONTROL_GPIO
-        int "Battery power-hold GPIO"
+        int "电池供电保持 GPIO"
         range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
         default 7
         help
-            GPIO driven high immediately in app_main to keep battery power enabled.
-            This board uses GPIO7 for BAT_Control; GPIO6 is Key_BAT and GPIO8 is BAT_ADC.
-            Select the power-hold pin verified on the actual board.
+            电池电源保持引脚：main/hardware/julia_power.c 在 app_main 早期先把该脚预置为高、再切成
+            输出并再次拉高，使电池供电保持打开。单位是 GPIO 编号，范围取
+            ENV_GPIO_RANGE_MIN～ENV_GPIO_OUT_RANGE_MAX，不换算、不取整。默认 7 依据代码内注释给出
+            的当前板卡接线（Kconfig 默认，sdkconfig.defaults 亦为 7）：本板 GPIO7 为 BAT_Control，
+            GPIO6 为 Key_BAT、GPIO8 为 BAT_ADC，后两者不可改作保持脚。换板后必须改成本板实测过的
+            保持脚：填错可能导致电池供电无法保持，或把已占用引脚配成输出而干扰按键/ADC 采样。
 
     choice JULIA_BOOT_CPU_MAX_FREQ
-        prompt "CPU ceiling while hardware starts"
+        prompt "硬件启动阶段的 CPU 上限"
         default JULIA_BOOT_CPU_MAX_FREQ_80
         help
-            Keep CPU demand below the normal runtime ceiling while display, audio and
-            Wi-Fi power domains are started. This reduces coincident battery current
-            peaks; it does not change the bootloader clock before app_main.
+            该档位是启动阶段的 DFS 上限：main/hardware/julia_power.c 的
+            julia_power_management_init() 由 app_main 调用后应用它，下限固定 80 MHz。在显示、
+            音频和 Wi-Fi 电源域依次上电时把 CPU 需求压在运行期上限之下，可减小叠加的电池电流
+            峰值；它不改变 app_main 之前 bootloader 的时钟（sdkconfig 仍为 240 MHz）。可选
+            80 MHz 或 160 MHz（ESP32-S3 支持的档位），默认 80 MHz 属于 Kconfig 默认，示例配置
+            sdkconfig.defaults 亦为 80。80 MHz 峰值电流更低但启动更慢；160 MHz 折中，启动更快
+            但上电期间电流峰值更高。
 
         config JULIA_BOOT_CPU_MAX_FREQ_80
             bool "80 MHz"
+            help
+                启动阶段上限取 80 MHz：显示、音频与 Wi-Fi 依次上电时的电池电流峰值最低，代价
+                是启动与首屏更慢。这是 Kconfig 默认，根 sdkconfig.defaults 亦选此项。
 
         config JULIA_BOOT_CPU_MAX_FREQ_160
             bool "160 MHz"
+            help
+                启动阶段上限取 160 MHz：启动更快、首屏更早，但上电期间的电流峰值高于 80 MHz
+                档。属候选档位，未做功耗对比测量（依据未确认）。
     endchoice
 
     config JULIA_BOOT_CPU_MAX_FREQ_MHZ
         int
         default 80 if JULIA_BOOT_CPU_MAX_FREQ_80
         default 160 if JULIA_BOOT_CPU_MAX_FREQ_160
+        help
+            由上面启动档位 choice 自动派生的 MHz 数值（80 或 160），不是独立可配置项、没有提示
+            文本，仅供 main/hardware/julia_power.c 的 configure_cpu_limit() 调用 esp_pm_configure()
+            时读取；取值不取整、不换算，默认 80。需要更低的启动电流峰值选 80 MHz 档，需要更快
+            启动选 160 MHz 档，两者都只影响启动阶段。
 
     choice JULIA_RUNTIME_CPU_MAX_FREQ
-        prompt "CPU ceiling after staged startup"
+        prompt "分段启动完成后的 CPU 上限"
         default JULIA_RUNTIME_CPU_MAX_FREQ_160
+        help
+            该档位是分段启动完成后的 DFS 上限：main/app/main.c 的 start_cloud_early() 调用
+            main/hardware/julia_power.c 的 julia_power_runtime_profile_enable() 时应用，下限仍
+            固定 80 MHz。可选 160 MHz 或 240 MHz，默认 160 MHz 属于 Kconfig 默认，示例配置
+            sdkconfig.defaults 亦为 160。持有 boost 计数锁的操作（WSS、MQTT、OTA 等）只会把 CPU
+            锁在该上限上运行，不能突破。160 MHz 更省电但高负载任务耗时更长；240 MHz 语音/TLS
+            处理更快，代价是电池电流峰值更高。
 
         config JULIA_RUNTIME_CPU_MAX_FREQ_160
             bool "160 MHz"
+            help
+                运行期上限取 160 MHz：语音、TLS 与 UI 并发下的当前取值，功耗低于 240 MHz 档。
+                这是 Kconfig 默认，根 sdkconfig.defaults 亦选此项。
 
         config JULIA_RUNTIME_CPU_MAX_FREQ_240
             bool "240 MHz"
+            help
+                运行期上限取 240 MHz：为 UI、TLS 流式音频与可选本地 WakeNet 留出更多余量，代价
+                是电池电流峰值更高。当前没有实测的功耗/性能对比（依据未确认）。
     endchoice
 
     config JULIA_RUNTIME_CPU_MAX_FREQ_MHZ
         int
         default 160 if JULIA_RUNTIME_CPU_MAX_FREQ_160
         default 240 if JULIA_RUNTIME_CPU_MAX_FREQ_240
+        help
+            由上面运行档位 choice 自动派生的 MHz 数值（160 或 240），不是独立可配置项、没有提示
+            文本，仅供 main/hardware/julia_power.c 的 configure_cpu_limit() 读取；取值不取整、
+            不换算，默认 160。需要更低功耗与电流峰值选 160 MHz 档，需要更高语音/TLS 处理能力
+            选 240 MHz 档。
 
     config JULIA_LOCAL_INIT_TIMEOUT_MS
-        int "Local initialization completion deadline (ms)"
+        int "本地初始化完成期限（ms）"
         range 5000 60000
         default 20000
         help
-            Independent of cloud connection timeout. The boot animation takes 3300ms;
-            allow LCD reset/init, audio allocation and bounded I2C transfers plus
-            scheduler margin. A stuck local branch must never open the cloud gate.
+            本地启动分支的完成期限，由 main/app/main.c 交给 main/app/boot_coordinator.c 的
+            boot_coordinator_run()（显示、音频、资源三个分支加资源就绪回调共用）。单位 ms，范围
+            5000～60000，不做取整。默认 20000 属于 Kconfig 默认（示例配置 sdkconfig.defaults 同
+            值），其依据是代码常量：启动动画时长 3300 ms（main/ui/julia_avatar.c 中
+            BOOT_CLOSED_HOLD_MS 300 ms 与 8 次眨眼各 255+120 ms），再为 LCD 复位/初始化、音频
+            内存分配、有界 I2C 传输和调度余量留出空间。与云端连接超时彼此独立；超时会关闭云端
+            门控并进入启动故障处理。调大更容忍慢分支，但卡死的本地分支被判定为故障更晚；调小
+            更快暴露卡死，也更容易把正常慢启动误判为超时。
 
     config JULIA_BOOT_BRIGHTNESS_PERCENT
-        int "Maximum backlight brightness during boot animation (percent)"
+        int "启动动画期间背光最大亮度（percent）"
         range 0 100
         default 50
+        help
+            启动动画期间背光的目标亮度上限，由 main/ui/julia_avatar.c 的
+            julia_avatar_play_boot_sequence() 先用 julia_backlight_set(0) 熄屏，再用
+            julia_backlight_fade_to() 在整段动画里线性升到该值（渐变时长按动画时序推算为
+            300+8×(255+120)=3300 ms）；动画结束或渐亮失败时也用它直接设定
+            （main/behavior/julia_fsm_runtime.c 在 S0 视觉就绪时同样使用该值）。单位 percent，
+            范围 0～100，不做取整。默认 50 属于 Kconfig 默认（示例配置 sdkconfig.defaults 同
+            值），依据是启动动画时序，仓库内没有对应的亮度标定记录。调高开机更醒目，但背光瞬时
+            电流更大；调低更省电，太暗则用户看不出开机画面。
 
     config JULIA_BATTERY_DIAGNOSTICS
-        bool "Log battery voltage at startup checkpoints"
+        bool "在启动检查点记录电池电压"
         default y
         help
-            Read the onboard GPIO8 BAT_ADC divider. Measurements are diagnostic voltage
-            snapshots only and cannot directly report battery current or charge state.
+            总开关：打开后 main/app/main.c 在 app_main 的 power_hold 检查点构造完成后调用
+            julia_battery_log_stage()，并在之后启动电池监测任务，读取板载 GPIO8 的 BAT_ADC 分压
+            （main/hardware/julia_battery.c）。取值只有开/关，默认开（Kconfig 默认，示例配置
+            sdkconfig.defaults 亦为 y）。测量只是诊断用电压快照，不能直接给出电池电流或充电
+            状态，present 也只表示端电压落在合理区间；关闭后 julia_battery_diagnostics_init()
+            与 julia_battery_monitor_start() 直接返回 ESP_ERR_NOT_SUPPORTED，UI 不再有电量提示。
 
     config JULIA_BATTERY_SAMPLE_COUNT
-        int "Samples per battery diagnostic checkpoint"
+        int "每个电池检查点的 ADC 采样次数"
         depends on JULIA_BATTERY_DIAGNOSTICS
         range 4 128
         default 16
+        help
+            每次测电压时连续读取的 ADC 样本个数：main/hardware/julia_battery.c 的 read_voltage()
+            逐个采样（样本间 vTaskDelay(1)），只统计读取成功的样本，再取平均并乘 3 还原电池端
+            电压。单位为样本数，范围 4～128，不做取整；默认 16 与代码内兜底常量
+            CONFIG_JULIA_BATTERY_SAMPLE_COUNT 一致（代码常量；Kconfig 默认与示例配置
+            sdkconfig.defaults 同值），缺少仓库内的标定依据。调大平均更稳、噪声更小，但单次测量
+            更慢会更久占用电池监测任务；调小响应更快、读数抖动更大。
 
     config JULIA_BATTERY_MONITOR_INTERVAL_SECONDS
-        int "Battery monitor interval (seconds)"
+        int "电池监测周期（seconds）"
         depends on JULIA_BATTERY_DIAGNOSTICS
         range 5 3600
         default 10
+        help
+            运行期电池监测任务的测量周期，由 main/hardware/julia_battery.c 的
+            battery_monitor_task() 用 vTaskDelayUntil() 按固定节拍执行，每次测量后更新状态并回调
+            main/ui/julia_avatar.c 的 julia_avatar_set_battery_status()。单位 seconds，范围
+            5～3600，不做取整；默认 10 属于 Kconfig 默认（示例配置 sdkconfig.defaults 同值）。
+            代码内的兜底常量是 30 秒，两者不一致，本仓库没有说明取值依据的标定记录。调大更省电、
+            低电量提示更滞后；调小低电量提示更及时，但任务唤醒与 ADC 采样更频繁，平均电流更高。
 
     config JULIA_BATTERY_PRESENT_MIN_MV
-        int "Minimum plausible connected-battery voltage (mV)"
+        int "可判为已接电池的最低电压（mV）"
         depends on JULIA_BATTERY_DIAGNOSTICS
         range 1000 3500
         default 2500
+        help
+            判断电池是否存在时允许的最低端电压：main/hardware/julia_battery.c 的
+            update_status() 用 raw_mv 同时落在本项与 JULIA_BATTERY_PRESENT_MAX_MV 之间来确定
+            present。单位 mV，范围 1000～3500，不做取整；默认 2500 与代码内兜底常量一致（代码
+            常量；Kconfig 默认与示例配置 sdkconfig.defaults 同值）。代码注释给出的依据是单节锂电
+            池静置电压的保守近似与 ADC 量程（分压后对应约 0.83～1.45 V，6 dB 衰减），仓库内没有
+            该点位与低通权重的标定记录。调高会让偏低电压被判为“无电池”，调低则更易把异常低压判
+            成电池存在；present 只表示电压合理，不等于物理上装着电池。
 
     config JULIA_BATTERY_PRESENT_MAX_MV
-        int "Maximum plausible connected-battery voltage (mV)"
+        int "可判为已接电池的最高电压（mV）"
         depends on JULIA_BATTERY_DIAGNOSTICS
         range 4000 5000
         default 4350
+        help
+            判断电池是否存在时允许的最高端电压，与 JULIA_BATTERY_PRESENT_MIN_MV 构成窗口
+            （main/hardware/julia_battery.c 的 update_status()）。单位 mV，范围 4000～5000，不做
+            取整；默认 4350 与代码内兜底常量一致（代码常量；Kconfig 默认与示例配置
+            sdkconfig.defaults 同值），对应单节锂电池满充上限附近加上分压还原余量。超出窗口的读数
+            被视为不可信：present 置 false、percent 归零并清除低电量锁存。调低更容易把满充或带载
+            抬高的电压判为不可信；调高则会接受偏高读数。
 
     config JULIA_BATTERY_LOW_ENTER_PERCENT
-        int "Enter low-battery state at or below (percent)"
+        int "进入低电量状态的百分比（percent，小于等于）"
         depends on JULIA_BATTERY_DIAGNOSTICS
         range 1 50
         default 15
+        help
+            低电量状态的进入门限：main/hardware/julia_battery.c 的 update_status() 在
+            percent 小于等于该值时置位 s_low_latched，并把状态置为 JULIA_BATTERY_STATE_LOW
+            上报 UI。百分比由静置电压曲线 s_curve[] 插值得到，单位 percent，范围 1～50，不做
+            取整（UI 侧 julia_avatar_set_battery_status() 会再取整到 5% 步进）；默认 15 与代码
+            内兜底常量一致（代码常量；Kconfig 默认与示例配置 sdkconfig.defaults 同值）。该曲线
+            在仓库内找不到标定记录，来源未确认，设备带载时会低估电量。调高更早提示低电量、需要
+            更频繁充电；调低提示更晚，可能来不及充电就关机。
 
     config JULIA_BATTERY_LOW_EXIT_PERCENT
-        int "Leave low-battery state at or above (percent)"
+        int "退出低电量状态的百分比（percent，大于等于）"
         depends on JULIA_BATTERY_DIAGNOSTICS
         range JULIA_BATTERY_LOW_ENTER_PERCENT 80
         default 25
+        help
+            低电量状态的退出门限：main/hardware/julia_battery.c 的 update_status() 在 percent
+            大于等于该值时清除 s_low_latched。单位 percent，范围下限自动取
+            JULIA_BATTERY_LOW_ENTER_PERCENT（保证退出不低于进入）、上限 80，不做取整；默认 25 与
+            代码内兜底常量一致（代码常量；Kconfig 默认与示例配置 sdkconfig.defaults 同值）。
+            与进入门限分开是为了避免百分比在阈值附近抖动时反复切换 NORMAL／LOW；提示语音是一次性
+            标志，退出 LOW 后才会重新武装。调大需要充到更高电量才解除低电量显示，调小则更容易
+            解除但也更容易来回抖动。
 
     config OTA_PRODUCT_ID
-        string "OTA product identifier"
+        string "OTA 产品标识（product）"
         default "native-ota-device"
         help
-            Stable product/model identifier reported to the OTA policy server. The server
-            should use this field to prevent firmware for another product from being offered.
+            作用：main/ota/ota_control_plane.c 的 native_ota_build_check_request() 把它作为
+            ota_check 的 "product" 字段上报，并在解析 ota_check_response 时要求回显值逐字相等，
+            不一致即丢弃整条响应；main/ota/ota_boot_health.c 在新镜像启动验收时要求它非空。
+            main/audio_assets/audio_control_plane.c 也把它用作 audio_check 的 "product"
+            （audio_check 不带 hardware_version），改值前必须同步服务器。
+            单位与取值：字符串，不做取整、区分大小写、不能为空；同一产品的所有设备取同值。
+            默认值依据：依据未确认——Kconfig 默认 "native-ota-device" 是示例占位值，而
+            sdkconfig.defaults/sdkconfig 实际写的是 "julia-ai-device"，两者当前不一致。
+            该值不是数值，没有大小含义：取错会让所有响应因 product 不匹配被丢弃（表现为永不
+            升级），也可能让服务器把其他产品的固件下发给本设备。
 
     config OTA_HARDWARE_VERSION
-        string "Hardware version"
+        string "硬件版本（hardware_version）"
         default "1.0"
         help
-            Hardware revision reported in every OTA check request. Keep this value stable for
-                all devices with the same firmware compatibility requirements.
+            作用：main/ota/ota_control_plane.c 在每条 ota_check 请求里以 "hardware_version"
+            上报，并在解析 ota_check_response 时要求回显值逐字相等，否则丢弃整条响应；
+            main/ota/ota_boot_health.c 在启动验收时要求它非空（与 OTA_PRODUCT_ID 一起检查）。
+            单位与取值：字符串，不做取整、区分大小写、不能为空；同一套固件兼容性要求的所有
+            设备必须取同一个值。
+            默认值依据：Kconfig 默认 "1.0"，sdkconfig.defaults 未写该项、当前 sdkconfig 取
+            默认值；为什么从 "1.0" 起算未找到依据（依据未确认）。
+            该值不是数值，没有大小含义：改成与服务器策略不同的值会让全部检查响应因
+            hardware_version 不匹配被丢弃（设备表现为不再升级）；同产品内各批次取值不一致会
+            让服务器无法按硬件版本区分清单。
 
     config OTA_IMAGE_PROJECT_NAME
-        string "Expected image project name"
+        string "期望的镜像工程名（project_name）"
         default "julia_fused_base"
         help
-            Expected esp_app_desc project_name embedded in OTA images. This prevents an
-            image built for another ESP-IDF project from being installed accidentally.
-            Must match the project() name in the root CMakeLists.txt.
+            作用：main/ota/ota_stability.c 的 ota_stability_validate_image_header() 用
+            strncmp() 比较待写入镜像 esp_app_desc 里的 project_name（比较长度上限就是该字段的
+            32 字节），不匹配返回 ESP_ERR_INVALID_VERSION 并判为终端失败——既不写 OTA 分区，
+            也不产生可续传断点。预检和断点复检都走同一函数。
+            单位与取值：字符串，不做取整；必须与根 CMakeLists.txt 的 project() 名一致。
+            默认值依据：代码常量——Kconfig 默认 "julia_fused_base" 与根 CMakeLists.txt 的
+            project() 名一致（sdkconfig.defaults 同值）。
+            改动后果：改成别的工程名会让本工程自产的镜像全部在下载校验阶段被拒（每次升级都
+            失败并上报镜像头无效）；改成他项目名会让不属于本工程的固件被写进本机 OTA 分区。
 
     config OTA_ALLOWED_URL_HOSTS
-        string "Allowed OTA URL hosts"
+        string "OTA HTTPS URL 主机允许列表"
         default ""
         help
-            Comma-separated exact host names allowed for OTA HTTPS URLs. Leave empty only
-            for local development; production builds should set this to the approved CDN
-            or firmware service host names.
+            作用：main/network/download_protocol.c 的 download_url_host_allowed() 被两处共用：
+            main/ota/ota_control_plane.c 校验 ota_check_response 的 url，
+            main/audio_assets/audio_control_plane.c 校验语音素材下载 url。只接受 https://，
+            主机名按大小写不敏感但"整段精确相等"比较（不做后缀/子域匹配），端口、路径、查询、
+            片段都不参与比较；带 userinfo 的 URL 直接拒绝。
+            单位与取值：逗号分隔的主机名列表，允许空格与制表符分隔，不做取整。
+            默认值依据：Kconfig 默认空串，示例配置 sdkconfig 当前为 8.133.215.254；文档明确
+            要求生产必须显式配置（docs/BUILD_AND_RELEASE.md），因此留空的依据是"开发默认"。
+            安全含义：空列表等于不校验主机，任何主机的 https URL 都会被接受，这不是白名单；
+            它只约束主机名，不校验路径、制品身份或签名。当前未启用 Secure Boot，因此把本项
+            留空等于把"装什么固件"完全交给服务器与 TLS 证书链。
+            增加主机名会放宽可下载来源；删减会让合法 CDN 被拒（表现为主机校验失败、下载不
+            启动），生产环境应等于服务器实际使用的主机集合。
 
     config OTA_MIN_FREE_HEAP
-        int "Minimum free heap during boot self-test"
+        int "OTA 提交与启动验收的最小空闲 heap（byte）"
         range 4096 1048576
         default 16384
         help
-            Minimum free 8-bit-capable heap required before a pending image is confirmed.
+            作用：同一阈值被两处共用。1) main/ota/ota_stability.c 的
+            ota_stability_pre_commit_check() 在"提交前"检查，不足则返回
+            NATIVE_OTA_FAILURE_PRECONDITION_LOW_POWER——保留 READY_TO_COMMIT 记录、本次不
+            提交，上报状态映射为 DEFERRED，等下一轮再试（错误码复用"低电量"分类，不代表电池
+            电量不足）。2) main/ota/ota_boot_health.c 的 ota_boot_health_check() 在"新镜像首次
+            启动验收"时检查，不足则验收失败并回滚；无法回滚时进入 OTA 安全模式。
+            调整本项必须同时评估"提交前"和"启动验收"两个阶段。
+            单位与取值：byte，取的是 heap_caps_get_free_size(MALLOC_CAP_8BIT) 的"总空闲量"，
+            含 PSRAM 等 8-bit 可达堆，不检查最大连续块；整数、不取整。
+            Kconfig 范围 4096～1048576，默认 16384。
+            默认值依据：依据未确认——代码里没有等价常量，文档/审查记录也没有实机实测值；
+            当前 sdkconfig 取默认 16384。
+            调大后果：堆稍紧时提交被反复推迟（S8 迟迟不重启，甚至永远提交不了），启动验收也
+            更容易判新镜像不健康并触发回滚；调小后果：堆接近耗尽时仍允许切换分区重启，风险是
+            重启后初始化失败、回滚或直接进安全模式（此时现场只能人工处理）。
 
     config OTA_ENABLE_GPIO_DIAGNOSTIC
-        bool "Use GPIO diagnostic during OTA boot self-test"
+        bool "启动自检中使用 GPIO 诊断"
         default y
         help
-            Keep the example GPIO diagnostic as an optional test switch. It is combined
-            with local health checks and is not replaced by Wi-Fi or MQTT connectivity.
+            作用：编译期开关。开启时 main/ota/ota_boot_flow.c 的 ota_boot_flow_run() 在本次
+            启动处于 PENDING_VERIFY（新镜像首次启动验收）时，于外设初始化之前调用
+            diagnostic() 一次：把 CONFIG_EXAMPLE_GPIO_DIAGNOSTIC 指定引脚配为输入+内部上拉，
+            阻塞等待约 5 s 后读电平，高电平判为通过、低电平立即上报并回滚（无法回滚则进安全
+            模式）。该引脚当前与 LED 复用，诊断结束会 gpio_reset_pin()。
+            注意：ota_boot_flow_complete() 调用的 ota_boot_health_check() 传入
+            include_gpio_diagnostic=false，所以验收阶段不会再跑 GPIO 诊断——它只在这一个早期
+            时机生效，并非与本地健康检查合并执行。它也不测试 Wi-Fi/MQTT 连通性。
+            单位与取值：只有开/关，默认开（Kconfig 默认，sdkconfig.defaults 与当前 sdkconfig
+            同为 y）。GPIO 编号由另一个配置 CONFIG_EXAMPLE_GPIO_DIAGNOSTIC（默认 4）决定。
+            改动的后果：关掉后新镜像首次启动不再看该引脚，纯软件自检失败仍会回滚，但"外部拉低
+            电平否决启动"的测试手段失效（该分支被编译期移除）；保持开启则每次验收启动多阻塞
+            约 5 s，且该引脚在启动早期被独占重配。
 
     config OTA_TEST_BUILD
-        bool "TEST ONLY: enable OTA boot fault injection"
+        bool "仅测试：启用 OTA 启动故障注入"
         default n
         help
-            Internal gate for test-only OTA fault injection. Set this only from a
-            dedicated test sdkconfig fragment; production defaults must leave it off.
+            作用：测试专用门禁，C 代码里没有任何引用；它在 Kconfig 中唯一的用处是作为
+            OTA_TEST_FORCE_BOOT_HEALTH_FAIL 的 depends on 条件，防止故障注入被误开在生产配置。
+            单位与取值：只有开/关，默认关（Kconfig 默认；sdkconfig.defaults 未生成该项，当前
+            sdkconfig 为未设置）。
+            安全含义：仅供测试构建使用，不可用于生产——它打开的是"人为让新镜像启动验收失败"
+            的能力，误开后所有 OTA 安装的镜像都会在首次启动验收被判不健康并回滚。
+            开启不影响其他参数，只是让 OTA_TEST_FORCE_BOOT_HEALTH_FAIL 可见可生效；关闭（默认）
+            时后者在 Kconfig 中不可见，也不会被编入固件。
 
     config OTA_TEST_FORCE_BOOT_HEALTH_FAIL
-        bool "TEST ONLY: force OTA boot health check failure"
+        bool "仅测试：强制 OTA 启动健康检查失败"
         depends on OTA_TEST_BUILD
         default n
         help
-            Forces the product boot-health hook to fail while validating a
-            PENDING_VERIFY image. This exercises the normal rollback path without
-            requiring a GPIO action. Enable only from a dedicated test build.
+            作用：编译期开关。开启后 main/ota/ota_boot_health.c 的
+            ota_boot_health_product_check()（弱符号默认实现，产品代码可用强符号替换）恒定返回
+            false 并打印 "TEST ONLY" 错误日志；该钩子是 ota_boot_flow_complete() 的验收条件
+            之一，返回 false 即走正常回滚路径（先上报 rolled_back，再调用
+            esp_ota_mark_app_invalid_rollback_and_reboot()），因此可以不用任何 GPIO 动作就
+            演练整条回滚链路。
+            单位与取值：只有开/关，默认关；必须同时打开 OTA_TEST_BUILD，否则本项在 Kconfig
+            中不可见（depends on）。默认值依据：Kconfig 默认 n（测试专用，sdkconfig.defaults
+            未生成该项）。
+            安全含义：仅测试用，不可用于生产——开启后任何通过 OTA 安装的新镜像都无法通过首次
+            启动验收，会被立即判定无效并回滚。
+            开启/关闭不影响其他参数；关闭后该钩子返回 true，验收结论只由本地健康检查与其他
+            产品钩子决定。
 
     config OTA_REQUIRE_SIGNED_IMAGE
-        bool "Require Secure Boot signed OTA image"
+        bool "要求 OTA 镜像通过 Secure Boot 签名校验"
         default n
         help
-            Require production Secure Boot configuration for OTA image verification. Enable
-            only together with the project's Secure Boot provisioning plan.
+            作用：编译期开关。开启后 main/ota/ota_stability.c 的 ota_stability_pre_commit_check()
+            在每次提交前调用 esp_secure_boot_enabled()，未启用 Secure Boot 时返回
+            NATIVE_OTA_FAILURE_IMAGE_VALIDATE_FAILED，镜像不会被设为下次启动分区（记录保留为
+            READY_TO_COMMIT，下一轮再判定）。它只读取"当前启动是否启用 Secure Boot"，不校验
+            本镜像的签名细节，也不会自行打开 Secure Boot。
+            单位与取值：只有开/关，默认关（Kconfig 默认；sdkconfig.defaults 未生成该项，当前
+            sdkconfig 为未设置）。
+            安全含义：默认关表示固件来源只靠 TLS 与 OTA_ALLOWED_URL_HOSTS 约束，设备侧没有
+            签名校验——服务器或 TLS 信任链被攻破即可刷入任意固件。开启它是"只装签名固件"的
+            必要条件但不充分，必须先按项目的 Secure Boot 烧录计划写好 eFuse（不可逆）。
+            开启后果：未配置 Secure Boot 的设备会永远卡在"下载校验通过但无法提交"；关闭后果：
+            保持现状并接受上述风险。
 
     config OTA_CHECK_INTERVAL_SECONDS
-        int "OTA check interval (seconds)"
+        int "OTA 主动检查周期（s）"
         range 60 86400
         default 21600
         help
-            Base interval between active OTA checks. The default is 6 hours. A check is also
-            sent immediately after the MQTT connection becomes ready.
+            作用：main/network/mqtt_comm.c 的 mqtt_next_check_delay() 用它安排每次收到合法
+            response 后的下一次周期检查（实际等待 = 本值 + 0～OTA_CHECK_JITTER_SECONDS 抖动）。
+            另有三处约束：只在行为 FSM 为 S3、服务状态 ONLINE 且没有本地播放时才真正发出
+            ota_check（否则每秒重试等待窗口）；MQTT 重连并完成全部 critical 订阅后立即检查
+            一次（同样等 S3 窗口）；跨休眠保留已排定的期限，不会每次唤醒都检查。响应超时后的
+            短重试与恢复检查由 OTA_CHECK_RESPONSE_*／OTA_CHECK_RECOVERY_* 独立控制。
+            单位与取值：s（秒级整数，内部再换算为 ms/tick，不做小数延时），Kconfig 范围
+            60～86400，默认 21600（6 小时）。
+            默认值依据：文档实测值——docs/PROTOCOL.md 第 7.1 节写明"默认周期为 21600 秒"，
+            docs/STANDBY_OFFLINE_DIAGNOSIS_20260918.md 同值；Kconfig 默认与 sdkconfig 一致。
+            调大后果：设备主动发现新固件更慢（服务器仍可用 ota_notify 立即唤醒检查）；调小
+            后果：检查更频繁、更耗电，服务器与 MQTT 流量随设备数近似线性上升——抖动只打散
+            时刻，不降低总量。
 
     config OTA_CHECK_JITTER_SECONDS
-        int "Maximum OTA check jitter (seconds)"
+        int "OTA 检查最大随机抖动（s）"
         range 0 3600
         default 1800
         help
-            Random delay added to each periodic check. This spreads requests from a large fleet
-            over time and reduces synchronized load on the OTA policy server.
+            作用：mqtt_comm.c 的 mqtt_next_check_delay() 在固定周期上叠加
+            jitter = esp_random() % (本值 + 1)，即取值 0～本值秒（含两端）再加到周期上。抖动
+            只作用于正常周期检查，不影响短重试、恢复检查，也不影响 ota_notify 触发的立即检查。
+            单位与取值：s（整数、按秒取模，不产生小数延时），Kconfig 范围 0～3600，默认 1800；
+            取 0 时该分支在编译期被移除，周期严格固定。
+            默认值依据：文档实测值——docs/PROTOCOL.md 第 7.1 节写明"附加 0–1800 秒抖动"，
+            当前 sdkconfig 同值。
+            调大后果：请求在更长时间窗内散开，整点或大规模同时重启后的服务器峰值更低，代价是
+            新固件生效的最坏延迟变大（最坏为周期 + 本值）；调小后果：抖动不足以打散同步行为，
+            终端容易同时请求，但长期平均请求量不变（周期本身不受本项影响）。
 
     config OTA_CHECK_RESPONSE_TIMEOUT_SECONDS
-        int "OTA check response timeout (seconds)"
+        int "OTA 检查响应等待超时（s）"
         range 1 300
         default 15
         help
-            Time to wait for the matching ota_check_response before a short retry.
+            作用：mqtt_comm.c 的 mqtt_ota_check_task() 发布 ota_check 后用它作为等待
+            ota_check_response 的窗口：窗口内收到合法响应立即结束等待；等待超时按
+            OTA_CHECK_RESPONSE_RETRY_COUNT 做短重试，重试耗尽进入恢复模式；窗口内收到非法
+            响应会立即（不等超时）安排一次短重试；MQTT 断线/重连会复位本次等待与重试计数。
+            它不约束固件下载：下载阶段的数据读空闲上限是代码常量 OTA_MAX_EMPTY_READS
+            （600 次 × 10 ms ≈ 6 s），与本项无关。
+            单位与取值：s（换算为 tick，秒级取整、不做小数），Kconfig 范围 1～300，默认 15。
+            默认值依据：文档实测值——docs/PROTOCOL.md 第 7.1 节"默认响应等待 15 秒"，
+            sdkconfig.defaults 与当前 sdkconfig 同值。
+            调大后果：弱网下更少把慢响应当成无响应、短重试更少，但服务器真宕机时要更久才进入
+            恢复模式；调小后果：容易误判超时、频繁短重试并更快进入恢复模式，请求量略增。
 
     config OTA_CHECK_RESPONSE_RETRY_COUNT
-        int "OTA check response retry count"
+        int "OTA 检查响应超时后的短重试次数"
         range 0 5
         default 2
         help
-            Number of short retries after a response timeout. Exhaustion enters bounded
-            background recovery checks and never interrupts local application work.
+            作用：mqtt_comm.c 的 mqtt_ota_check_task() 用它限制"响应超时或非法响应"后的短重试
+            次数：每次超时先比对本计数，未达上限就再发一次检查（延时由
+            OTA_CHECK_RESPONSE_RETRY_BASE_SECONDS／MAX_SECONDS 计算），达到上限则清零计数并进入
+            恢复模式（等待由 OTA_CHECK_RECOVERY_* 控制）。它也用于非法响应分支；收到合法响应
+            或 MQTT 新会话时计数清零。短重试不会中断本地业务，也不限制恢复模式下的持续检查。
+            单位与取值：次数（整数、不取整），Kconfig 范围 0～5，默认 2；取 0 表示超时后不做
+            任何短重试、直接进入恢复模式。
+            默认值依据：当前 sdkconfig.defaults 与 sdkconfig 均显式写 2，与 Kconfig 默认一致；
+            为什么取 2 次没有代码常量或实测依据（依据未确认）。
+            调大后果：单轮无响应时会在短延时内多次重试，弱网下更快回到正常周期，代价是服务器
+            抖动时请求量成倍增加、更耗电；调小后果：更快进入递增的恢复等待，服务器短暂无响应
+            时检查间隔明显拉长。
 
     config OTA_CHECK_RESPONSE_RETRY_BASE_SECONDS
-        int "OTA check retry base delay (seconds)"
+        int "OTA 检查短重试的基础延时（s）"
         range 1 60
         default 2
         help
-            Initial delay for timed-out OTA check retries; later retries use bounded
-            exponential backoff with a small random jitter.
+            作用：mqtt_comm.c 的 mqtt_check_retry_delay() 以本值作为第 1 次短重试的延时，之后
+            每多一次重试翻倍，并钳制到 OTA_CHECK_RESPONSE_RETRY_MAX_SECONDS；最后再叠加
+            0～1000 ms 随机抖动（该抖动是代码常量，不可配置）。发布 ota_check 本身失败
+            （mqtt_publish_ota_check() 返回错误）时也按第 1 次重试的延时等待。
+            单位与取值：s（换算为 tick，秒级取整、抖动另加毫秒），Kconfig 范围 1～60，默认 2。
+            默认值依据：sdkconfig.defaults 与当前 sdkconfig 均写 2，与 Kconfig 默认一致；
+            取 2 s 的量化依据未找到（依据未确认）。
+            调大后果：短重试之间的等待更长，服务器短暂抖动时的总恢复时间变长；调小后果：重试
+            更密（最快 1 s + 0～1000 ms），网络或服务器仍不可用时更耗电，也更容易撞上服务端限流。
 
     config OTA_CHECK_RESPONSE_RETRY_MAX_SECONDS
-        int "OTA check retry maximum delay (seconds)"
+        int "OTA 检查短重试的延时上限（s）"
         range 1 300
         default 10
         help
-            Upper bound for an OTA check retry backoff delay.
+            作用：mqtt_comm.c 的 mqtt_check_retry_delay() 用它作为指数翻倍的上限：延时从
+            OTA_CHECK_RESPONSE_RETRY_BASE_SECONDS 起逐次翻倍，达到本值后不再增长；抖动部分不受
+            本值约束，所以实际等待可能比本值多 0～1000 ms。本项只约束短重试，不约束正常周期
+            检查和恢复模式。
+            单位与取值：s（换算为 tick，秒级取整），Kconfig 范围 1～300，默认 10。
+            注意：Kconfig 未强制"基础延时 ≤ 本值"。若把基础延时调到比本值大，翻倍循环不再执行，
+            上限实际失效——每次短重试都按基础延时等待。
+            默认值依据：sdkconfig.defaults 与当前 sdkconfig 均写 10，与 Kconfig 默认一致；取
+            10 s 的量化依据未找到（依据未确认）。
+            调大后果：短重试阶段最长可拖到本值，进入恢复模式更慢，但更省电、更不压服务器；
+            调小后果：翻倍很快触顶，重试更密集，恢复模式前的请求量更高。
 
     config OTA_CHECK_RECOVERY_INITIAL_SECONDS
-        int "OTA check recovery initial delay (seconds)"
+        int "OTA 检查恢复模式的初始等待（s）"
         range 1 OTA_CHECK_RECOVERY_MAX_SECONDS
         default 30
         help
-            First background recovery wait after OTA check short retries are exhausted.
-            Each failed recovery check doubles the wait, up to the maximum below. The
-            device keeps checking until a valid ota_check_response arrives.
+            作用：mqtt_comm.c 的 mqtt_recovery_wait_seconds()／mqtt_recovery_check_delay() 在
+            短重试耗尽后进入恢复模式：第 1 次恢复等待用本值，之后每步翻倍并钳制到
+            OTA_CHECK_RECOVERY_MAX_SECONDS，达到上限后以该固定周期继续检查，直到收到合法响应
+            （update=false 也算恢复成功），随后立刻回到正常检查周期。恢复等待发生在检查任务
+            内部，不中断本地业务；重连建立新会话会重置恢复步数。
+            单位与取值：s（整数、不取整），Kconfig 范围 1～OTA_CHECK_RECOVERY_MAX_SECONDS，
+            默认 30。范围引用了最大等待符号，所以本值不会超过最大值；反过来若把最大值调到低于
+            本值，mqtt_recovery_wait_seconds() 会把本值直接钳到最大值（从最大值开始恢复）。
+            默认值依据：sdkconfig.defaults 与当前 sdkconfig 均写 30，与 Kconfig 默认一致；取
+            30 s 的量化依据未找到（依据未确认）。
+            调大后果：服务器宕机时更省电、请求更少，但服务器恢复后最坏要多等一轮才被发现；
+            调小后果：恢复探测更密，长时间不可用时耗电和请求量更高。
 
     config OTA_CHECK_RECOVERY_MAX_SECONDS
-        int "OTA check recovery maximum delay (seconds)"
+        int "OTA 检查恢复模式的最大等待（s）"
         range 1 86400
         default 300
         help
-            Upper bound for background recovery waits. After the policy server outage,
-            the device checks at most this often and immediately returns to the normal
-            interval once a valid response is received.
+            作用：mqtt_comm.c 的 mqtt_recovery_wait_seconds() 用它钳制恢复模式的翻倍延时：达到
+            本值后每一步都返回本值，设备以该固定周期继续检查（既不会无限加速，也不会彻底沉默），
+            收到合法响应后立即回到正常检查周期。本项同时是
+            OTA_CHECK_RECOVERY_INITIAL_SECONDS 的 range 上限。
+            单位与取值：s（整数、不取整），Kconfig 范围 1～86400，默认 300。
+            默认值依据：sdkconfig.defaults 与当前 sdkconfig 均写 300，与 Kconfig 默认一致；取
+            300 s 的量化依据未找到（依据未确认）。
+            另有一个代码常量 MQTT_RECOVERY_STEP_CAP(64) 限制恢复步数，只用于防止计数器无意义
+            增长，不影响本值生效。
+            调大后果：策略服务器长期宕机时检查更省电，但服务器恢复后最坏要等本值才被主动发现
+            （若 ota_notify 仍可达则能立即唤醒）；调小后果：恢复同步更快，代价是长期不可用期间
+            请求与耗电更高。
 
     config OTA_DOWNLOAD_RETRY_THRESHOLD
-        int "OTA download consecutive network failure threshold"
+        int "OTA 下载连续网络失败阈值（次）"
         range 1 20
         default 3
         help
-            Consecutive DNS, connection, TLS transport or HTTP read failures before a
-            temporary cooldown. This never quarantines an artifact.
+            作用：main/ota/ota_engine.c 在下载任务结束时区分两类失败：镜像头/摘要/写入等终端
+            失败走 ota_quarantine_record() 永久隔离 artifact；DNS、连接、TLS 传输、HTTP 读失败
+            等网络类失败只把 ota_resume 记录里的 retry_count 加 1（成功完成下载则不增加）。下次
+            处理同一 artifact 时若 retry_count 已达到本阈值，先进入 COOLING_DOWN 并等待一段冷却
+            （由 OTA_DOWNLOAD_COOLDOWN_* 计算），冷却结束清零 retry_count 后继续尝试。
+            因此本项只降低重试频率，不会隔离 artifact；retry_count 未达阈值时才复用 Flash 前缀
+            续传（见 ota_engine.c 的恢复分支）。
+            单位与取值：次数（整数、不取整），Kconfig 范围 1～20，默认 3；阈值以宏
+            OTA_STATE_STORE_NETWORK_RETRY_THRESHOLD 绑定本配置（main/ota/ota_state_store.h）。
+            默认值依据：sdkconfig.defaults 与当前 sdkconfig 均写 3，与 Kconfig 默认一致；取 3 次
+            的量化依据未找到（依据未确认；ota_state_store.h 注释称达到后"隔离 artifact"，与实际
+            冷却行为不符）。
+            调大后果：连续失败更多次才降温，网络抖动期间重试更积极、更耗电；调小后果：更容易
+            进入冷却，弱网下升级完成时间被拉长，但请求量与流量更小。
 
     config OTA_DOWNLOAD_COOLDOWN_BASE_SECONDS
-        int "OTA download cooldown base (seconds)"
+        int "OTA 下载冷却的基础延时（s）"
         range 1 3600
         default 60
         help
-            First cooldown after the threshold. Later cooldowns double, capped below.
+            作用：main/ota/ota_engine.c 的 ota_cooldown_seconds() 以本值作为第 1 次冷却的时长；
+            每次进入冷却 cooldown_count 加 1，延时按 2 的幂翻倍并钳制到
+            OTA_DOWNLOAD_COOLDOWN_MAX_SECONDS。冷却在 OTA 任务内部用 vTaskDelay() 等待，等待前
+            先把 COOLING_DOWN 记录落盘（掉电重启后从持久化的冷却继续，不会立刻重试），期间新
+            清单会被"已有任务"拒绝，不会并发写同一分区。
+            单位与取值：s（整数、不取整，内部换算为 tick），Kconfig 范围 1～3600，默认 60。
+            默认值依据：sdkconfig.defaults 与当前 sdkconfig 均写 60，与 Kconfig 默认一致；取
+            60 s 的量化依据未找到（依据未确认）。
+            调大后果：网络失败后更长时间不重试，弱网下升级更慢但更省电；调小后果：冷却更快
+            结束，连续失败时请求更频繁，可能加剧流量与服务端压力（仍受最大值约束）。
 
     config OTA_DOWNLOAD_COOLDOWN_MAX_SECONDS
-        int "OTA download cooldown maximum (seconds)"
+        int "OTA 下载冷却的延时上限（s）"
         range 1 86400
         default 3600
         help
-            Upper bound for a network-failure cooldown.
+            作用：main/ota/ota_engine.c 的 ota_cooldown_seconds() 用它作为冷却翻倍的上限，并用
+            MIN() 保证返回值不超过本值；本项同时也是 OTA_DOWNLOAD_COOLDOWN_BASE_SECONDS 的隐含
+            上限（Kconfig 未强制"基础延时 ≤ 本值"，若基础延时更大，实际延时会被压到本值）。
+            单位与取值：s（整数、不取整），Kconfig 范围 1～86400，默认 3600。
+            默认值依据：sdkconfig.defaults 与当前 sdkconfig 均写 3600，与 Kconfig 默认一致；取
+            3600 s 的量化依据未找到（依据未确认）。
+            调大后果：持续网络故障时设备最长可静默本值（默认 1 小时）不重试，更省电但恢复更慢；
+            调小后果：冷却很快触顶，长期故障下重试与流量更高。冷却不改变 artifact 的有效性，
+            到期后仍会尝试续传。
 
     config COMM_HEARTBEAT_INTERVAL_SECONDS
-        int "Communication heartbeat/keepalive interval (seconds)"
+        int "MQTT keepalive 心跳间隔（s）"
         range 5 3600
         default 60
         help
-            MQTT protocol keepalive interval. The MQTT client uses this value to detect
-            stale links without relying on OTA traffic.
+            作用：main/network/mqtt_comm.c 的 mqtt_comm_start() 把本值写入
+            esp_mqtt_client_config_t 的 session.keepalive（disable_keepalive=false），作为 MQTT
+            CONNECT 的 keepalive：空闲且无其他报文时 ESP-MQTT 按它发送 PINGREQ，broker 通常在
+            1.5 倍本值内收不到任何报文后断开连接。它只作用于 MQTT 控制面（OTA 检查/响应/通知/
+            状态与语音作业命令），不影响 WSS 的 PING 与断链判定。
+            单位与取值：s（整数、不取整），Kconfig 范围 5～3600，默认 60。
+            默认值依据：Kconfig 默认 60，sdkconfig.defaults 与当前 sdkconfig 同值；取 60 s 的
+            量化依据未找到（依据未确认，属常见的 keepalive 经验值）。
+            调大后果：空闲期 PINGREQ 更少、流量与唤醒次数略降，但半开链路（NAT 映射超时、
+            路由丢状态）发现更晚，控制命令可能长时间收不到；调小后果：更快发现死链并重连，
+            代价是保活报文更频繁、耗电略增。本项不改变任何消息的 QoS 与持久化语义。
 
     config COMM_RECONNECT_INTERVAL_SECONDS
-        int "Communication reconnect interval (seconds)"
+        int "MQTT 断线重连等待（s）"
         range 1 3600
         default 10
         help
-            Delay before MQTT automatic reconnect attempts. The ESP-IDF client keeps
-            reconnect enabled; this value controls its retry interval.
+            作用：main/network/mqtt_comm.c 的 mqtt_comm_start() 把它换算成
+            network.reconnect_timeout_ms = 本值 * 1000（disable_auto_reconnect=false），是
+            ESP-MQTT 在 MQTT_EVENT_DISCONNECTED 之后到下一次重连尝试的固定等待，不做指数
+            退避。mqtt_request_reconnect()（critical 订阅调用失败、critical SUBACK 超时或被拒）
+            也回到这条等待，因此它也决定"主动重建连接"的节拍。
+            单位与取值：s（整数、不取整，内部换算为 ms），Kconfig 范围 1～3600，默认 10。
+            默认值依据：Kconfig 默认 10，sdkconfig.defaults 与当前 sdkconfig 同值，且与
+            ESP-MQTT 内置默认 MQTT_RECON_DEFAULT_MS(10000 ms) 一致（代码常量）。
+            调大后果：断线后 MQTT 控制面恢复更慢，OTA 检查/状态上报与语音作业命令的空窗更长，
+            但重连风暴与耗电更小；调小后果：恢复更快，broker 持续不可用时重连与 TLS 握手更
+            频繁。它不改变 Wi-Fi 自身的退避（见 NETWORK_WIFI_RETRY_*）。
 
     config NETWORK_WIFI_BACKUP_SSID
-        string "Backup Wi-Fi SSID"
+        string "备用 Wi-Fi SSID（第二个网络）"
         default ""
         help
-            Optional second network. Keep the primary network at boot, then
-            alternate profiles after failed connection attempts. Stay on the
-            current network while connected.
+            作用：main/network/network_lifecycle.c 的可选第二个 Wi-Fi profile。启动先用主网络
+            （CONFIG_EXAMPLE_WIFI_SSID），连续失败后按主→备用→第三个轮换，已联网时不主动切换；
+            选中本 profile 时用本项与 NETWORK_WIFI_BACKUP_PASSWORD 覆盖 wifi_config_t 的
+            sta.ssid/sta.password 后重连。主网络永远保留在 profile 0。
+            单位与取值：string（SSID 按原字节使用，不换算、不取整）；空串表示不启用该 profile。
+            写入驱动前校验长度不超过 sta.ssid/sta.password 容量，超限则整条备用 profile 被忽略
+            并打印告警（不是截断）。密码只在设备配置内保存，运行日志不打印。
+            默认值依据：Kconfig 默认空串，sdkconfig.defaults 未写本项（依据未确认，按未配置
+            处理；本机 sdkconfig 中的实际 SSID 属私有配置，不得写入帮助或提交入库）。
+            填写/加长后果：弱网或异地环境更可能连上，但每次轮换都要多一次扫描与关联的时间；
+            留空/删除后果：只剩主网络可用，主网络不可达时设备只能持续退避重连。
 
     config NETWORK_WIFI_BACKUP_PASSWORD
-        string "Backup Wi-Fi password"
+        string "备用 Wi-Fi 密码"
         default ""
         help
-            Password for the backup network. Never emitted in runtime logs.
+            作用：NETWORK_WIFI_BACKUP_SSID 对应网络的密码，只在 profile 1（备用网络）被选中时
+            使用；SSID 为空时本值不生效。备用 profile 沿用主网络的扫描/PMF/SAE 字段
+            （threshold.authmode=WIFI_AUTH_OPEN、pmf capable 但非 required、sae_pwe_h2e=BOTH），
+            只替换 ssid/password/bssid_set/channel，因此 WPA2-PSK、WPA3-SAE 与过渡模式均可协商。
+            单位与取值：string（原样字节，不换算、不取整）；空串表示开放网络（无密码）。
+            长度超过 sta.password 容量（64 字节）时整条备用 profile 被忽略并告警。
+            默认值依据：Kconfig 默认空串，sdkconfig.defaults 未写本项（依据未确认）。
+            安全约束：生产凭证不得入库——不要把它写进 sdkconfig.defaults、提交信息、日志或
+            发布包；应通过受保护的 provisioning/本机 sdkconfig 注入（见 docs/BUILD_AND_RELEASE.md）。
+            填写/加长后果：与 SSID 一起决定备用网络能否关联成功；留空后果：只能用于开放网络，
+            对有密码的热点会一直关联失败并继续轮换。
 
     config NETWORK_WIFI_THIRD_SSID
-        string "Third Wi-Fi SSID"
+        string "第三个 Wi-Fi SSID"
         default ""
         help
-            Optional third network, tried after the backup network. Empty
-            profiles are skipped. A connected profile remains selected.
+            作用：main/network/network_lifecycle.c 的可选第三个 Wi-Fi profile，只在主网络与备用
+            网络之后被轮换到；选中时用本项与 NETWORK_WIFI_THIRD_PASSWORD 覆盖 sta.ssid/
+            sta.password。空 profile 会被跳过，不会占用一次关联尝试；已连接的网络保持选中。
+            单位与取值：string（SSID 原样字节，不换算、不取整）；空串表示不启用。
+            长度超过 sta.ssid 容量（32 字节）时整条 profile 被忽略并打印告警（不是截断）。
+            默认值依据：Kconfig 默认空串，sdkconfig.defaults 未写本项（依据未确认，按未配置
+            处理；本机 sdkconfig 中的实际 SSID 属私有配置，不得写入帮助或提交入库）。
+            填写/加长后果：多一层弱网兜底，代价是每次全部失败后多一次扫描与关联时间；留空
+            后果：轮换只在主网络与备用网络之间进行，两者都不可达时只能退避重连。
 
     config NETWORK_WIFI_THIRD_PASSWORD
-        string "Third Wi-Fi password"
+        string "第三个 Wi-Fi 密码"
         default ""
         help
-            Password for the third network. Never emitted in runtime logs.
+            作用：NETWORK_WIFI_THIRD_SSID 对应网络的密码，只在 profile 2（第三个网络）被选中
+            时使用；SSID 为空时本值不生效。
+            单位与取值：string（原样字节，不换算、不取整）；空串表示开放网络。长度超过
+            sta.password 容量（64 字节）时整条 profile 被忽略并告警。
+            默认值依据：Kconfig 默认空串，sdkconfig.defaults 未写本项（依据未确认）。
+            安全约束：生产凭证不得入库——不要写进 sdkconfig.defaults、日志、提交信息或发布包，
+            应通过受保护的 provisioning 流程或本机 sdkconfig 注入。
+            填写/加长后果：决定第三个网络能否关联成功；留空后果：仅适用于开放网络。
 
     config NETWORK_WIFI_RETRY_BASE_MS
-        int "Wi-Fi reconnect initial delay (ms)"
+        int "Wi-Fi 重连退避起点（ms）"
         range 250 60000
         default 1000
         help
-            Initial delay after a failed Wi-Fi association. Subsequent attempts
-            use exponential backoff and continue indefinitely.
+            作用：main/network/network_lifecycle.c 的 network_backoff_delay_ms() 用本值作为第 1
+            次关联失败后的等待时间（attempt=0 时直接返回本值），之后每次失败把等待翻倍，直到
+            NETWORK_WIFI_RETRY_MAX_MS。Wi-Fi 与各 IP 就绪服务槽位各持有独立失败计数，互不影响；
+            取得 IP 后计数清零（下一次失败重新从本值开始）。失败次数封顶 31 次移位以保证计算
+            O(1)，长期离线不会让一次退避计算随历史次数增长。
+            单位与取值：ms（整数、不取整，比较用 esp_timer 单调微秒），Kconfig 范围 250～60000，
+            默认 1000。
+            默认值依据：Kconfig 默认 1000，sdkconfig.defaults 与当前 sdkconfig 同值，文档
+            docs/BUILD_AND_RELEASE.md 写"从约 1 秒指数退避到最多 60 秒"（文档一致）；取 1000 ms
+            的量化依据未找到（依据未确认，属工程整定值，不是协议要求）。
+            调大后果：弱网下每次关联失败后等待更久、耗电更低，但恢复联网更慢、语音/OTA 空窗
+            更长；调小后果：重连更积极、恢复更快，缺点是路由不可达时扫描与关联次数显著增加。
 
     config NETWORK_WIFI_RETRY_MAX_MS
-        int "Wi-Fi reconnect maximum delay (ms)"
+        int "Wi-Fi 重连退避上限（ms）"
         range 1000 600000
         default 60000
         help
-            Upper bound for Wi-Fi reconnect delays. A router outage never makes
-            the application give up permanently or retry in a tight loop.
+            作用：network_backoff_delay_ms() 用它封顶每次退避等待；翻倍过程中一旦 delay 超过
+            本值的一半就直接取本值，因此实际等待不会超过本值。它同时是 Wi-Fi 与所有 IP 就绪
+            服务槽位退避的共同上限，路由器长时间断电也不会让应用永久放弃或陷入紧凑重试。
+            单位与取值：ms（整数、不取整），Kconfig 范围 1000～600000，默认 60000。代码额外
+            用 MAX(base, max) 兜底：若本值小于 NETWORK_WIFI_RETRY_BASE_MS，实际上限被抬到基点。
+            默认值依据：Kconfig 默认 60000，sdkconfig.defaults 与当前 sdkconfig 同值，与
+            docs/BUILD_AND_RELEASE.md 的"最多 60 秒"一致（文档一致）；量化依据未确认。
+            调大后果：持续离线时重试间隔更长、更省电，但网络恢复后的自愈更慢；调小后果：
+            长期故障下重试更频繁、更耗电，也更快回到联网状态。
 
     config NETWORK_WIFI_RETRY_JITTER_PERCENT
-        int "Wi-Fi reconnect jitter (percent)"
+        int "Wi-Fi 重连退避的负向抖动（percent）"
         range 0 50
         default 20
         help
-            Randomly subtract up to this percentage from each capped backoff
-            delay, spreading reconnection attempts across devices.
+            作用：对每个已算出的退避等待做"上限内侧扣减"：jitter_range = delay * 本值 / 100
+            （整数除法、向下取整），再减去 esp_random() % (jitter_range + 1)，因此实际等待落在
+            [delay - jitter_range, delay] 区间内，永远不超过 NETWORK_WIFI_RETRY_MAX_MS。目的是
+            让多台设备（或同一设备的多条失败路径）错峰，避免同时冲击同一个 AP。
+            单位与取值：percent（整数、向下取整），Kconfig 范围 0～50，默认 20；0 表示关闭抖动
+            （#if 0 分支不编译抖动代码）。注意它是负向抖动，不是 ±双向。
+            默认值依据：Kconfig 默认 20，sdkconfig.defaults 与当前 sdkconfig 同值，与
+            docs/BUILD_AND_RELEASE.md 的"减去最多 20% 的随机抖动"一致（文档一致）；量化依据未确认。
+            调大后果：错峰更强，但单次等待可能被削到 (1-本值) 比例，重连更早、均匀性更差；
+            调小后果：错峰效果变弱，多设备更容易同步重试。它不改变退避上限本身。
 
     config NETWORK_WIFI_CONNECT_TIMEOUT_MS
-        int "Wi-Fi connection attempt watchdog (ms)"
+        int "Wi-Fi 单次连接尝试看门狗（ms）"
         range 1000 120000
         default 20000
         help
-            Maximum time to wait after esp_wifi_connect() succeeds for either
-            GOT_IP or STA_DISCONNECTED. Expiry cancels the stale attempt and
-            returns it to the normal bounded retry schedule.
+            作用：network_lifecycle.c 在调用 esp_wifi_connect() 之前先用本值预约看门狗截止点，
+            然后在 WIFI_EVENT_STA_DISCONNECTED 或 IP_EVENT_STA_GOT_IP 到达时取消；到期仍未
+            收到任一事件，就判定本次尝试卡死：取消 pending 状态、请求轮换 Wi-Fi profile、按
+            退避重新排期，并调用 esp_wifi_disconnect() 让驱动回到可重连状态。
+            单位与取值：ms（整数、不取整，内部换算为 esp_timer 微秒），Kconfig 范围 1000～
+            120000，默认 20000。
+            默认值依据：Kconfig 默认 20000，sdkconfig.defaults 与当前 sdkconfig 同值，与
+            docs/BUILD_AND_RELEASE.md 的"默认 20 秒"一致（文档一致）；量化依据未确认。
+            调大后果：慢关联的 AP 更可能自然完成，但真正卡死时要等更久才轮换到备用网络；
+            调小后果：卡死发现更快、轮换更早，但正常的慢扫描/慢握手可能被误判为卡死而中断。
 
     config NETWORK_WIFI_MAX_TX_POWER_DBM
-        int "Maximum Wi-Fi transmit power (dBm)"
+        int "Wi-Fi 最大发射功率上限（dBm）"
         range 8 20
         default 14
         help
-            Limit RF transmit current during battery diagnosis. Lower values reduce
-            range; raise this toward 20 dBm if the access point is not nearby.
+            作用：network_lifecycle.c 在 esp_wifi_start() 成功后调用
+            esp_wifi_set_max_tx_power(本值 * 4)——该 API 的单位是 0.25 dBm，所以这里做乘 4 换算；
+            设置失败只打印告警、不阻止联网。它限制 RF 发射电流，属于电池供电诊断期间的省流手段。
+            单位与取值：dBm（整数、不做四舍五入，驱动侧以 0.25 dBm 为单位），Kconfig 范围
+            8～20，默认 14。ESP32-S3 驱动可接受的有效区间是 8～84（2～21 dBm），本项范围在其内。
+            默认值依据：Kconfig 默认 14，sdkconfig.defaults 与当前 sdkconfig 同值，与
+            docs/BUILD_AND_RELEASE.md 的"默认 14 dBm"一致（文档一致）；取 14 dBm 的量化依据未找到
+            （依据未确认，属工程整定值）。
+            调大后果：覆盖范围与穿墙能力更好、弱信号下更少重传，但发射电流与电池峰值电流上升；
+            调小后果：更省电省流，但离 AP 较远或干扰大时丢包、掉线率上升。
 
     config NETWORK_WIFI_INITIAL_DIAGNOSTIC_SCAN
-        bool "Run an additional blocking AP scan before first connect"
+        bool "首次连接前额外做一次阻塞式 AP 扫描（诊断）"
         default n
         help
-            The Wi-Fi driver already scans as part of connection. Enable this only when
-            the extra AP listing is needed for diagnostics; it lengthens the high-current
-            startup interval.
+            作用：打开后 network_lifecycle.c 在第一次真正发起 esp_wifi_connect() 之前调用
+            network_log_initial_scan()：以 show_hidden=true 主动扫描一次，打印 AP 数量与（最多
+            32 个）热点列表，用于区分"找不到热点"与"认证/关联失败"。最多执行一次（函数入口即
+            置已扫标志），扫描失败也只告警并继续连接；Wi-Fi 驱动本就会在连接过程中扫描，本项
+            只是额外多扫一次。取值只有开/关。
+            单位与取值：bool（开/关，非数值、不取整）；默认关（Kconfig 默认，sdkconfig.defaults
+            与当前 sdkconfig 同为 n）。
+            默认值依据：Kconfig 默认 n，sdkconfig.defaults 与当前 sdkconfig 同值，与
+            docs/BUILD_AND_RELEASE.md 的"额外阻塞式 AP 列表扫描默认关闭"一致（文档一致）。
+            打开后果：启动早期多一段高电流、未联网的时间（扫描期间要分配 AP 记录缓冲，容量按
+            发现数上限 32 控制），换来可读的热点清单；关闭后果：启动更快、电流峰值更低，但
+            "没有该 SSID"只能从驱动日志推断。
 
     config OTA_PROGRESS_STEP_PERCENT
-        int "Minimum OTA progress step (percent)"
+        int "OTA 下载进度的最小上报步长（percent）"
         range 1 100
         default 5
         help
-            Emit a downloading progress event when progress advances by at least this
-            percentage. Progress is kept in RAM and is never written to NVS.
+            作用：main/ota/ota_report.c 的 native_ota_report_progress() 先算
+            percent = bytes_downloaded * 100 / image_size（整数除法、向下取整，不四舍五入；下载
+            完成时强制为 100%），当 percent 比上次上报值至少大本值、或距上次上报已过
+            OTA_PROGRESS_INTERVAL_SECONDS、或 percent 达到 100 时，才提交一条 downloading 进度。
+            三个条件是"或"关系，任一满足即发送。
+            单位与取值：percent（整数、向下取整），Kconfig 范围 1～100，默认 5。进度事件非关键
+            事件：只占用一个可覆盖的 RAM 槽位，不写 NVS；新一轮下载从 0 重建进度基线。
+            默认值依据：Kconfig 默认 5，sdkconfig.defaults 与当前 sdkconfig 同值；取 5% 的依据
+            未找到（依据未确认）。
+            调大后果：进度上报条数变少、流量与服务器写库压力更小，但云端/界面看到的进度更粗；
+            调小后果：上报更密（取 1 时每涨 1% 就可能发一条），条数仍受时间间隔条件限制。
 
     config OTA_PROGRESS_INTERVAL_SECONDS
-        int "Maximum OTA progress interval (seconds)"
+        int "OTA 下载进度的最长上报间隔（s）"
         range 1 3600
         default 10
         help
-            Emit a downloading progress event when this much time has elapsed since the
-            previous progress event, even if the percentage step has not been reached.
+            作用：main/ota/ota_report.c 的 native_ota_report_progress() 在距上次进度上报达到本值
+            后强制提交一条 downloading 进度，即使百分比还没涨到 OTA_PROGRESS_STEP_PERCENT；两者
+            是"或"关系，任一满足即发送。它保证慢速网络下进度不会长时间停更。
+            单位与取值：s（内部换算为 ms 后比较，整数、不取整），Kconfig 范围 1～3600，默认 10；
+            每次上报后计时重置，因此最密就是每本值一条。
+            默认值依据：Kconfig 默认 10，sdkconfig.defaults 与当前 sdkconfig 同值；取 10 s 的
+            量化依据未找到（依据未确认）。
+            调大后果：慢速下载时的进度更新更稀，服务器看到的"最后进度时间"间隔更大；调小后果：
+            进度上报频率下限更高（最坏每本值一条），流量略增。它不改变进度事件非关键、不写 NVS
+            的性质。
 
     config OTA_REPORT_QUEUE_DEPTH
-        int "OTA status critical queue depth"
+        int "OTA 关键状态 RAM 队列深度（条）"
         range 4 16
         default 8
         help
-            Bounded number of critical OTA status events held before they enter the
-            ESP-MQTT asynchronous outbox. Progress uses one replaceable RAM slot.
+            作用：main/network/mqtt_comm.c 用 xQueueCreate(CONFIG_OTA_REPORT_QUEUE_DEPTH, ...)
+            创建关键（critical）状态事件的 RAM 队列 s_status_queue，并另建一张
+            MQTT_STATUS_TRACK_SIZE = 本值 + 4 的 PUBACK 关联表，覆盖"msg_id 尚未关联进来"的并发
+            窗口。进度事件不进入该队列，只占用一个可覆盖的 RAM 槽位。
+            单位与取值：条（整数、不取整），Kconfig 范围 4～16，默认 8。
+            默认值依据：Kconfig 默认 8，sdkconfig.defaults 与当前 sdkconfig 同值；取 8 条的量化
+            依据未找到（依据未确认）。
+            关键点：这只是通信层的 RAM 队列，与 ota_report 的 NVS 持久化队列无关——后者深度固定
+            为代码常量 NATIVE_OTA_REPORT_PENDING_MAX(8)，不随本项变化，两条队列不联动：本项调大
+            不会增加可持久化的关键事件数，调小也不会改变 NVS 中终态/重启事件替换最早记录的策略。
+            RAM 队列满或抢不到锁时事件仍留在持久化队列里，由后续重投补齐。
+            调大后果：每槽占一条 native_ota_report_message_t 的 RAM，但突发关键事件更少被拒；
+            调小后果：省 RAM，突发时更容易回落到"稍后由 NVS 重投"。
 
     choice COMM_DEVICE_AUTH_MODE
-        prompt "Device authentication mode"
+        prompt "MQTT 控制面设备认证方式"
         default COMM_DEVICE_AUTH_NONE
         help
-            Select the credential carried by the MQTT control connection. Token mode uses
-            MQTT username/password fields.
-            Certificate mode uses the optional mTLS PEM files embedded by CMake.
+            作用：选择 main/network/mqtt_comm.c 的 mqtt_get_device_auth() 随 MQTT 控制连接
+            （OTA 检查/响应/通知/状态与语音作业命令）发出的凭证形式，结果只作为指针传入
+            esp_mqtt_client_config_t.credentials，不复制、不打印秘密内容。可选四种：无应用凭证
+            （仅 mqtts:// 服务器证书）、用户名/密码、Bearer token、客户端证书 mTLS。注意它与
+            WSS 用的 Bearer token 是两套独立选择，但 COMM_DEVICE_AUTH_TOKEN_VALUE 同时是 WSS
+            的首选 token（见该配置项说明）。
+            单位与取值：单选（四选一），无单位、不取整；Kconfig 默认 NONE，但 sdkconfig.defaults
+            与当前 sdkconfig 已选择用户名/密码（严格多设备）。凭据来源只有两处：本机 sdkconfig
+            或构建期嵌入（证书模式）；生产凭证不得入库。
+            严格模式（CONFIG_JULIA_MULTI_DEVICE_ENABLE=y，当前 sdkconfig.defaults 为 y）会拒绝
+            NONE（ESP_ERR_INVALID_STATE）、拒绝用户名/密码回退旧全局字段、缺少必需凭据时直接
+            ESP_ERR_INVALID_ARG，MQTT 启动失败即无法上线；此时设备只登记 voice/<device_id>/vcmd
+            这一条语音订阅，且它是 critical 订阅（SUBACK 未确认会阻塞就绪判定并触发重建连接）。
+            选 NONE 后果：任何能连上 broker 的客户端都可冒充本设备，仅适合受控开发；选带凭据
+            的模式后果：broker 可按账号/token 做 ACL 与身份绑定，代价是必须补齐凭据、否则启动
+            即失败（不是静默降级）。
 
         config COMM_DEVICE_AUTH_NONE
-            bool "No application credential (TLS server authentication only)"
+            bool "无应用凭证（仅 TLS 服务器认证）"
+            help
+                作用：mqtt_get_device_auth() 把 MQTT username/password 都置为 NULL，CONNECT 不带
+                应用凭证，只依赖 COMM_MQTT_BROKER_URI 为 mqtts:// 时的服务器证书校验（当前还
+                设置 skip_cert_common_name_check=true，属开发限制，不等于完整服务器身份校验）。
+                凭证来源：无。broker 端只能靠 client_id（等于设备 ID）与网络 ACL 区分设备。
+                单位与取值：bool（开/关）。默认值依据：Kconfig 默认（default COMM_DEVICE_AUTH_NONE），
+                但 sdkconfig.defaults 与当前 sdkconfig 已改为用户名/密码，故本档不是当前生效值。
+                与严格模式冲突：CONFIG_JULIA_MULTI_DEVICE_ENABLE=y 时本档会让 MQTT 启动返回
+                ESP_ERR_INVALID_STATE（"Multi-device MQTT requires device-bound credentials"），
+                设备不会联网。选它的后果：调试最省事但身份可被冒充；换成带凭据档位的后果：
+                必须先注入凭证，否则同样无法启动。
 
         config COMM_DEVICE_AUTH_USERNAME_PASSWORD
-            bool "Username and password"
+            bool "用户名与密码"
+            help
+                作用：mqtt_get_device_auth() 取 COMM_DEVICE_AUTH_USERNAME 作 username、
+                COMM_DEVICE_AUTH_PASSWORD 作 password。严格模式（JULIA_MULTI_DEVICE_ENABLE=y）只
+                用这两个显式设备字段，任一为空即 ESP_ERR_INVALID_ARG（拒绝回退旧的
+                COMM_MQTT_USERNAME/PASSWORD）；非严格模式才允许在两者为空时回退到旧的 MQTT 专用
+                字段。两个字段都为空（且无回退）时启动失败并打印"credentials are empty"。
+                凭证来源：本机 sdkconfig 或受保护的 provisioning 流程；生产凭证不得入库。
+                单位与取值：bool（开/关）。默认值依据：sdkconfig.defaults 选择本档（严格多设备），
+                Kconfig 默认则是 NONE，二者不一致——以实际 sdkconfig 为准。
+                选它的后果：broker 可按账号做 ACL 与按设备绑定主题；选其他档位的后果：依赖
+                token 或客户端证书，本档字段被忽略。
 
         config COMM_DEVICE_AUTH_TOKEN
-            bool "Bearer/token credential"
+            bool "Bearer/token 凭证"
+            help
+                作用：mqtt_get_device_auth() 把 COMM_DEVICE_AUTH_TOKEN_USERNAME 作为 MQTT
+                username、COMM_DEVICE_AUTH_TOKEN_VALUE 作为 MQTT password（也是 CONNECT 密码
+                字段承载 token 的常见写法）；TOKEN_VALUE 为空时返回 ESP_ERR_INVALID_ARG 并打印
+                "device token is empty"，启动失败。
+                凭证来源：COMM_DEVICE_AUTH_TOKEN_VALUE，必须经受保护的 provisioning/本机
+                sdkconfig 注入；生产凭证不得入库（不要写进 sdkconfig.defaults、日志或发布包）。
+                单位与取值：bool（开/关）。默认值依据：Kconfig 默认 NONE，sdkconfig.defaults 也
+                未选择本档（依据：两份默认配置均未启用，具体 token 值属私有配置）。
+                关联影响：同一 TOKEN_VALUE 还被 WSS 优先当作 Authorization: Bearer token
+                （严格模式下 WSS 只用它），所以开启本档等于把该值同时用于 MQTT 与 WSS；选它的
+                后果：一个 token 泄露即两条通道同时失守，需按通道分别轮换。
 
         config COMM_DEVICE_AUTH_CERTIFICATE
-            bool "Client certificate (mTLS)"
+            bool "客户端证书（mTLS）"
+            help
+                作用：mqtt_get_device_auth() 返回 CMake 嵌入的客户端证书与私钥指针
+                （server_certs/device_client_cert.pem、server_certs/device_client_key.pem），
+                username/password 保持 NULL。仅在选择本档时 CMake 才嵌入这两个文件，文件缺失会
+                在构建/链接阶段失败；服务端需配置对应的 CA 才能完成 mTLS。
+                凭证来源：仓库外的受保护文件（device_client_cert.pem / device_client_key.pem），
+                私钥不得入库；Kconfig 侧没有可填的字符串。
+                单位与取值：bool（开/关）。默认值依据：Kconfig 默认 NONE，sdkconfig.defaults 与
+                当前 sdkconfig 均未选择本档（依据未确认是否已在 broker 上验证）。
+                选它的后果：认证强度高于 token，但必须同时准备好证书文件与服务端 CA，且
+                docs/MULTIDEVICE_CONTRACT.md 记录证书对接尚未在云端验证；选其他档位的后果：
+                本档相关的嵌入文件不参与构建。
     endchoice
 
     config COMM_DEVICE_AUTH_TOKEN_VALUE
-        string "Device bearer/token value"
+        string "设备 Bearer/token 值"
         default ""
         help
-            Device token used for control-plane authentication. Keep this value out of
-            sdkconfig.defaults and inject it through a protected provisioning/build flow.
+            作用：本值有两个消费方——（1）认证模式选 COMM_DEVICE_AUTH_TOKEN 时，它作为 MQTT
+            CONNECT 的 password（username 取 COMM_DEVICE_AUTH_TOKEN_USERNAME），为空则
+            mqtt_get_device_auth() 返回 ESP_ERR_INVALID_ARG、MQTT 启动失败；（2）无论认证模式选
+            哪一档，main/network/wss/wss_transport.c 的 wss_token() 都优先把它当 WSS 的
+            Authorization: Bearer token（严格模式 JULIA_MULTI_DEVICE_ENABLE=y 时只用它，
+            非严格模式下为空才回退 CONFIG_WSS_TOKEN）。空或含非法字符的 WSS token 会在 TLS
+            建连前被本地拒绝并进入重试退避。
+            单位与取值：string（原样字节，不换算、不取整）；空串表示未配置。它同时决定 MQTT
+            （仅在 TOKEN 档）与 WSS 两条通道的身份。
+            默认值依据：Kconfig 默认空串；sdkconfig.defaults 写空串（占位），实际 token 只存在于
+            本机 sdkconfig（私有配置，依据类别：本机配置，非可入库默认值）。
+            安全约束：生产凭证不得入库——严禁把真实 token 写进本文件、help、sdkconfig.defaults、
+            日志、提交信息或发布包，应通过受保护的 provisioning 流程注入；换 token 时两条通道
+            需同步更新。填写后果：两条通道都能认证但仍需服务端校验；留空后果：非严格模式下
+            WSS 回退到 CONFIG_WSS_TOKEN，TOKEN 档则直接启动失败。
 
     config COMM_DEVICE_AUTH_TOKEN_USERNAME
-        string "Token username"
+        string "token 认证的 MQTT 用户名"
         default "token"
         help
-            MQTT username sent together with COMM_DEVICE_AUTH_TOKEN_VALUE. Some brokers
-            use a fixed username such as token or the product name before validating the
-            token in the password field.
+            作用：仅在认证模式为 COMM_DEVICE_AUTH_TOKEN 时作为 MQTT CONNECT 的 username 发出；
+            broker 常用固定用户名（如 token 或产品名）表示"密码字段里放的是 token"。
+            单位与取值：string（原样字节，不换算、不取整）；空串表示不带用户名，是否可接受由
+            broker 决定。它在运行时原样发送，不做大小写或前缀处理。
+            默认值依据：Kconfig 默认 "token"（代码常量式的固定占位），sdkconfig.defaults 与当前
+            sdkconfig 同值；该字符串是普遍约定而非本项目测量值（依据：broker 约定，未经本项目
+            实测核对）。
+            改动后果：改成 broker 约定的用户名才能通过认证；填错后果：broker 会以认证失败拒绝
+            连接，设备表现为反复重连而非离线告警。
 
     config COMM_DEVICE_AUTH_USERNAME
-        string "Device authentication username"
+        string "设备认证用户名"
         default ""
         help
-            Generic username used by the MQTT control client in Username and password
-            mode. Keep production credentials out of sdkconfig.defaults.
+            作用：main/network/mqtt_comm.c 的 mqtt_get_device_auth() 在认证模式为
+            COMM_DEVICE_AUTH_USERNAME_PASSWORD 时把它作为 MQTT username。严格模式
+            （JULIA_MULTI_DEVICE_ENABLE=y）只认本字段，为空即 ESP_ERR_INVALID_ARG（拒绝回退到
+            旧的 COMM_MQTT_USERNAME）；非严格模式下为空时才回退旧字段，回退后仍为空则启动失败。
+            凭证来源：本机 sdkconfig 或受保护的 provisioning 流程，按设备/设备组分配。
+            单位与取值：string（原样字节，不换算、不取整）；空串表示未配置。
+            默认值依据：Kconfig 默认空串，sdkconfig.defaults 未写本项（依据未确认）；当前
+            sdkconfig 中是按设备生成的实际用户名，属私有配置。
+            安全约束：生产凭证不得入库——不要写进本文件、help、sdkconfig.defaults、日志或发布包。
+            填写后果：broker 可据此做 ACL 与设备绑定；留空后果：严格模式下 MQTT 启动失败，
+            非严格模式下退化为尝试旧字段或匿名以外的路径（仍受密码是否为空约束）。
 
     config COMM_DEVICE_AUTH_PASSWORD
-        string "Device authentication password"
+        string "设备认证密码"
         default ""
         help
-            Generic password used by the MQTT control client in Username and password
-            mode. Keep production credentials out of sdkconfig.defaults.
+            作用：认证模式为 COMM_DEVICE_AUTH_USERNAME_PASSWORD 时作为 MQTT CONNECT 的 password，
+            与 COMM_DEVICE_AUTH_USERNAME 成对使用。严格模式只认本字段，为空即
+            ESP_ERR_INVALID_ARG；非严格模式下为空才回退 COMM_MQTT_PASSWORD，回退后仍为空则
+            启动失败。代码只保留字符串指针，不复制、不打印内容。
+            凭证来源：本机 sdkconfig 或受保护的 provisioning 流程，按设备/设备组分配。
+            单位与取值：string（原样字节，不换算、不取整）；空串表示未配置。
+            默认值依据：Kconfig 默认空串，sdkconfig.defaults 未写本项（依据未确认）；当前
+            sdkconfig 中的实际密码属私有配置，不得写入帮助或提交入库。
+            安全约束：生产凭证不得入库——严禁写入 sdkconfig.defaults、日志、提交信息或发布包；
+            轮换时需与 broker 侧同步，并注意 MQTT 与用户名/密码字段也要保持一致。
+            填写后果：与用户名一起通过 broker 认证；留空后果：严格模式下 MQTT 启动失败。
 
     comment "Certificate mode uses fixed protected files: server_certs/device_client_cert.pem and server_certs/device_client_key.pem"
         depends on COMM_DEVICE_AUTH_CERTIFICATE
@@ -491,93 +1192,198 @@ menu "Example Configuration"
         default "mqtts://8.133.215.254:1883" if JULIA_LEGACY_SERVER_PORTS
         default "mqtts://8.133.215.254:11883"
         help
-            MQTT broker URI. Production devices should use mqtts:// and a broker
-            certificate trusted by the ESP-IDF certificate bundle.
+            作用：直接写入 esp_mqtt_client_config_t.broker.address.uri，决定 scheme、主机与端口。
+            mqtts:// 时 mqtt_comm_start() 额外装载内嵌信任锚 server_certs/ca_cert.pem 并设置
+            skip_cert_common_name_check=true（自签 CA 的开发限制，不等于完整服务器身份校验）；
+            mqtt:// 为明文，完全不加 TLS 校验字段，也不能与校验字段共存。client_id 取设备 ID，
+            与该 URI 无关。
+            单位与取值：URI 字符串（原样使用，不换算、不取整、不自动补默认端口），必须是
+            mqtt:// 或 mqtts:// 形式；端口由字符串显式给出。两条 default 由
+            JULIA_LEGACY_SERVER_PORTS 决定：打开时用旧端口 1883，否则用 11883。
+            默认值依据：Kconfig 默认（新端口 11883，与 docs/PROTOCOL.md 的端点基线一致）；
+            sdkconfig.defaults 与当前 sdkconfig 同值。主机/端口属本机私有配置，不得写入帮助。
+            调大（换更远的 broker 或改成明文）：换成 mqtt:// 会丢掉传输加密与服务器认证，仅限
+            受控局域网；换远端地址会拉长 RTT 与重连时间。调小无意义；保持 mqtts:// 且端口与
+            服务端 ACL 一致才可能上线，URI 写错表现为反复连接失败而非离线提示。
 
     config COMM_MQTT_USERNAME
-        string "MQTT username"
+        string "MQTT 专用用户名（旧字段回退）"
         default ""
         help
-            Per-device or per-device-group MQTT username. Used when the generic device
-            authentication mode is Username and password. Store production credentials
-            through a protected provisioning flow instead of committing them to source.
+            作用：仅在认证模式为 COMM_DEVICE_AUTH_USERNAME_PASSWORD、且非严格模式
+            （JULIA_MULTI_DEVICE_ENABLE=n）且 COMM_DEVICE_AUTH_USERNAME 为空时，才被
+            mqtt_get_device_auth() 当作 MQTT username 回退使用；严格模式完全不读本字段。
+            凭证来源：本机 sdkconfig 或受保护的 provisioning 流程，用于兼容旧 sdkconfig。
+            单位与取值：string（原样字节，不换算、不取整）；空串表示无回退值。
+            默认值依据：Kconfig 默认空串，sdkconfig.defaults 与当前 sdkconfig 同值（依据：旧字段
+            保留但不使用，属兼容位）。
+            安全约束：生产凭证不得入库——不要写进本文件、help、sdkconfig.defaults、日志或发布包。
+            填写后果：旧配置在非严格模式下仍能认证，代价是两套字段并存、容易配错；留空后果：
+            严格与非严格模式都必须依赖 COMM_DEVICE_AUTH_USERNAME。
 
     config COMM_MQTT_PASSWORD
-        string "MQTT password"
+        string "MQTT 专用密码（旧字段回退）"
         default ""
         help
-            MQTT password for development or provisioning. Do not commit production
-            passwords to sdkconfig.defaults. Token mode uses the generic token value
-            instead of this field. This field remains as a backward-compatible fallback
-            when generic device authentication credentials are empty.
+            作用：与 COMM_MQTT_USERNAME 成对的旧字段，仅在认证模式为
+            COMM_DEVICE_AUTH_USERNAME_PASSWORD、非严格模式、且 COMM_DEVICE_AUTH_PASSWORD 为空时
+            作为 password 回退；严格模式完全不读本字段。TOKEN 档不使用本字段（改用
+            COMM_DEVICE_AUTH_TOKEN_VALUE）。
+            凭证来源：本机 sdkconfig 或受保护的 provisioning 流程，用于兼容旧 sdkconfig。
+            单位与取值：string（原样字节，不换算、不取整）；空串表示无回退值。
+            默认值依据：Kconfig 默认空串，sdkconfig.defaults 与当前 sdkconfig 同值（依据：旧字段
+            保留但不使用，属兼容位）。
+            安全约束：生产密码不得入库——严禁写入 sdkconfig.defaults、日志、提交信息或发布包。
+            填写后果：旧配置可继续使用；留空后果：认证完全依赖 COMM_DEVICE_AUTH_PASSWORD。
 
     config COMM_MQTT_OTA_CHECK_TOPIC
-        string "MQTT OTA check request topic"
+        string "MQTT OTA 检查请求主题（公共，设备→服务器）"
         default "/device/ota/check"
         help
-            Common topic to which devices publish small ota_check requests. Requests are
-            sent with QoS 1 and are not retained.
+            作用：mqtt_comm.c 的 mqtt_publish_ota_check() 用它作为 OTA 检查请求的发布主题（设备→
+            服务器）。这是全机型共用的公共主题，不自动拼接 device_id，设备身份在 JSON 载荷的
+            device_id 字段里；发布用 QoS 1、retain=false（esp_mqtt_client_enqueue 的第 5/6 参数为
+            1、0），避免新上线设备收到过期请求；发布失败由后续周期检查或重连检查自然恢复。
+            单位与取值：string（完整主题，原样使用，不换算、不自动拼接）；默认 "/device/ota/check"，
+            sdkconfig.defaults 与当前 sdkconfig 同值（依据：Kconfig 默认；同时与 docs/PROTOCOL.md
+            §6.1 主题表一致）。
+            改动后果：与服务器订阅的公共检查主题不一致时，OTA 检查请求无人接收，设备永远停在
+            当前版本（表现为"检查不到更新"而非报错）；保持一致才能被服务端接收。
 
     config COMM_MQTT_OTA_RESPONSE_TOPIC_PREFIX
-        string "MQTT OTA response topic prefix"
+        string "MQTT OTA 响应主题前缀（服务器→设备）"
         default "/device/ota/response"
         help
-            Prefix for server decisions. The device appends its stable device ID and
-            subscribes to <prefix>/<device_id>, so responses are not broadcast fleet-wide.
+            作用：mqtt_comm_start() 用 snprintf 生成 <前缀>/<device_id> 作为 OTA 响应下行订阅
+            （服务器→设备），并注册为 critical=true、订阅 QoS 1；全部 critical 订阅的 SUBACK 到
+            齐才置就绪位、才允许发布检查请求。device_id 由 eFuse 基础 MAC 生成（esp- 加 12 位
+            小写十六进制），既不自动追加到本项、也不能在本项里预填。
+            单位与取值：string（前缀，原样使用，不以 / 结尾）；默认 "/device/ota/response"，
+            sdkconfig.defaults 与当前 sdkconfig 同值（依据：Kconfig 默认；与 docs/PROTOCOL.md
+            §6.1 表一致）。生成的完整主题受 MQTT_TOPIC_SIZE 缓冲约束，超长会使 MQTT 启动返回
+            ESP_ERR_INVALID_SIZE。
+            改动后果：前缀与服务器发布主题不一致时，本设备收不到响应、OTA 无法开始（且因订阅
+            失败/无 SUBACK 会判为连接不完整而反复重建）；改短/改简单不会提升性能，只是运维对齐。
 
     config COMM_MQTT_OTA_NOTIFY_TOPIC_PREFIX
-        string "MQTT OTA notify topic prefix"
+        string "MQTT OTA 通知主题前缀（服务器→设备）"
         default "/device/ota/notify"
         help
-            Prefix for server ota_notify messages. The device subscribes to
-            <prefix>/<device_id> and never starts a download directly from a notify.
+            作用：mqtt_comm_start() 生成 <前缀>/<device_id> 作为 ota_notify 下行订阅（服务器→
+            设备），同样注册为 critical=true、订阅 QoS 1。收到合法通知只置显式检查标志并唤醒
+            OTA 检查任务，绝不从通知直接开始下载。
+            单位与取值：string（前缀，原样使用，不以 / 结尾）；默认 "/device/ota/notify"，
+            sdkconfig.defaults 与当前 sdkconfig 同值（依据：Kconfig 默认；与 docs/PROTOCOL.md
+            §6.1 表一致）。
+            改动后果：前缀不一致时服务器无法主动催促升级，只能等设备自身周期检查（默认 21600 s
+            量级），升级时延显著变长；保持一致即可保持推送式触发。
 
     config COMM_MQTT_OTA_STATUS_TOPIC_PREFIX
-        string "MQTT OTA status topic prefix"
+        string "MQTT OTA 状态主题前缀（设备→服务器）"
         default "/device/ota/status"
         help
-            Prefix for device OTA lifecycle status events. The device publishes to
-            <prefix>/<device_id> with QoS 1 and retain disabled.
+            作用：mqtt_comm_start() 生成 <前缀>/<device_id> 作为设备发布 OTA 生命周期与进度事件的
+            主题（设备→服务器）：关键事件与进度都经 mqtt_status_task 以 QoS 1、retain=false 发布
+            （enqueue 参数 1、0），关键事件要等对应 PUBACK 才从 NVS 待发队列删除。
+            单位与取值：string（前缀，原样使用，不以 / 结尾）；默认 "/device/ota/status"，
+            sdkconfig.defaults 与当前 sdkconfig 同值（依据：Kconfig 默认；与 docs/PROTOCOL.md
+            §6.1 表一致）。
+            改动后果：前缀不一致时服务器收不到状态与进度，无法跟踪升级结果（设备侧仍会认为
+            发布成功，因为 broker 已 PUBACK）；保持一致是服务端判断升级成败的前提。
 
     config COMM_MQTT_OTA_NOTIFY_THROTTLE_SECONDS
-        int "MQTT OTA notify throttle (seconds)"
+        int "MQTT ota_notify 去重节流窗口（s）"
         range 0 3600
         default 5
         help
-            Ignore valid duplicate ota_notify messages received within this interval.
+            作用：mqtt_handle_notify_json() 在 schema/字段校验通过之后、唤醒检查任务之前，用
+            esp_timer 单调时间比较 now - 上次接受时间；小于本值*1000 就丢弃该条（打印
+            "Ignoring throttled duplicate ota_notify"）。因此它只压制重复的合法通知，非法通知
+            仍会被拒并记日志；0 表示关闭节流（代码要求 throttle_ms > 0 才进入判断）。
+            单位与取值：s（整数、不取整，内部换算为 ms），Kconfig 范围 0～3600，默认 5；
+            起始状态"从未收到"用 -1 表示，第一条通知不会被节流。
+            默认值依据：Kconfig 默认 5，sdkconfig.defaults 与当前 sdkconfig 同值，且与
+            docs/PROTOCOL.md §7.4"默认节流 5 秒"一致（文档一致）。
+            调大后果：服务器重试的重复通知被更多次忽略，检查请求更少、更省流量，但真实的新任务
+            通知若落在窗口内会延迟；调小后果：更及时响应服务器催促，代价是短时间内的重复通知
+            会反复触发检查。它不影响通知的订阅 QoS 与 critical 语义。
 
     config COMM_MQTT_SUBACK_TIMEOUT_SECONDS
-        int "MQTT OTA subscription ACK timeout (seconds)"
+        int "MQTT critical 订阅 SUBACK 超时（s）"
         range 1 120
         default 15
         help
-            Maximum time to wait for both response and notify subscription acknowledgements.
-            A missing acknowledgement rebuilds the MQTT connection.
+            作用：MQTT_EVENT_CONNECTED 后 mqtt_comm_start() 的注册表逐条以 QoS 1 订阅，并为
+            所有 critical 主题（OTA 响应、OTA 通知；严格模式下还含 voice/<device_id>/vcmd）
+            设置截止时间 now + 本值*1000。到期仍有 critical 主题未确认，检查任务调用
+            mqtt_request_reconnect()，按 COMM_RECONNECT_INTERVAL_SECONDS 等待后重建连接；
+            订阅调用本身失败（msg_id < 0）或 SUBACK 被拒也走同一条重建路径。
+            单位与取值：s（整数、不取整，内部换算为 ms 的单调时间），Kconfig 范围 1～120，
+            默认 15。
+            默认值依据：Kconfig 默认 15，sdkconfig.defaults 与当前 sdkconfig 同值，且与
+            docs/PROTOCOL.md §7.1"默认响应等待 15 秒"一致（文档一致）。
+            调大后果：broker 慢响应时更少误判重建、连接更稳，但真正半就绪（永不回 SUBACK）时
+            设备在更长时间里既不发检查也不订阅成功；调小后果：半就绪被发现更快，弱网下更容易
+            反复重建连接、放大握手与流量。
 
     config COMM_MQTT_VOICE_CMD_TOPIC
-        string "MQTT voice command topic"
+        string "MQTT 语音命令主题（非严格模式的完整主题）"
         default "voice/esp32s3/vcmd"
         help
-            Topic on which the device receives plain-text voice commands
-            (FILE_SEND SD:/<name>, MIC_START, MIC_STOP). Commands are routed to
-            the voice_service module and never touch the OTA control plane.
+            作用：仅在关闭严格多设备（CONFIG_JULIA_MULTI_DEVICE_ENABLE=n）时生效：
+            voice_service_init() 把本字符串作为完整下行主题注册（服务器→设备，订阅 QoS 1），
+            且标为 non-critical——订阅失败或 SUBACK 缺失不影响 OTA 连接就绪判定。载荷是纯文本
+            命令 MIC_START／MIC_STOP／FILE_SEND SD:/<name>，缓冲区上限 128 字节；命令交给
+            voice_service 处理，不触碰 OTA 控制面。
+            严格模式（=y，当前 sdkconfig.defaults 与 sdkconfig 均为 y）下本项完全不生效：
+            voice_service_init() 改为自行拼接 voice/<device_id>/vcmd，并注册为 critical=true
+            （其 SUBACK 未确认会阻塞 MQTT 就绪并触发重建连接）。两种模式都不自动把 device_id
+            拼到本字符串后面。
+            单位与取值：string（完整主题，原样使用，不换算、不拼接）；默认 "voice/esp32s3/vcmd"
+            （旧共享主题），sdkconfig.defaults 与当前 sdkconfig 同值；docs/PROTOCOL.md §6.1 记
+            旧模式为该主题、严格模式为 voice/<device_id>/vcmd（文档一致）。
+            改动后果：非严格模式下改成任何值都不会让本设备更安全——共享主题上所有设备收到相同
+            命令，需靠部署与 broker 权限隔离；严格模式请改用 JULIA_MULTI_DEVICE_ENABLE 的定向
+            主题，并确认服务端已按 device_id 发布。
 
     config JULIA_MIC_GAIN_PERCENT
-        int "Microphone digital gain (percent)"
+        int "麦克风数字增益（percent）"
         range 0 200
         default 70
         help
-            Digital scale applied to microphone PCM before both the local AFE
-            and WSS upload paths. 100 percent is unity gain; values below 100
-            attenuate and values above 100 amplify with saturation.
+            作用：components/julia_board_audio/board_audio.c 的 mic_task 在 I2S 原始 32 位槽数据
+            转 PCM16 时施加一次，实际运算是"先 64 位乘法、再一次性整除"：
+            ((int64_t)mic_raw[i] * 本值) / (100LL << 14)——把"除以 2^14 缩回有效样本"与"乘
+            本值/100"合并成一次整数除法；除法向零截断，之后才做 PCM16 饱和裁剪到 -32768～32767。
+            AFE（本地唤醒与门限判决）与 WSS 上行共用这一份已缩放数据，上层不得再加一次增益，
+            否则依赖该电平的阈值会失真。100 表示不缩放（unity gain）。
+            单位与取值：percent（整数、向零截断，不四舍五入），Kconfig 范围 0～200，默认 70；
+            0 会让整段采集恒为 0（等于静音），200 相当于 +6 dB 后饱和。
+            默认值依据：Kconfig 默认 70，sdkconfig.defaults 与当前 sdkconfig 同值，且
+            docs/BUILD_AND_RELEASE.md 记录"默认 70%"（文档一致）；取 70% 的量化依据未找到
+            （依据未确认，属工程整定值）。
+            调大后果：上行电平与本地判决测得的 dBFS 一起抬高，超过有效位深后表现为削波（饱和
+            裁剪）而非线性放大，底噪同步抬高、误触发风险上升；调小后果：信号更轻、更不易削波，
+            但过小会让 ASR 与门限判定丢信号。它不改变 16 kHz/20 ms 帧格式。
 
     config JULIA_SPEAKER_VOLUME_PERCENT
-        int "Fixed speaker volume (percent)"
+        int "扬声器固定音量（percent）"
         range 0 100
         default 50
         help
-            Fixed speaker volume shared by server replies and local prompts.
-            Runtime SPKV commands are ignored.
+            作用：components/julia_board_audio/board_audio.c 的 scale_sample() 对每个输出样本做
+            (int32_t)sample * 本值 / 100（整数除法、向零截断）后饱和裁剪到 int16，服务器回答
+            PCM 与本地提示音共用同一固定音量（编译期常量 speaker_volume，运行时不接受调音）；
+            main/voice/voice_service.c 收到 SPKV 只记日志并忽略。音量在写入 I2S 前逐样本施加，
+            不改变 16 bit 立体声展开与播放时序（SPKS/PCM/SPKE 流程不变）。
+            单位与取值：percent（整数、向零截断），Kconfig 范围 0～100，默认 50；0 为静音，
+            100 为不衰减。
+            默认值依据：Kconfig 默认 50，sdkconfig.defaults 与当前 sdkconfig 同值，且
+            docs/BUILD_AND_RELEASE.md 记录"固定音量 50%、忽略运行时 SPKV"（文档一致）；取 50%
+            的量化依据未找到（依据未确认，属工程整定值）。
+            调大后果：更响，接近 100 时整数截断相对误差变小但削波/破音与峰值电流上升，服务器
+            推流过大时更明显；调小后果：更轻，过低会听不清，0 仍会走完整播放与 SPKE 时序
+            （只是听不到声音），不会跳过播放流程。
 
     menu "WSS voice stream configuration"
 
@@ -585,18 +1391,26 @@ menu "Example Configuration"
             bool "Use server-side wake word detection"
             default y
             help
-                Keep PCM upload active for the lifetime of an authenticated WSS
-                session while the UI remains IDLE. The server detects the wake
-                word and sends MIC_START to enter LISTEN. When enabled, the local
-                WakeNet detector is not compiled or initialized. Disable this to
-                restore the bundled local WakeNet path.
+                唤醒判定放在服务器侧：只要 WSS 会话已认证，就在界面处于 IDLE 期间持续上传
+                MIC 音频；服务器识别到唤醒词后下发 MIC_START 进入 LISTEN。取值只有开/关，
+                默认开（Kconfig 默认，sdkconfig.defaults 同此）。打开时本地 WakeNet 探测器
+                完全不参与编译与初始化（main/voice/capture/wake_detector.c 在
+                main/CMakeLists.txt 里按本项条件排除），main/app/main.c、
+                main/behavior/julia_quiet_power.c 与 main/voice/voice_service.c 也走
+                服务器唤醒分支：MICS 命令被忽略、MIC_STOP 不停止上传。关闭后恢复随固件
+                捆绑的本地 WakeNet 路径（该模型由 CONFIG_USE_WAKENET 等选项打包）。
+                注意打开本项会上传未经本地门控的连续语音流，功耗与隐私影响都更大。
 
         config WSS_SERVER_HOST
             string "WSS voice server host"
             default "8.133.215.254"
             help
-                Host name or IP address of the WSS (WebSocket over TLS) voice streaming
-                server. The server certificate must chain to server_certs/ca_cert.pem.
+                WSS（基于 TLS 的 WebSocket）语音流服务器的主机名或 IP 字面量。类型为字符串，
+                无长度约束；取值为服务器实际部署地址，Kconfig 默认、sdkconfig.defaults 与当前
+                sdkconfig 都指向同一个开发服务器。服务器证书必须能链到
+                server_certs/ca_cert.pem，且主机名要与证书一致才能通过校验
+                （CONFIG_EXAMPLE_SKIP_COMMON_NAME_CHECK 当前未打开）。生产端点与凭证不应写入
+                defaults；生产地址来源未确认。
 
         config WSS_SERVER_PORT
             int "WSS voice server port"
@@ -604,118 +1418,135 @@ menu "Example Configuration"
             default 9443 if JULIA_LEGACY_SERVER_PORTS
             default 19443
             help
-                TCP port of the WSS voice streaming server.
+                WSS 语音流服务器的 TCP 端口。单位：端口号，范围 1～65535。默认值随
+                JULIA_LEGACY_SERVER_PORTS 分档：打开旧端点时用 9443，否则 19443；当前
+                sdkconfig.defaults 与生效 sdkconfig 都取 19443。取值依据是服务器监听端口，
+                改这里必须同时改服务器；WSS 端口不随 MQTT/OTA 的端口映射联动。
 
         config WSS_PATH
             string "WSS upgrade path"
             default "/voice"
             help
-                HTTP path used in the WebSocket upgrade request, e.g. /voice.
+                WebSocket 升级请求使用的 HTTP 路径，例如 /voice。类型为字符串，无格式校验；
+                Kconfig 默认、sdkconfig.defaults 与当前 sdkconfig 都是 "/voice"。取值依据是
+                服务器路由配置（见 docs/PROTOCOL.md）；路径必须以 "/" 开头，写成空串会使升级
+                请求缺少资源路径，服务器通常直接拒绝。
 
         config WSS_TOKEN
             string "WSS bearer token (fallback)"
             default ""
             help
-                Bearer token sent in the WSS Authorization header. When the generic
-                device token COMM_DEVICE_AUTH_TOKEN_VALUE is not empty it is used
-                first; this value only applies as a fallback. Keep production tokens
-                out of sdkconfig.defaults.
+                WSS Authorization 头里携带的 Bearer 令牌（兜底值）。类型为字符串，默认空；
+                生效配置与 sdkconfig.defaults 都留空。取值优先级：通用设备令牌
+                CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE 非空时先用它，本项只在通用令牌为空时
+                生效。依据未确认的是生产令牌的获取方式：生产令牌应通过受控注入流程下发，
+                不得写入 sdkconfig.defaults 或任何受版本控制的文件。
 
         config WSS_RECONNECT_INTERVAL_SECONDS
             int "WSS reconnect interval (seconds)"
             range 1 3600
             default 5
             help
-                Delay before the voice session task retries a failed connection or a
-                closed session. Reconnection continues indefinitely.
+                语音会话任务在连接失败或会话关闭后重试前的等待时长。单位：秒，范围 1～3600；
+                Kconfig 默认 5，当前生效 sdkconfig 也是 5。重连不设总次数上限，会一直按这个
+                间隔重试；调小会更快恢复但重试更密集，调大会拉长离线表现。本项只影响 WSS，
+                不影响 MQTT（后者用 CONFIG_COMM_RECONNECT_INTERVAL_SECONDS）。
 
         config WSS_KEEPALIVE_INTERVAL_SECONDS
             int "WSS keepalive PING interval (seconds)"
             range 5 3600
             default 15
             help
-                Idle time before the client probes the link with a WebSocket PING.
-                An idle link is healthy; after the PING, only a missing downlink
-                frame (see the timeout below) is treated as a dead connection.
-                Any downlink frame - a PONG or any other frame - proves the link
-                is alive and resets the keepalive timer. TCP keepalive is enabled
-                as well.
+                链路空闲多久后用 WebSocket PING 探活。单位：秒，范围 5～3600，默认 15
+                （sdkconfig.defaults 与生效值同）。设计前提是“空闲不等于断开”，因此 PING
+                只是探针；PING 之后只要收到任意下行帧（PONG 或业务帧）就证明链路存活，
+                并重置本计时器，收不到才按下面的超时判定为断链。TCP keepalive 同时开启。
+                取值依据：应大于服务器最慢的下行间隔；调小会增加无效探针与功耗。
 
         config WSS_PONG_TIMEOUT_SECONDS
             int "WSS keepalive PONG timeout (seconds)"
             range 3 300
             default 10
             help
-                Maximum time to wait for any downlink frame (PONG or other) after
-                a keepalive PING before the client tears down the link and
-                reconnects. Keep this shorter than the PING interval so probes
-                never pile up.
+                发出保活 PING 后，等待任意下行帧（PONG 或业务帧）的最长时间；超过即由客户端
+                主动断开并进入重连。单位：秒，范围 3～300，默认 10（sdkconfig.defaults 与
+                生效值同）。约束：应小于上面的 KEEPALIVE_INTERVAL_SECONDS，否则探针会累积，
+                多个 PING 的应答窗口互相重叠，断链判定被推迟。
 
         config JULIA_CLOUD_STATE_SYNC_ENABLE
             bool "Require cloud state synchronization protocol v2"
             default y
             help
-                Require session_sync_ack before any voice traffic. Publish
-                device_state snapshots with acknowledgements and accept
-                revision-checked require_wake requests on the same WSS socket.
-                Deploy the matching cloud protocol before using this firmware.
-                Disable only to connect to a legacy server without protocol v2.
+                要求先完成云端状态同步协议 v2 才允许任何语音流量：收到 session_sync_ack 前
+                不发音频；在设备侧发布带回执的 device_state 快照，并在同一 WSS 连接上接受
+                带版本校验的 require_wake 请求。取值只有开/关，默认开（Kconfig 默认、
+                sdkconfig.defaults 与生效值同为开）。约束：必须部署配套的云端协议；只有对接
+                不支持 v2 的旧服务器时才关闭，关闭会同时关掉设备端分段收音的依赖链
+                （JULIA_LOCAL_CAPTURE_ENABLE 依赖本项）。
 
         config JULIA_MULTI_DEVICE_ENABLE
             bool "Enable device-scoped voice control (staged cloud rollout)"
             depends on JULIA_CLOUD_STATE_SYNC_ENABLE
             default n
             help
-                Use voice/{stable-device-id}/vcmd only, require explicit device
-                credentials without legacy fallback, and validate the JSON
-                control envelope on the WSS owner. Enable after cloud contract
-                verification; see docs/MULTIDEVICE_CONTRACT.md. This does not
-                add identifiers to legacy binary audio or define new commands.
+                启用设备维度的语音控制（分阶段云端灰度）：只用 voice/{stable-device-id}/vcmd
+                主题，强制要求显式设备凭证且不做旧凭证回退，并在 WSS owner 上校验 JSON 控制
+                信封。取值只有开/关；Kconfig 默认关，当前生效 sdkconfig 与 sdkconfig.defaults
+                均已打开。依赖 JULIA_CLOUD_STATE_SYNC_ENABLE。开启前提是完成云端契约验证
+                （见 docs/MULTIDEVICE_CONTRACT.md）。本项不给旧二进制音频加标识、也不定义新
+                命令；打开后共享主题 CONFIG_COMM_MQTT_VOICE_CMD_TOPIC 不再被使用。
 
         config JULIA_DIALOG_LISTEN_TIMEOUT_SECONDS
             int "S4/S2.1 listening timeout (seconds)"
             range 10 300
             default 60
             help
-                Maximum time waiting for an utterance to finish in S4 or S2.1.
-                If MIC_STOP never arrives, close the stale voice session and
-                return to standby through normal disconnect recovery.
+                S4 与 S2.1 等待一句话结束的最长时间。单位：秒，范围 10～300，默认 60
+                （sdkconfig.defaults 与生效值同）。约束：MIC_STOP 始终不到达时，超时会关闭
+                这条过期语音会话，并走常规断连恢复回到待机；这是兜底而非正常结束路径。
+                取值依据：应大于最长单句时长；调小可能截断长句，调大则异常场景下占用的会话
+                与网络资源更久。
 
         config JULIA_DIALOG_REPLY_TIMEOUT_SECONDS
             int "S2.2 dialog reply timeout (seconds)"
             range 5 120
             default 30
             help
-                Maximum wait in THINKING for an accepted SPKS reply. WebSocket
-                heartbeats do not extend this deadline. On expiry, close the
-                old voice session and use normal disconnect recovery to return
-                to standby and reconnect, preventing late replies crossing turns.
+                S2.2（THINKING）等待被接受的 SPKS 回答的最长时间。单位：秒，范围 5～120，
+                默认 30（sdkconfig.defaults 与生效值同）。约束：WebSocket 心跳不会延长这个
+                期限；到期即关闭旧语音会话并按常规断连恢复回到待机并重连，目的是防止迟到的
+                回答跨越到下一轮。取值依据：应覆盖服务器最慢的正常合成时间。
 
         config WSS_CLOSE_WAIT_MS
             int "WSS close handshake wait (ms)"
             range 100 5000
             default 500
             help
-                Maximum time to wait for the peer to close TLS/TCP after this
-                client replies to a WebSocket CLOSE frame. On timeout the
-                transport is forcibly cleaned up and reconnects normally.
+                WebSocket CLOSE 握手的最长等待时间：本端回应 CLOSE 帧后，等对端关闭
+                TLS/TCP 的上限。单位：毫秒，范围 100～5000，默认 500（sdkconfig.defaults
+                与生效值同）。超时则强制清掉传输层资源并按常规重连，不会卡在收尾阶段。
+                取值依据：应覆盖对端正常关闭的往返时间，过大只会拖慢状态切换。
 
         config WSS_FRAME_WRITE_BUDGET_MS
             int "WSS frame write retry budget (ms)"
             range 500 4500
             default 3500
             help
-                Budget shared by frame header and payload. Already-running TLS
-                writes may exceed it by one socket write timeout. Ring overflow
-                terminates the generation independently of this budget.
+                单个 WSS 帧写入的重试预算，帧头与载荷共用这一份预算。单位：毫秒，
+                范围 500～4500，默认 3500（sdkconfig.defaults 与生效值同）。约束：
+                已经进入的 TLS 写可能再超出一次 socket 写超时，因此实际耗时上界略大于
+                本值；环形缓冲溢出导致的中止是独立机制，不受本预算控制。取值依据：
+                按最慢链路的单帧写入耗时加余量确定。
 
         config WSS_TASK_STACK_SIZE
             int "WSS session task stack size (bytes)"
             range 16384 65536
             default 16384
             help
-                Stack size of the WSS session task. The TLS handshake requires at
-                least 16 KB; do not reduce the lower bound.
+                WSS 会话任务的栈大小。单位：字节，范围 16384～65536，默认 16384
+                （sdkconfig.defaults 未覆盖，生效值为 16384）。约束：TLS 握手至少需要
+                16 KiB，因此下限不允许再调低；调大只增加静态内存占用，不会提升吞吐。
+                取值依据：以 TLS + 会话逻辑的实测峰值栈深为准，当前值来自 TLS 握手下限。
 
     endmenu
 
@@ -725,11 +1556,14 @@ menu "Example Configuration"
             bool "Enable the device-initiated voice push demo"
             default n
             help
-                Actively pushes the project's test audio files (??????/ directory,
-                listed in voice_push_demo.c) to the WSS server without a server
-                FILE_SEND command: the device enqueues each "SD:/<name>" URI into
-                the voice service command queue and the session task sends
-                BEGIN FILE ... END for every file.
+                设备主动推送演示：不等待服务端 FILE_SEND 命令，直接把仓库内写死的测试音频
+                列表（voice_push_demo.c 的 DEMO_AUDIO_FILES）按 "SD:/<文件名>"（映射到
+                /sdcard/<文件名>）逐一入队语音服务的命令队列，会话任务在 WSS 连接就绪后为
+                每个文件发送 BEGIN FILE ... END。取值只有开/关，默认关（Kconfig 默认，
+                sdkconfig.defaults 未打开）。约束：文件必须事先存在于 SD 卡，而 SD 驱动当前
+                未编入固件（CONFIG_SD_CARD_ENABLE 默认关），因此仅打开本项不会成功传输；
+                打开后设备会在无服务端命令的情况下主动写，仓库内没有服务端是否接受该流程的
+                记录，也没有约定成功回执，只能靠会话日志判断。
 
         config VOICE_PUSH_DEMO_INTERVAL_SECONDS
             int "Repeat explicit transfer every N seconds; 0 = transfer once"
@@ -737,8 +1571,10 @@ menu "Example Configuration"
             default 0
             depends on VOICE_PUSH_DEMO_ENABLE
             help
-                Repeat the whole explicit file list every N seconds. Set to 0 to
-                transfer the list exactly once after the WSS client has started.
+                整个显式文件列表的重复周期。单位：秒，范围 0～86400，默认 0；依赖
+                VOICE_PUSH_DEMO_ENABLE。取值 0 表示 WSS 客户端启动后只传一次列表；大于 0
+                则每 N 秒重新传整份列表，用于反复测试同一组文件。取值依据：只看演示需要，
+                没有协议侧约束；调小会让设备持续占用上行带宽。
 
     endmenu
 
@@ -749,22 +1585,29 @@ menu "Example Configuration"
             range 65536 8388608
             default 3145728
             help
-                Upper bound accepted for audio_check_response file_size. The audio
-                storage data partition must be at least this large.
+                接受的音频素材文件大小上限，用于校验 audio_check_response 里的 file_size。
+                单位：字节，范围 65536～8388608，Kconfig 默认 3145728（3 MiB）；当前生效
+                sdkconfig 与 sdkconfig.defaults 都覆盖为 1048576（1 MiB）。约束：存放素材的
+                数据分区容量不得小于本值，否则通过校验的文件仍可能写不下；分区表见
+                partitions_16mb.csv。取值依据：以分区表里 audio_data 分区大小为上限。
 
         config AUDIO_STORAGE_PARTITION
             string "Audio storage data partition label"
             default "audio_data"
             help
-                Data partition label used to store the downloaded audio material.
-                A matching data partition must exist in the partition table.
+                存放已下载音频素材的数据分区标签。类型为字符串，默认 "audio_data"，
+                sdkconfig.defaults 与生效值同。约束：分区表里必须存在同名数据分区，否则
+                加载会失败并打印 "Audio storage partition ... not found"；取值依据为
+                partitions_16mb.csv 中的分区名，改这里必须同步改分区表。
 
         config COMM_MQTT_AUDIO_STATUS_TOPIC_PREFIX
             string "MQTT audio status topic prefix"
             default "/device/audio/status"
             help
-                Prefix for audio material lifecycle status events. The device
-                publishes to <prefix>/<device_id> with QoS 1 and retain disabled.
+                音频素材生命周期状态事件的 MQTT 主题前缀。类型为字符串，默认
+                "/device/audio/status"，sdkconfig.defaults 与生效值同。设备按
+                <前缀>/<device_id> 发布，QoS 1 且不带 retain；服务器需要订阅带设备后缀的
+                主题。取值依据：见 docs/PROTOCOL.md 的音频状态上报约定。
 
     endmenu
 
@@ -774,13 +1617,13 @@ menu "Example Configuration"
             bool "Mount SD card for voice files"
             default n
             help
-                Legacy driver option: the current application does not compile
-                or start sd_card.c. Enabling this alone does not restore SD support.
-                Mounts the SD card (FAT) at /sdcard over SDMMC 1-bit so
-                voice_service can serve "SD:/<name>" FILE_SEND URIs and the push
-                demo can transfer the test audio files. D3/CS is routed through
-                the on-board TCA9554 (Extend_IO3) and is driven high first so
-                the card stays in SD (SDMMC) mode. The card is never formatted.
+                把 SD 卡（FAT）以 SDMMC 1-bit 挂载到 /sdcard，使 voice_service 能提供
+                "SD:/<文件名>" 形式的 FILE_SEND URI，并让推送演示传测试音频。取值只有开/关，
+                Kconfig 默认关，sdkconfig.defaults 与当前生效 sdkconfig 都是关闭。约束：
+                D3/CS 经板载 TCA9554（Extend_IO3）控制，首次 SD 时钟前必须先拉高，否则卡
+                可能锁进 SPI 模式；卡永远不会被格式化，挂载失败也不阻断其它业务。本项是遗留
+                驱动开关：当前应用未把 sd_card.c 编入固件，只打开本项并不能恢复 SD 功能，
+                还需要把它加入构建并接上调用方（见 docs/COMMENT_AUDIT_FINDINGS.md FILE-02）。
 
         config SD_CARD_PIN_CLK
             int "SD card SDMMC CLK pin"
@@ -788,7 +1631,10 @@ menu "Example Configuration"
             default 14
             depends on SD_CARD_ENABLE
             help
-                Waveshare ESP32-S3-LCD-1.85: CLK = IO14.
+                SDMMC 的 CLK 引脚号（GPIO 编号，范围 0～48）；依赖 SD_CARD_ENABLE。
+                Waveshare ESP32-S3-LCD-1.85 的板级连线上 CLK = IO14，Kconfig 默认与
+                sdkconfig.defaults 都取 14。取值依据是原理图/厂商规格，不是代码推导；
+                只在本板有效，换板需重新确认。
 
         config SD_CARD_PIN_CMD
             int "SD card SDMMC CMD pin"
@@ -796,7 +1642,10 @@ menu "Example Configuration"
             default 17
             depends on SD_CARD_ENABLE
             help
-                Waveshare ESP32-S3-LCD-1.85: CMD = IO17.
+                SDMMC 的 CMD 引脚号（GPIO 编号，范围 0～48）；依赖 SD_CARD_ENABLE。
+                Waveshare ESP32-S3-LCD-1.85 的板级连线上 CMD = IO17，Kconfig 默认与
+                sdkconfig.defaults 都取 17。取值依据是原理图/厂商规格，不是代码推导；
+                只在本板有效，换板需重新确认。
 
         config SD_CARD_PIN_D0
             int "SD card SDMMC D0 pin"
@@ -804,7 +1653,10 @@ menu "Example Configuration"
             default 16
             depends on SD_CARD_ENABLE
             help
-                Waveshare ESP32-S3-LCD-1.85: D0 = IO16.
+                SDMMC 的 D0 引脚号（GPIO 编号，范围 0～48）；依赖 SD_CARD_ENABLE。
+                Waveshare ESP32-S3-LCD-1.85 的板级连线上 D0 = IO16，Kconfig 默认与
+                sdkconfig.defaults 都取 16。取值依据是原理图/厂商规格，不是代码推导；
+                只在本板有效，换板需重新确认。
 
         config SD_CARD_I2C_SCL
             int "TCA9554 I2C SCL pin"
@@ -812,8 +1664,11 @@ menu "Example Configuration"
             default 10
             depends on SD_CARD_ENABLE
             help
-                I2C bus of the on-board TCA9554 GPIO expander that controls the
-                SD card D3/CS. Waveshare ESP32-S3-LCD-1.85: SCL = IO10.
+                控制 SD 卡 D3/CS 的板载 TCA9554 GPIO 扩展器所在 I2C 总线的 SCL 引脚号
+                （范围 0～48）；依赖 SD_CARD_ENABLE。Waveshare ESP32-S3-LCD-1.85 为
+                IO10，Kconfig 默认与 sdkconfig.defaults 都取 10。注意本项当前不生效：
+                实际 I2C 引脚由 tca9554.c 的 TCA9554_I2C_SCL 固定为 GPIO10，共享总线由
+                tca9554 创建后被 RTC/IMU 复用，本配置不参与初始化。
 
         config SD_CARD_I2C_SDA
             int "TCA9554 I2C SDA pin"
@@ -821,8 +1676,10 @@ menu "Example Configuration"
             default 11
             depends on SD_CARD_ENABLE
             help
-                I2C bus of the on-board TCA9554 GPIO expander. Waveshare
-                ESP32-S3-LCD-1.85: SDA = IO11.
+                控制 SD 卡 D3/CS 的板载 TCA9554 GPIO 扩展器所在 I2C 总线的 SDA 引脚号
+                （范围 0～48）；依赖 SD_CARD_ENABLE。Waveshare ESP32-S3-LCD-1.85 为
+                IO11，Kconfig 默认与 sdkconfig.defaults 都取 11。与 SCL 同理，本项当前
+                不生效：实际引脚由 tca9554.c 的 TCA9554_I2C_SDA 固定为 GPIO11。
 
         config SD_CARD_FREQ_KHZ
             int "SD card SDMMC clock (kHz)"
@@ -830,8 +1687,10 @@ menu "Example Configuration"
             default 20000
             depends on SD_CARD_ENABLE
             help
-                SDMMC clock for the card. 20000 kHz (20 MHz) is the proven
-                default; reduce to 10000 if the card or wiring is unstable.
+                SDMMC 给卡提供的时钟频率。单位：kHz，范围 400～40000，默认 20000
+                （20 MHz，sdkconfig.defaults 与生效值同，但该值当前不参与构建）。
+                约束：只在本板上验证过 20 MHz；卡或连线不稳定时可先降到 10000 再排查。
+                取值依据：板上实测可用值，没有更大范围的验证记录。
 
     endmenu
 
@@ -842,122 +1701,180 @@ menu "Example Configuration"
             range 10 86400
             default 10
             help
-                Continuous idle time before the companion display closes its eyes,
-                begins backlight breathing, and enters S3. In server wake mode
-                PCM upload remains active; in local mode WakeNet remains active.
+                陪伴显示进入远待机前的连续空闲时长：超过后立绘闭眼、背光开始呼吸并进入 S3。
+                单位：秒，范围 10～86400，默认 10（sdkconfig.defaults 与生效值同）。约束：
+                计时依据是 julia_idle_display.c 自己记录的“最后活动时间”，FSM 运行时还按
+                “进入 S1 的时刻”独立计时并可能拒绝本次离开事件，因此本项到期不等于一定迁移。
+                服务器唤醒模式下 PCM 持续上传，本地模式下 WakeNet 保持工作；S3 的驻留上限另见
+                JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS。
 
         config JULIA_DISPLAY_ACTIVITY_POLL_MS
             int "Idle policy polling period (ms)"
             range 100 5000
             default 500
+            help
+                空闲显示策略（main/behavior/julia_idle_display.c）的后台任务在“剩余陪伴时间已
+                过期”时的兜底轮询周期。单位：毫秒，范围 100～5000，默认 500（Kconfig 默认、
+                sdkconfig.defaults 与生效值同）。注意本项不是主节拍：还有剩余时间时任务按
+                “剩余时间”休眠，有新活动会由 julia_idle_display_note_activity() 直接唤醒，
+                本周期只在剩余时间已经耗尽、但状态尚未提交的那一轮决定重试间隔。取值依据：
+                调大只影响超时上报的及时性，调小会让空转更频繁；不影响 S3/S6 的驻留计时。
 
         config JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS
             int "Seconds in S3 before sleep"
             range 60 86400
             default 300
             help
-                Continuous time in S3 standby before entering S6 sleep.
-                The RTC night schedule remains an independent earlier trigger.
+                S3 待机的连续驻留上限：超过后进入 S6 睡眠。单位：秒，范围 60～86400，默认
+                300（5 分钟；sdkconfig.defaults 与生效值同）。依据：由 FSM 运行时持有计时，
+                进入 S3 时重置；夜间计划是独立的、可能更早的 S6 触发源，两者取先到者。
 
         config JULIA_SILENT_STANDBY_TIMEOUT_SECONDS
             int "Seconds in S5 before S6 sleep"
             range 60 86400
-            default 1800
+            default 300
             help
-                Continuous time in S5 before entering S6. Neither state enables
-                the microphone; confirmed motion returns the device to S3.
+                S5 静默态的连续驻留上限：超过后进入 S6。单位：秒，范围 60～86400，默认 300
+                （取自当前生效用法，Kconfig 默认、sdkconfig.defaults 与生效 sdkconfig 三处
+                已统一为 300）。约束：S3 与 S5 都不开启麦克风，已确认的运动事件把设备唤醒到
+                S3（capture-v1 下由 FSM 转入 S4 发起交互）。
 
         config JULIA_SERVICE_INIT_TIMEOUT_SECONDS
             int "Seconds to wait for initial cloud services"
             range 5 300
             default 30
             help
-                Time after the behavior FSM starts to wait for both MQTT critical
-                subscriptions and the authenticated WSS session. Expiry starts one
-                S7.1 notice and leaves the persistent offline label visible.
+                行为 FSM 启动后等待云端服务就绪的时长：需要 MQTT 关键订阅与已认证 WSS 会话
+                两者都完成。单位：秒，范围 5～300，默认 30（sdkconfig.defaults 与生效值同）。
+                约束：到期会触发一次 S7.1 提示，并让常驻的 offline 标签继续保持可见；它不
+                中断重连，后续恢复由常规流程处理。取值依据：应覆盖最慢的正常上线时间。
 
         config JULIA_COMPANION_BRIGHTNESS_PERCENT
             int "S1 companion-state brightness (percent)"
             range 0 100
             default 50
             help
-                Fixed backlight level used in the resident S1 companion state.
-                S2 dialog stages use 70 percent brightness.
+                S1 陪伴态的固定背光亮度。单位：百分比，范围 0～100，默认 50，生效值 50。
+                依据：这是常驻状态的固定值，不参与呼吸；S2 对话各阶段用 70%，S4 等活跃呈现
+                用 100%（见 julia_fsm_runtime.c 的呈现表）。
 
         config JULIA_SILENT_BRIGHTNESS_PERCENT
             int "S5 silent-state brightness (percent)"
             range 0 100
             default 30
             help
-                Fixed backlight level used in S5. The default is deliberately
-                lower than active states so silent mode is visually distinct.
+                S5 静默态的固定背光亮度。单位：百分比，范围 0～100，默认 30，生效值 30。
+                取值依据：刻意低于活跃状态，使静默模式在视觉上可区分；S5 不做呼吸，进入 S6
+                后熄灭并关闭显示。
 
         config JULIA_FAULT_RESET_DELAY_MS
             int "S7 reset delay (ms)"
             range 0 60000
             default 3000
             help
-                Time to keep the S7 fault presentation visible before an
-                allowed automatic reset.
+                允许自动复位前，S7 故障呈现保持可见的时长。单位：毫秒，范围 0～60000，默认
+                3000（3 秒；sdkconfig.defaults 与生效值同）。约束：0 表示不做呈现等待；该
+                延迟只作用于“允许自动复位”的路径，不走自动复位的严重故障会立即复位（见
+                main/app/main.c 与 main/network/wss/wss_transport.c 的复位分支）。
 
         config JULIA_FAULT_QUICK_UPTIME_SECONDS
             int "Quick repeated-fault uptime window (seconds)"
             range 1 3600
             default 60
             help
-                A repeated fault occurring before this uptime is counted as a
-                quick boot-loop recurrence of the same fault reason.
+                判定“同一故障原因在短时间内反复出现”（启动引导环）的运行时长窗口。单位：秒，
+                范围 1～3600，默认 60（sdkconfig.defaults 与生效值同）。依据：本次运行时长
+                小于本窗口时，再次记录同一故障原因会递增重复计数，计数用于比对自动复位上限
+                （见 main/behavior/julia_fault.c）。
 
         config JULIA_FAULT_AUTO_RESET_LIMIT
             int "Maximum automatic resets for the same quick fault"
             range 0 20
             default 3
             help
-                Maximum repeat count that may still reset automatically. Set
-                to zero to hold the first recorded serious fault in S7.
+                同一快速反复故障允许自动复位的重复次数上限。单位：次数，范围 0～20，默认 3
+                （sdkconfig.defaults 与生效值同）。判据是最近一次快照的 repeat_count 不超过
+                本值（julia_fault.c 的 julia_fault_reset_allowed()），而重复计数从 1 起算，因此
+                设为 0 时第一次记录的严重故障就不满足该判据（1>0），设备只记录并停在 S7，
+                需要人工介入。
 
         config JULIA_DISPLAY_BREATHE_MIN_PERCENT
             int "S3 standby breathing minimum percentage"
             range 0 100
             default 0
+            help
+                S3 待机时背光呼吸的下限亮度。单位：百分比，范围 0～100，默认 0（Kconfig
+                默认、sdkconfig.defaults 与生效值同）；0 表示呼吸谷值完全熄灭，并会触发
+                julia_backlight.c 的零亮度保持处理。约束：必须小于
+                JULIA_DISPLAY_BREATHE_MAX_PERCENT，否则 julia_backlight_breathe_start()
+                直接失败，julia_fsm_runtime.c 只打警告、S3 保持进入前的亮度，不产生呼吸。
+                与 MAX、PERIOD 三项共同决定呼吸曲线。
 
         config JULIA_DISPLAY_BREATHE_MAX_PERCENT
             int "S3 standby breathing maximum percentage"
             range 0 100
             default 30
+            help
+                S3 待机时背光呼吸的上限亮度。单位：百分比，范围 0～100，默认 30（Kconfig
+                默认、sdkconfig.defaults 与生效值同）。与 MIN 一起给出呼吸区间，曲线先按
+                正弦平方形状归一化再映射到该区间，端点亮度就是 MIN/MAX 本身；MAX=MIN 时
+                呼吸启动会失败（校验要求 min<max），画面亮度保持不变。取值依据：以“能看到
+                呼吸但低于对话亮度”为目标，没有本机主观评测记录。
 
         config JULIA_DISPLAY_BREATHE_PERIOD_MS
             int "S3 standby breathing period (ms)"
             range 500 30000
             default 4000
+            help
+                S3 待机背光呼吸一个完整周期的时间。单位：毫秒，范围 500～30000，默认 4000
+                （取自当前生效用法，Kconfig 默认、sdkconfig.defaults 与生效 sdkconfig 三处
+                已统一为 4000）。约束：这是完整往复周期，不是半周期；固定 120 段会被
+                period_ms 与 tick 精度裁剪，因此实际段数可能少于请求值，段时长 =
+                period_ms / 实际段数（见 julia_backlight.c）。
 
         config JULIA_RTC_ENABLE
             bool "Use onboard PCF85063 RTC"
             default y
             help
-                Restore wall time from PCF85063 at boot and update it after SNTP sync.
-                The RTC shares the existing GPIO10/GPIO11 I2C bus with TCA9554.
+                使用板载 PCF85063 RTC：开机时从 RTC 恢复墙钟，SNTP 同步后再回写 RTC。取值
+                只有开/关，默认开（Kconfig 默认、sdkconfig.defaults 与生效值同为开）。
+                约束：RTC 复用与 TCA9554 同一条 I2C 总线（GPIO10/GPIO11，由 tca9554.c
+                创建），因此依赖板载 I2C 可用；RTC 不可用时只打警告、不阻塞启动，时间留给
+                SNTP 异步补齐。关闭后不编译 RTC 路径，夜间睡眠计划也因依赖本项而不可选。
 
         config JULIA_NIGHT_SLEEP_ENABLE
             bool "Enable RTC-backed night sleep schedule"
             default y
             depends on JULIA_RTC_ENABLE
             help
-                Enter S6 during the configured local-time window after the idle
-                grace. Active dialogue is never interrupted; the end of the
-                window leaves S6 dark until a wake word changes the FSM state.
+                启用基于 RTC 墙钟的夜间睡眠计划：在配置的本地时间窗口内、且空闲宽限到期后
+                进入 S6。取值只有开/关，默认开（Kconfig 默认、sdkconfig.defaults 与生效值
+                同为开）；依赖 JULIA_RTC_ENABLE。约束：正在对话时不会被打断；宽限只在
+                S1/S3/S5 计时，故障与升级期间不计时；窗口结束后设备保持 S6 的熄屏呈现，直到
+                唤醒词把 FSM 带出该状态。另注：22:00 的睡前提醒小时在
+                julia_night_schedule.c 中写死为 22 点，本 Kconfig 不提供该项。
 
         config JULIA_NIGHT_SLEEP_START_HOUR
             int "Night sleep start hour (local time)"
             range 0 23
             default 23
             depends on JULIA_NIGHT_SLEEP_ENABLE
+            help
+                夜间窗口的起始小时，按本地时间（localtime_r，时区由 CONFIG_JULIA_TIMEZONE
+                决定）。单位：小时，范围 0～23，默认 23，生效值 23；依赖
+                JULIA_NIGHT_SLEEP_ENABLE。约束：只按小时比较、忽略分钟，窗口含起点不含终点；
+                起始大于结束表示跨午夜（如 23→7 覆盖 23:00–07:00 两段）；起始等于结束时视为
+                没有夜间窗口，比解释成全天夜间更安全。
 
         config JULIA_NIGHT_SLEEP_END_HOUR
             int "Night sleep end hour (local time)"
             range 0 23
             default 7
             depends on JULIA_NIGHT_SLEEP_ENABLE
+            help
+                夜间窗口的结束小时，按本地时间。单位：小时，范围 0～23，默认 7，生效值 7；
+                依赖 JULIA_NIGHT_SLEEP_ENABLE。约束：不含该整点（07:00 起就算窗口外）；
+                窗口结束不会自动把设备从 S6 叫醒，仍由唤醒词驱动状态切换。
 
         config JULIA_NIGHT_SLEEP_GRACE_SECONDS
             int "Night idle grace before sleep (seconds)"
@@ -965,67 +1882,121 @@ menu "Example Configuration"
             default 300
             depends on JULIA_NIGHT_SLEEP_ENABLE
             help
-                Idle grace after entering the configured night window before
-                posting the night-time sleep event.
+                进入夜间窗口后、投递夜间睡眠事件前的空闲宽限。单位：秒，范围 1～3600，默认
+                300（sdkconfig.defaults 与生效值同）；依赖 JULIA_NIGHT_SLEEP_ENABLE。约束：
+                宽限只在 S1/S3/S5 内累计，对话、故障、升级等活跃状态下不计时也不打断；窗口内
+                离开再回到这些状态会重新开始完整计时。取值依据：留出用户仍在陪伴期内的时间。
 
         config JULIA_NIGHT_SCHEDULE_POLL_MS
             int "Night schedule polling period (ms)"
             range 500 60000
             default 5000
             depends on JULIA_NIGHT_SLEEP_ENABLE
+            help
+                夜间计划任务的轮询周期。单位：毫秒，范围 500～60000，默认 5000，生效值 5000；
+                依赖 JULIA_NIGHT_SLEEP_ENABLE。注意本项当前不参与调度：任务的实际等待由“下一个
+                整点”、宽限截止时间和 julia_night_schedule_notify() 的提前唤醒共同决定，本值
+                只出现在启动日志的 poll 字段里（julia_night_schedule.c 的 init 日志）。保留它
+                是为将来改回固定轮询；当前改它不会改变夜间判定的时机。
 
         config JULIA_IMU_MOTION_ENABLE
             bool "Wake S5/S6 to S3 with QMI8658 motion"
             default y
             help
-                Use adjacent-sample acceleration and gyro magnitude detection
-                while in S5/S6. Confirmed motion posts an FSM event that restores
-                S3 standby; the detector never controls display hardware directly.
+                S5/S6 期间使用 QMI8658 的相邻样本加速度与角速度模长做运动判定（在
+                JULIA_LOCAL_CAPTURE_ENABLE 打开时 S3 也监测，使待机设备能被搬动唤醒）。取值
+                只有开/关，默认开（Kconfig 默认、sdkconfig.defaults 与生效值同为开）。约束：
+                确认的运动只投递 FSM 事件把设备恢复到 S3 待机（capture-v1 下由 FSM 转入 S4
+                发起交互），检测器不直接操作显示或功放；关闭后本文件不编译，主程序也跳过
+                初始化。
 
         config JULIA_IMU_MOTION_SAMPLE_MS
             int "IMU motion sample period (ms)"
             range 10 1000
-            default 200
+            default 20
             depends on JULIA_IMU_MOTION_ENABLE
             help
-                Task polling interval only, not the sensor ODR. A 10 ms interval
-                does not create 100 fresh samples/s when the sensor runs at 30 Hz.
-                Use the independent logger for high-ODR characterization.
+                运动判定任务的扫描周期：每隔该时长读一次传感器并做一次判定。单位：毫秒，
+                范围 10～1000，默认 20；依赖 JULIA_IMU_MOTION_ENABLE。本项与传感器 ODR 是
+                两个参数：产品驱动的 ODR 固定在 30 Hz 寄存器编码（约 33 ms 一个新样本，见
+                qmi8658_shared.c），因此本项小于约 33 ms 只是重复读同一批数据，不会带来更多
+                新样本，也不改变 ODR。取值为当前生效值，依据未确认，需上板确认唤醒灵敏度与
+                功耗的取舍。需要高 ODR 特征化时用独立的 IMU 记录固件
+                （JULIA_IMU_LOGGER_ENABLE）。
 
         config JULIA_IMU_MOTION_CONFIRM_FRAMES
             int "Consecutive IMU motion frames"
             range 1 100
-            default 4
+            default 10
             depends on JULIA_IMU_MOTION_ENABLE
+            help
+                需要连续多少帧都超过门限才确认运动。单位：帧，范围 1～100，默认 10
+                （取自当前生效用法）；依赖 JULIA_IMU_MOTION_ENABLE。约束：任一帧未超过
+                门限就把连续计数清零，因此单帧尖峰或桌面轻碰不会触发唤醒；判据是加速度与
+                角速度两条支路的“或”。注意在 20 ms 扫描周期下，10 帧约等于 200 ms 的持续
+                运动才会确认。
 
         config JULIA_IMU_MOTION_COOLDOWN_MS
             int "IMU motion log cooldown (ms)"
             range 0 600000
-            default 10000
+            default 0
             depends on JULIA_IMU_MOTION_ENABLE
+            help
+                一次运动事件成功投递后的冷却时长：冷却期内不再判定，但传感器仍继续读取以确认
+                唤醒输入健康。单位：毫秒，范围 0～600000，默认 0
+                （取自当前生效用法，Kconfig 默认、sdkconfig.defaults 与生效 sdkconfig 三处
+                已统一为 0）；依赖 JULIA_IMU_MOTION_ENABLE。约束：冷却只在事件投递成功后
+                开始计时，投递失败时下一轮可以立即重试；本项不会关闭传感器采样。注意 0 表示
+                没有冷却，运动判定在事件投递成功后立即可以再次触发，只受确认帧数过滤。
 
         config JULIA_IMU_ACCEL_DELTA_MG
             int "Adjacent-sample acceleration threshold (mg sum)"
             range 10 4000
-            default 750
+            default 450
             depends on JULIA_IMU_MOTION_ENABLE
             help
-                Sum of absolute X/Y/Z acceleration changes between adjacent
-                samples, expressed in milli-g. 750 means 0.75 g.
+                相邻样本三轴加速度变化绝对值之和的门限。单位：mg（三轴之和），范围
+                10～4000，默认 450（即 0.45 g；取自当前生效用法，Kconfig 默认、
+                sdkconfig.defaults 与生效 sdkconfig 三处已统一为 450）；依赖
+                JULIA_IMU_MOTION_ENABLE。约束：判据是“三轴变化的绝对值之和”，不是模长差，
+                也不是单轴门限。依据：tools/imu_logger/tune_motion.py 在 imu_records/latest
+                的 11 段典型场景上回放（tuning/replay.json，误报 0／漏报 0），录制量程
+                ±16 g／±1024 dps 已与产品驱动对齐；仍属同数据拟合、无留出集验证，未上板确认。
 
         config JULIA_IMU_GYRO_THRESHOLD_DPS
             int "Gyroscope magnitude threshold (degrees/s)"
             range 1 2000
-            default 90
+            default 400
             depends on JULIA_IMU_MOTION_ENABLE
+            help
+                三轴角速度模长的门限。单位：dps（度/秒），范围 1～2000，默认 400
+                （取自当前生效用法，Kconfig 默认、sdkconfig.defaults 与生效 sdkconfig 三处
+                已统一为 400）；依赖 JULIA_IMU_MOTION_ENABLE。约束：产品驱动把陀螺仪量程
+                固定为每轴 ±1024 dps（见 qmi8658_shared.c），与该门限的来源录制一致，因此本项
+                可达（三轴合成上界 1024×√3≈1773.6 dps）。**不要收窄量程**：收窄会让本支路恒不
+                成立。角速度按“当前样本模长”判定，不受轮询快于 ODR 时重复采样影响，这正是它能
+                兜住加速度差分判据的原因。依据：tools/imu_logger/tune_motion.py 在
+                imu_records/latest 上的回放（tuning/replay.json，误报 0／漏报 0），属同数据拟合、
+                无留出集验证，未上板确认。
 
         config JULIA_TIMEZONE
             string "POSIX timezone"
             default "CST-8"
+            help
+                POSIX TZ 字符串，用于把 epoch 秒换算成本地墙钟。类型为字符串，默认
+                "CST-8"（sdkconfig.defaults 与生效值同）。约束：必须是 setenv("TZ", ...)
+                能解析的 POSIX 格式，不能用 IANA 名字（如 Asia/Shanghai）；格式错误不会
+                报错，只会让本地时间偏移错误，进而影响夜间睡眠窗口的判断依据
+                （见 main/time/julia_time.c 与 main/behavior/julia_night_schedule.c）。
 
         config JULIA_SNTP_SERVER
             string "SNTP server"
             default "pool.ntp.org"
+            help
+                SNTP 校时服务器的主机名或地址。类型为字符串，默认 "pool.ntp.org"
+                （sdkconfig.defaults 与生效值同）。约束：只在网络拿到 IPv4 后启动一次
+                （julia_time.c 的 julia_time_ip_ready()），同步完成后回写 RTC；同步失败
+                只保留启动时从 RTC 恢复的时间。内网离线部署需要改成可用的本地时间源。
 
     endmenu
 
@@ -1033,29 +2004,38 @@ menu "Example Configuration"
         bool "Skip server certificate CN fieldcheck"
         default n
         help
-            This allows you to skip the validation of OTA server certificate CN field.
+            跳过 OTA 服务器证书的 CN（通用名）字段校验。取值只有开/关，默认关（Kconfig
+            默认、sdkconfig.defaults 未打开，当前生效 sdkconfig 也未打开，即校验生效）。
+            约束：打开只跳过 CN 比对，证书链仍需能验到 CA；主机名与证书不一致时，
+            打开本项会让请求通过，安全边界随之下降。仅用于排障，不应作为生产配置。
 
     config EXAMPLE_SKIP_VERSION_CHECK
         bool "Skip firmware version check"
         default n
         help
-            This allows you to skip the firmware version check.
+            跳过 OTA 固件的版本比较，允许下载与当前版本相同或更旧的镜像。取值只有开/关，
+            默认关（Kconfig 默认、sdkconfig.defaults 与当前生效 sdkconfig 都未打开）。
+            约束：打开后无法再靠版本号阻止降级或重复安装同一版本；只在需要重装同版本镜像
+            做验证时临时打开。
 
     config EXAMPLE_GPIO_DIAGNOSTIC
         int "Number of the GPIO input for diagnostic"
         range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
         default 4
         help
-            Used to demonstrate how a rollback works.
-            The selected GPIO will be configured as an input with internal pull-up enabled.
-            To trigger a rollback, this GPIO must be pulled low while the message
-            `Diagnostics (5 sec)...` which will be on first boot.
-            If GPIO is not pulled low then the operable of the app will be confirmed.
+            演示回滚用的诊断 GPIO 编号，范围由例程组件的 ENV_GPIO_RANGE_MIN /
+            ENV_GPIO_IN_RANGE_MAX 给出（因此可选范围随目标芯片变化），默认 4（当前生效值
+            也是 4）。行为：该引脚被配成带上拉的输入；首次启动出现
+            `Diagnostics (5 sec)...` 提示期间把它拉低会触发回滚，未拉低则确认应用可运行。
+            取值依据：这是 ESP-IDF 回滚例程的机制，不是本项目产品功能；主应用不读取本项。
 
     config EXAMPLE_OTA_RECV_TIMEOUT
         int "OTA Receive Timeout"
         default 5000
         help
-            Maximum time for reception
+            例程 OTA 单次接收的最长时间。单位：毫秒（依据例程用法），默认 5000，当前生效值
+            也是 5000。约束：本项属于例程组件路径，产品的 OTA 流程使用
+            CONFIG_OTA_CHECK_RESPONSE_* 与 http_downloader.c 里的超时，改本项不影响产品
+            OTA；取值范围未在 Kconfig 中约束（来源未确认）。
 
 endmenu

@@ -104,7 +104,7 @@ esp_err_t http_downloader_run(const http_downloader_config_t *config,
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* Apply on every transfer/retry, including old NVS resume URLs. */
+    /* URL 映射必须对每次传输和重试都生效，包括从 NVS 读出的旧 resume URL。 */
     char server_url[NATIVE_OTA_URL_SIZE + 1U];
 #ifdef CONFIG_JULIA_LEGACY_SERVER_PORTS
     const bool legacy_server = true;

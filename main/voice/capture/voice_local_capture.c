@@ -1,13 +1,17 @@
-/** 本地分段收音（capture-v1）的固件侧入口：把板级 PCM1 帧交给 local_capture 算法，并把
- * capture_start / PCM2 / capture_end 记录交给上层上行 FIFO。
+/**
+ * @file voice_local_capture.c
+ * @brief 本地分段收音（capture-v1）的固件侧入口：把板级 PCM1 帧交给 local_capture 算法，
+ * 并把 capture_start / PCM2 / capture_end 记录交给上层上行 FIFO。
  *
- * 所有权：麦克风任务独占底噪、预录和判决历史，并写期望模式（wanted_mode）；WSS owner
- * 只协商能力（capture_ready 置位）和投递判决，不直接改底噪。
- *
- * 失败边界：记录发不出去即结束本次会话。send 回调失败会让采集器置 failed，本模块随后请求
- * 结束会话，由 WSS owner 统一重连，绝不静默丢音继续识别。
+ * 模块职责：在设备侧完成起音/结束判决与分段记录组帧，供 WSS 上行发送。
+ * 模块边界：不负责网络收发与重连。麦克风任务独占底噪、预录和判决历史，并写期望模式
+ * （wanted_mode）；WSS owner 只协商能力（capture_ready 置位）和投递判决，不直接改底噪。
+ * 关键依赖：local_capture / lc_vad 算法、voice_state_sync 的能力协商、wss_transport 的上行接口。
+ * 核心不变量：send 回调失败会让采集器置 failed，本模块随后请求结束会话，由 WSS owner 统一
+ * 重连，不允许丢音后继续识别；旧代次数据不得参与新连接。
  */
 #include "voice_local_capture.h"
+#include "voice_timing.h"
 #if CONFIG_JULIA_CAPTURE_VAD_ENABLE
 #include "lc_vad.h"
 #endif
@@ -51,6 +55,9 @@ typedef struct {
     int16_t pcm[LC_FRAME_SAMPLES];
     uint8_t frame[656];
     int64_t sample_ms, last_wall_ms;
+    uint32_t listen_revision;
+    unsigned idle_ms;
+    bool listen_started, idle_expired;
 } capture_storage_t;
 static capture_storage_t *s;
 static QueueHandle_t verdicts;
@@ -131,10 +138,43 @@ static bool output(void *ctx, const lc_record_t *r)
         if (r->event == LC_ABORT) h->id = 0;
     }
     /* 上行 FIFO 写成功才回填状态；失败即返回 false，采集器随即置 failed。 */
-    if (send_record(s->frame, bytes, producer_epoch) != ESP_OK) return false;
+    /* 必须在记录对 WSS 可见之前取快照：START 是相对时间轴的原点，
+     * 并不表示语音在声学上就从这一时刻开始。 */
+#if CONFIG_JULIA_VOICE_TIMING
+    int64_t trace_us = esp_timer_get_time();
+    if (r->event == LC_START) {
+        voice_timing_record(VT_CAPTURE_START,producer_epoch,r->id,0,trace_us,0,r->mode);
+        voice_timing_record(VT_GATE_STATE,producer_epoch,r->id,0,trace_us,
+            s->capture.noise_gate_enabled, (int64_t)lrint(s->capture.noise_config.high_ratio*1000));
+        voice_timing_record(VT_TAIL_CONFIG,producer_epoch,r->id,0,trace_us,
+            r->mode == LC_DIALOG && s->capture.noise_tail_enabled &&
+            s->capture.noise_gate_enabled && s->capture.fft_enabled,
+            LC_NOISE_GRACE_FRAMES*20);
+        voice_timing_record(VT_RECOVERY_SHAPE,producer_epoch,r->id,0,trace_us,
+            (int64_t)lrint(s->capture.noise_recovery_ratio*1000),
+            (int64_t)lrint(s->capture.noise_recovery_centroid));
+        voice_timing_record(VT_TAIL_GUARD,producer_epoch,r->id,0,trace_us,
+            s->capture.noise_tail_end_guard_ms,0);
+    }
+    else if (r->event == LC_END) {
+        voice_timing_record(VT_CAPTURE_END,producer_epoch,r->id,0,trace_us,r->index,r->limit);
+        voice_timing_record(VT_TAIL_SUMMARY,producer_epoch,r->id,0,trace_us,
+            s->capture.noise_tail_entries,s->capture.noise_tail_recoveries);
+    }
+    else if (r->event == LC_ABORT)
+        voice_timing_record(VT_CAPTURE_ABORT,producer_epoch,r->id,0,trace_us,0,0);
+    else if (r->event == LC_AUDIO && r->index == 0)
+        voice_timing_record(VT_FIRST_PCM_QUEUED,producer_epoch,r->id,0,trace_us,0,0);
+#endif
+    if (send_record(s->frame, bytes, producer_epoch) != ESP_OK) {
+        voice_timing_record(VT_ENQUEUE_FAILED,producer_epoch,r->id,0,esp_timer_get_time(),r->event,0);
+        return false;
+    }
+    if (r->event == LC_END)
+        voice_timing_record(VT_ENQUEUE_END,producer_epoch,r->id,0,esp_timer_get_time(),r->index,0);
     /* 起音/结束只作为状态语义通知上层，实际如何回应由上层决定。 */
     if (producer_epoch == atomic_load(&epoch) && atomic_load(&ready) &&
-        (r->event == LC_START || r->event == LC_END)) state_event(r->event, r->mode);
+        (r->event == LC_START || r->event == LC_END)) state_event(r->event, r->mode, s->listen_revision);
     if (r->event != LC_AUDIO)
         ESP_LOGI("local_capture", "event=%d epoch=%" PRIu32 " id=%" PRIu32
                  " mode=%d bg=%.2f frames=%" PRIu32 " limit=%u",
@@ -168,8 +208,9 @@ esp_err_t voice_local_capture_init(voice_capture_send_t send, voice_capture_even
             ((CONFIG_JULIA_CAPTURE_VAD_WAKE_TAIL_MS + 19) / 20) * 20,
             ((CONFIG_JULIA_CAPTURE_VAD_DIALOG_TAIL_MS + 19) / 20) * 20);
     if (!vad_ready) {
-        /* Preserve the existing energy/FFT gate if optional VAD cannot start. */
+        /* 可选 VAD 无法启动时，保留原有的 energy/FFT gate 配置。 */
         lc_vad_destroy(&s->vad);
+        s->capture.noise_gate_enabled = false;
         ESP_LOGE("local_capture", "WebRTC VAD init failed; using existing energy/FFT gate");
     } else {
         ESP_LOGI("local_capture", "gate=energy+fft(%d)+webrtc mode=%d frame_ms=20 tail_wake=%u tail_dialog=%u init_us=%lld",
@@ -177,6 +218,15 @@ esp_err_t voice_local_capture_init(voice_capture_send_t send, voice_capture_even
             s->capture.voice_end_dialog_ms, (long long)(esp_timer_get_time()-init_started));
     }
 #endif
+    ESP_LOGI("local_capture", "noise_gate enabled=%u ratio=%.3f centroid_hz=%.0f window=%u min_energy=%u percent=%u confirm=%u",
+        s->capture.noise_gate_enabled, s->capture.noise_config.high_ratio,
+        s->capture.noise_config.centroid_hz, s->capture.noise_config.window_frames,
+        s->capture.noise_config.min_energy_frames, s->capture.noise_config.noise_percent,
+        s->capture.noise_config.confirm_frames);
+    ESP_LOGI("local_capture", "noise_tail dialog_only enabled=%u recovery_ratio=%.3f recovery_centroid=%.0f candidates=%u/%u grace_ms=%u end_guard_ms=%u",
+        s->capture.noise_tail_enabled, s->capture.noise_recovery_ratio, s->capture.noise_recovery_centroid,
+        LC_NOISE_RECOVERY_NEED, LC_NOISE_RECOVERY_FRAMES, LC_NOISE_GRACE_FRAMES*20,
+        s->capture.noise_tail_end_guard_ms);
     return ESP_OK;
 }
 
@@ -256,6 +306,7 @@ bool voice_local_capture_text(const uint8_t *text, size_t len)
                             !strcmp(v->valuestring, "empty") ? 2 :
                             !strcmp(v->valuestring, "speech") ? 3 : 0;
             verdict_t value = {atomic_load(&epoch), (uint32_t)id->valuedouble, kind};
+            if (kind) voice_timing_record(VT_VERDICT,value.epoch,value.id,0,esp_timer_get_time(),kind,0);
             /* 4 槽非阻塞队列：入队失败就结束会话而不是丢判决——判决丢失会让本地底噪与云端
              * 判定口径不一致（本地继续用旧底噪分段），宁可重连后重新握手。 */
             if (kind && xQueueSend(verdicts, &value, 0) != pdTRUE) wss_transport_fail_session();
@@ -265,8 +316,19 @@ bool voice_local_capture_text(const uint8_t *text, size_t len)
     return true;
 }
 
-/* 采音任务每 20 ms 调用一次，输入必须是完整 PCM1 帧。上层的 mode 只是“期望模式”，
- * 实际生效还需 capture_ready 放行，见下方 lc_set_mode 调用。 */
+/* 采音任务在处理当前帧之前传入状态快照；0 表示不启用 S4 未起音期限。 */
+void voice_local_capture_listen_window(uint32_t revision)
+{
+    if (!s || s->listen_revision == revision) return;
+    /* 唤醒候选或上一轮对话不得算作本次 S4 的起音。 */
+    if (revision) lc_set_mode(&s->capture, LC_OFF);
+    s->listen_revision = revision;
+    s->idle_ms = 0;
+    s->idle_expired = false;
+    s->listen_started = false;
+}
+
+/* 每 20 ms 输入完整 PCM1 帧；期望模式还需 capture_ready 放行。 */
 void voice_local_capture_frame(const uint8_t *frame, size_t len)
 {
     if (!s || len != 656 || memcmp(frame, "PCM1", 4)) return;
@@ -280,6 +342,8 @@ void voice_local_capture_frame(const uint8_t *frame, size_t len)
         memset(s->history, 0, sizeof(s->history));
         producer_epoch = current; last_applied = 0;
         s->sample_ms = wall_ms - 20;
+        s->idle_ms = 0;
+        s->listen_started = s->idle_expired = false;
     }
     /* 采样时间轴按 20 ms/帧单调推进，与云端 floor_epoch + total_samples/sr 同口径；
      * 网络和任务抖动不改变帧间隔。采音停顿超过 100 ms 时按当前挂钟重新对齐，阈值来源未确认，
@@ -291,6 +355,9 @@ void voice_local_capture_frame(const uint8_t *frame, size_t len)
     s->sample_ms += 20;
     /* 只有握手成功且上层给出模式时才启用本地判决，否则保持 LC_OFF 空转。 */
     lc_set_mode(&s->capture, atomic_load(&ready) ? atomic_load(&wanted_mode) : LC_OFF);
+    /* 上报之后要一直扣住这个窗口，直到 FSM 消费掉这条带 revision 校验的事件；
+     * 否则后面的帧会在已排队的超时事件之前起音。 */
+    if (s->idle_expired) return;
     verdict_t v;
     /* 判决队列非阻塞取空：网络任务只投递，真正的回填顺序由本任务在帧边界决定。 */
     while (xQueueReceive(verdicts, &v, 0) == pdTRUE) {
@@ -339,6 +406,36 @@ void voice_local_capture_frame(const uint8_t *frame, size_t len)
         s->pcm[i] = (int16_t)((uint16_t)frame[16 + 2*i] | ((uint16_t)frame[17 + 2*i] << 8));
     /* 处理失败意味着本帧发不出去或历史已不可靠：结束会话重连，不跳过该段继续识别。
      * 换代说明失败属于旧连接，此时不再上报。 */
-    if (!lc_process(&s->capture, s->pcm, s->sample_ms) &&
-        producer_epoch == atomic_load(&epoch)) wss_transport_fail_session();
+#if CONFIG_JULIA_VOICE_TIMING
+    unsigned tail_entries = s->capture.noise_tail_entries;
+    unsigned tail_recoveries = s->capture.noise_tail_recoveries;
+#endif
+    bool capture_ok = lc_process(&s->capture, s->pcm, s->sample_ms);
+#if CONFIG_JULIA_VOICE_TIMING
+    if (s->capture.noise_tail_entries > tail_entries)
+        voice_timing_record(VT_TAIL_ENTER,producer_epoch,s->capture.id,0,esp_timer_get_time(),
+                            s->capture.noise_window.noise,s->capture.noise_window.energy);
+    if (s->capture.noise_tail_recoveries > tail_recoveries)
+        voice_timing_record(VT_TAIL_RECOVER,producer_epoch,s->capture.id,0,esp_timer_get_time(),
+                            s->capture.noise_tail_recoveries,s->capture.noise_tail_hold_frames*20);
+#endif
+    if (!capture_ok) {
+        if (producer_epoch == atomic_load(&epoch)) wss_transport_fail_session();
+        return;
+    }
+    if (s->capture.active) s->listen_started = true;
+    if (s->capture.mode != LC_DIALOG) {
+        s->idle_ms = 0; /* 提示播放与握手门控都不消耗这个窗口。 */
+    } else if (s->listen_revision && !s->listen_started &&
+               producer_epoch == atomic_load(&epoch) && atomic_load(&ready)) {
+        /* 先由原有起音 gate 判定：最后一帧判为语音即视为已起音；
+         * 孤立的已接受帧不会重置计数，因此不会延长 250 帧 / 5 秒窗口。 */
+        s->idle_ms += 20;
+        if (s->idle_ms >= 5000) {
+            s->idle_expired = true;
+            ESP_LOGI("local_capture", "no speech onset after 5000 ms revision=%" PRIu32,
+                     s->listen_revision);
+            state_event(LC_IDLE_TIMEOUT, LC_DIALOG, s->listen_revision);
+        }
+    }
 }

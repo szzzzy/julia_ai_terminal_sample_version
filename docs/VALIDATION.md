@@ -54,13 +54,13 @@
 | UI-01A | S3/S5/S6 收到 `wake_detected` | 本地收音版本提交 S4 后立即播放内嵌唤醒 WAV，同时按原流程回匹配 `interaction_id` 的 `state_ready`；嘴型随本地 PCM 动作；播完闭嘴并保持 S4，约 600ms 防回声间隔后收音；无云端 TTS／音频或新增就绪等待 |
 | VOICE-WAKE-LOCAL | 本地唤醒应答期间收到重复 wake／迟到 SPKS、PCM、SPKE；断线或退出 S4 | 重复 wake 不重播，网络音频不覆盖或截断本地应答；断线／退出取消应答；应答启动或输出失败触发会话恢复，不当作正常播完开放首句 |
 | UI-01B | 收到 MQTT `intent_result` | `normal` 不改变状态；`goodnight` 零语音进入 S6；`dismiss` 零语音进入 S5，背光固定为配置值（默认 50%）；随后 `MIC_STOP` 不再推进对话 |
-| UI-02 | 非 busy 陪伴达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 600 秒） | 从 S1 的 50% 固定背光进入 S3 待机、闭眼与 5%–30% 背光呼吸；同时检查 MIC 仍按服务器模式上传 |
+| UI-02 | 非 busy 陪伴达到 `CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS`（默认 10 秒） | 从 S1 的 50% 固定背光进入 S3 待机、闭眼与 0%–30% 背光呼吸；同时检查 MIC 仍按服务器模式上传 |
 | UI-02A | S3 连续驻留达到 `CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS`（默认 300 秒） | 投递 `EVT_STANDBY_TIMEOUT` 并进入 S6，停止呼吸、背光熄灭且面板进入睡眠；中途唤醒会取消旧计时 |
-| UI-02B | S5 连续驻留达到 `CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS`（默认 1800 秒） | 投递 `EVT_SILENT_TIMEOUT` 并回到 S3；中途唤醒会取消旧计时 |
+| UI-02B | S5 连续驻留达到 `CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS`（默认 300 秒） | 投递 `EVT_SILENT_TIMEOUT` 并进入 S6（见 `julia_fsm.c` 的 S5 分支）；中途唤醒会取消旧计时 |
 | UI-03 | 听音、思考或播放超过普通闲置阈值 | 不被普通闲置策略抢占；业务等待超时按已知限制记录 |
 | UI-04 | 有效 RTC／SNTP，覆盖 22 点、23 点、07 点 | 22 点事件当前不迁移；夜间宽限进入 S6；07 点不旁路点亮，仍等待唤醒词离开 S6 |
 | UI-05 | 无效 RTC／未同步时间 | 夜间调度不依赖无效墙钟误触发 |
-| UI-06 | S6 中轻触、桌面振动和明显搬动设备 | 调试门限0.20g／25°/s、200ms采样下，单次轻触不触发；连续运动约800ms后投递 `EVT_MOTION_WAKE`，FSM执行S6→S3并统一唤醒面板、闭眼待机和背光呼吸；不得直接操作显示 |
+| UI-06 | S6 中轻触、桌面振动和明显搬动设备 | 按当前生效参数（加速度门限 450 mg、陀螺仪门限 400 dps、扫描周期 20ms、连续 10 帧确认）验证：单次轻触不触发；持续运动满足 10 帧（约 200ms）后投递 `EVT_MOTION_WAKE`，FSM执行S6→S3并统一唤醒面板、闭眼待机和背光呼吸；不得直接操作显示。注意传感器 ODR 固定 30Hz，20ms 周期会重复读同一批样本；重复采样会让加速度差分归零并清零连续帧计数，因此该项验收同时依赖角速度支路（它按当前样本模长判定，不受重复采样影响）。驱动量程为 ±16 g／每轴 ±1024 dps，与标定录制一致，角速度合成上界约 1773.6 dps，门限 400 dps 可达；参数依据见 `imu_records/tuning/replay.json`（同数据拟合、无留出集，未上板） |
 | UI-07 | OTA 任务成功、普通任务失败、链路失败、严重本机故障 | 分别验证 S8→S0、S8→S3、S8→S3、S8→S7.2；忙碌态拒绝准入时保持原状态 |
 | UI-08 | 连续观察左右眼半闭／全闭／睁眼循环 | 闭眼时底图下缘无残留；睁眼恢复原坐标；上下边缘无新的接缝 |
 | UI-09 | 依次覆盖 S0～S8、S2.1／S2.2／S2.3、S7.1 和 S7.2 | `(60,100)` 黑色状态码完整显示且始终置顶；断联后红色 `offline` 跨主状态保留，相关连接恢复后消失；严重故障显示 `S7.2 FAULT` |

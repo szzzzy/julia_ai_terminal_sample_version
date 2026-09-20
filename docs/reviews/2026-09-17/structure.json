@@ -1,0 +1,7011 @@
+{
+  "files": [
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "lines": 528,
+      "code_lines": 435,
+      "conditional_directives": 0
+    },
+    {
+      "path": "components/julia_board_audio/lc_spectrum.c",
+      "lines": 124,
+      "code_lines": 111,
+      "conditional_directives": 4
+    },
+    {
+      "path": "components/julia_board_audio/lc_vad.c",
+      "lines": 42,
+      "code_lines": 35,
+      "conditional_directives": 0
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "lines": 236,
+      "code_lines": 196,
+      "conditional_directives": 2
+    },
+    {
+      "path": "main/app/boot_coordinator.c",
+      "lines": 103,
+      "code_lines": 99,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/app/main.c",
+      "lines": 287,
+      "code_lines": 268,
+      "conditional_directives": 9
+    },
+    {
+      "path": "main/audio_assets/audio_control_plane.c",
+      "lines": 338,
+      "code_lines": 246,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "lines": 753,
+      "code_lines": 460,
+      "conditional_directives": 1
+    },
+    {
+      "path": "main/audio_assets/audio_service.c",
+      "lines": 101,
+      "code_lines": 34,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/behavior/julia_fault.c",
+      "lines": 134,
+      "code_lines": 114,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "lines": 604,
+      "code_lines": 496,
+      "conditional_directives": 5
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "lines": 1300,
+      "code_lines": 1096,
+      "conditional_directives": 4
+    },
+    {
+      "path": "main/behavior/julia_idle_display.c",
+      "lines": 215,
+      "code_lines": 133,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/behavior/julia_motion.c",
+      "lines": 190,
+      "code_lines": 141,
+      "conditional_directives": 3
+    },
+    {
+      "path": "main/behavior/julia_night_schedule.c",
+      "lines": 191,
+      "code_lines": 146,
+      "conditional_directives": 2
+    },
+    {
+      "path": "main/behavior/julia_quiet_power.c",
+      "lines": 125,
+      "code_lines": 90,
+      "conditional_directives": 5
+    },
+    {
+      "path": "main/diagnostics/imu_logger.c",
+      "lines": 352,
+      "code_lines": 327,
+      "conditional_directives": 1
+    },
+    {
+      "path": "main/display/esp_lcd_st77916.c",
+      "lines": 654,
+      "code_lines": 484,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "lines": 356,
+      "code_lines": 280,
+      "conditional_directives": 4
+    },
+    {
+      "path": "main/display/julia_display.c",
+      "lines": 368,
+      "code_lines": 293,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "lines": 357,
+      "code_lines": 215,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/hardware/breathing_led.c",
+      "lines": 218,
+      "code_lines": 124,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/hardware/julia_battery.c",
+      "lines": 304,
+      "code_lines": 249,
+      "conditional_directives": 15
+    },
+    {
+      "path": "main/hardware/julia_led.c",
+      "lines": 295,
+      "code_lines": 156,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/hardware/julia_power.c",
+      "lines": 96,
+      "code_lines": 61,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/hardware/pcf85063_shared.c",
+      "lines": 118,
+      "code_lines": 67,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/hardware/qmi8658_shared.c",
+      "lines": 179,
+      "code_lines": 134,
+      "conditional_directives": 1
+    },
+    {
+      "path": "main/hardware/rtc_calendar.c",
+      "lines": 63,
+      "code_lines": 38,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/hardware/tca9554.c",
+      "lines": 178,
+      "code_lines": 113,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/network/download_protocol.c",
+      "lines": 130,
+      "code_lines": 110,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/network/http_downloader.c",
+      "lines": 361,
+      "code_lines": 258,
+      "conditional_directives": 2
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "lines": 1872,
+      "code_lines": 1215,
+      "conditional_directives": 12
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "lines": 809,
+      "code_lines": 620,
+      "conditional_directives": 8
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "lines": 1801,
+      "code_lines": 1289,
+      "conditional_directives": 6
+    },
+    {
+      "path": "main/network/wss/wss_tx_writer.c",
+      "lines": 84,
+      "code_lines": 64,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/ota/ota_boot_flow.c",
+      "lines": 309,
+      "code_lines": 196,
+      "conditional_directives": 1
+    },
+    {
+      "path": "main/ota/ota_boot_health.c",
+      "lines": 221,
+      "code_lines": 147,
+      "conditional_directives": 4
+    },
+    {
+      "path": "main/ota/ota_control_plane.c",
+      "lines": 613,
+      "code_lines": 374,
+      "conditional_directives": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "lines": 1196,
+      "code_lines": 808,
+      "conditional_directives": 3
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "lines": 954,
+      "code_lines": 583,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/ota/ota_stability.c",
+      "lines": 407,
+      "code_lines": 224,
+      "conditional_directives": 2
+    },
+    {
+      "path": "main/ota/ota_state_store.c",
+      "lines": 261,
+      "code_lines": 162,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/storage/sd_card.c",
+      "lines": 102,
+      "code_lines": 73,
+      "conditional_directives": 3
+    },
+    {
+      "path": "main/time/julia_time.c",
+      "lines": 241,
+      "code_lines": 141,
+      "conditional_directives": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "lines": 250,
+      "code_lines": 175,
+      "conditional_directives": 3
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_mouth.c",
+      "lines": 115,
+      "code_lines": 71,
+      "conditional_directives": 2
+    },
+    {
+      "path": "main/ui/avatar_rle.c",
+      "lines": 79,
+      "code_lines": 42,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "lines": 834,
+      "code_lines": 661,
+      "conditional_directives": 2
+    },
+    {
+      "path": "main/voice/capture/voice_local_capture.c",
+      "lines": 380,
+      "code_lines": 274,
+      "conditional_directives": 3
+    },
+    {
+      "path": "main/voice/capture/wake_detector.c",
+      "lines": 291,
+      "code_lines": 168,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/voice/demo/voice_push_demo.c",
+      "lines": 191,
+      "code_lines": 90,
+      "conditional_directives": 6
+    },
+    {
+      "path": "main/voice/playback/pcm_buffer.c",
+      "lines": 50,
+      "code_lines": 41,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "lines": 482,
+      "code_lines": 410,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/voice/protocol/voice_control_guard.c",
+      "lines": 188,
+      "code_lines": 160,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "lines": 377,
+      "code_lines": 315,
+      "conditional_directives": 7
+    },
+    {
+      "path": "main/voice/protocol/voice_uri.c",
+      "lines": 104,
+      "code_lines": 49,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_pump.c",
+      "lines": 142,
+      "code_lines": 116,
+      "conditional_directives": 0
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "lines": 243,
+      "code_lines": 189,
+      "conditional_directives": 11
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "lines": 2023,
+      "code_lines": 1720,
+      "conditional_directives": 50
+    }
+  ],
+  "functions": [
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_mic_set_enabled",
+      "line": 79,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_mic_is_enabled",
+      "line": 85,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "sum8",
+      "line": 95,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "mic_init",
+      "line": 102,
+      "lines": 26,
+      "code_lines": 25,
+      "if_count": 4,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "speaker_init",
+      "line": 129,
+      "lines": 35,
+      "code_lines": 35,
+      "if_count": 4,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "scale_sample",
+      "line": 165,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "mic_dbfs_x100",
+      "line": 173,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "send_pcm1",
+      "line": 179,
+      "lines": 16,
+      "code_lines": 16,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "mic_task",
+      "line": 198,
+      "lines": 106,
+      "code_lines": 89,
+      "if_count": 21,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_init",
+      "line": 305,
+      "lines": 38,
+      "code_lines": 31,
+      "if_count": 6,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_set_afe_sink",
+      "line": 346,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_set_wss_sink",
+      "line": 353,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_enable_wss_mic",
+      "line": 360,
+      "lines": 11,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_mic_sleep",
+      "line": 374,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_mic_wake",
+      "line": 384,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_speaker_start",
+      "line": 393,
+      "lines": 19,
+      "code_lines": 17,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "speaker_clocks_low",
+      "line": 413,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_speaker_stop_locked",
+      "line": 424,
+      "lines": 15,
+      "code_lines": 14,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_speaker_retain",
+      "line": 440,
+      "lines": 13,
+      "code_lines": 13,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_speaker_write",
+      "line": 454,
+      "lines": 26,
+      "code_lines": 26,
+      "if_count": 5,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_speaker_stop",
+      "line": 481,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_speaker_is_playing",
+      "line": 492,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/board_audio.c",
+      "name": "board_audio_speaker_self_test",
+      "line": 497,
+      "lines": 32,
+      "code_lines": 32,
+      "if_count": 5,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "components/julia_board_audio/lc_spectrum.c",
+      "name": "lc_spectrum_init",
+      "line": 8,
+      "lines": 20,
+      "code_lines": 17,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "components/julia_board_audio/lc_spectrum.c",
+      "name": "fft64",
+      "line": 29,
+      "lines": 30,
+      "code_lines": 29,
+      "if_count": 1,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "components/julia_board_audio/lc_spectrum.c",
+      "name": "lc_spectrum_from_psd",
+      "line": 60,
+      "lines": 23,
+      "code_lines": 23,
+      "if_count": 6,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "components/julia_board_audio/lc_spectrum.c",
+      "name": "lc_spectrum_features",
+      "line": 84,
+      "lines": 34,
+      "code_lines": 30,
+      "if_count": 3,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "components/julia_board_audio/lc_spectrum.c",
+      "name": "lc_spectrum_accept",
+      "line": 119,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/lc_vad.c",
+      "name": "lc_vad_init",
+      "line": 14,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/lc_vad.c",
+      "name": "lc_vad_destroy",
+      "line": 22,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/lc_vad.c",
+      "name": "lc_vad_reset",
+      "line": 27,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/lc_vad.c",
+      "name": "lc_vad_frame",
+      "line": 33,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "lc_rms_dbfs",
+      "line": 10,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "compare",
+      "line": 22,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "lc_percentile10",
+      "line": 29,
+      "lines": 9,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "lc_floor_reset",
+      "line": 40,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "append",
+      "line": 45,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "window_percentile",
+      "line": 56,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "clamp",
+      "line": 69,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "update",
+      "line": 73,
+      "lines": 16,
+      "code_lines": 16,
+      "if_count": 6,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "lc_floor_frame",
+      "line": 90,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 3,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "lc_floor_feed_segment",
+      "line": 98,
+      "lines": 9,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "emit",
+      "line": 109,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "lc_init",
+      "line": 118,
+      "lines": 12,
+      "code_lines": 11,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "lc_set_voice_detector",
+      "line": 131,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "lc_set_mode",
+      "line": 143,
+      "lines": 12,
+      "code_lines": 11,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "components/julia_board_audio/local_capture.c",
+      "name": "lc_process",
+      "line": 156,
+      "lines": 81,
+      "code_lines": 66,
+      "if_count": 20,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/app/boot_coordinator.c",
+      "name": "release",
+      "line": 24,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/app/boot_coordinator.c",
+      "name": "worker",
+      "line": 31,
+      "lines": 21,
+      "code_lines": 20,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/app/boot_coordinator.c",
+      "name": "boot_coordinator_run",
+      "line": 52,
+      "lines": 52,
+      "code_lines": 52,
+      "if_count": 9,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "module_result",
+      "line": 55,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "cloud_allowed",
+      "line": 61,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "boot_mqtt_ip_ready",
+      "line": 68,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "boot_voice_ip_ready",
+      "line": 72,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "battery_status_updated",
+      "line": 76,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "display_branch",
+      "line": 83,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 3,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "animation_branch",
+      "line": 93,
+      "lines": 7,
+      "code_lines": 6,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "audio_branch",
+      "line": 100,
+      "lines": 15,
+      "code_lines": 15,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "resources_branch",
+      "line": 115,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "behavior_start",
+      "line": 126,
+      "lines": 21,
+      "code_lines": 20,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "battery_start",
+      "line": 147,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "ota_accept",
+      "line": 153,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "boot_failure",
+      "line": 162,
+      "lines": 18,
+      "code_lines": 17,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "start_cloud_early",
+      "line": 181,
+      "lines": 18,
+      "code_lines": 18,
+      "if_count": 3,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/app/main.c",
+      "name": "app_main",
+      "line": 199,
+      "lines": 89,
+      "code_lines": 81,
+      "if_count": 16,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/audio_assets/audio_control_plane.c",
+      "name": "audio_control_plane_set_last_request_id",
+      "line": 54,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/audio_assets/audio_control_plane.c",
+      "name": "audio_control_plane_request_id_matches",
+      "line": 63,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/audio_assets/audio_control_plane.c",
+      "name": "audio_control_plane_hex_to_nibble",
+      "line": 78,
+      "lines": 13,
+      "code_lines": 13,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_control_plane.c",
+      "name": "audio_control_plane_parse_sha256",
+      "line": 93,
+      "lines": 16,
+      "code_lines": 16,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/audio_assets/audio_control_plane.c",
+      "name": "audio_control_plane_copy_string",
+      "line": 111,
+      "lines": 13,
+      "code_lines": 13,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_control_plane.c",
+      "name": "audio_control_plane_get_u32",
+      "line": 126,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_control_plane.c",
+      "name": "audio_control_plane_get_i64",
+      "line": 138,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_control_plane.c",
+      "name": "audio_control_plane_url_host_allowed",
+      "line": 156,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/audio_assets/audio_control_plane.c",
+      "name": "native_audio_build_check_request",
+      "line": 165,
+      "lines": 44,
+      "code_lines": 37,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_control_plane.c",
+      "name": "audio_control_plane_parse_audio_response",
+      "line": 215,
+      "lines": 124,
+      "code_lines": 109,
+      "if_count": 15,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_nvs_open",
+      "line": 135,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_record_load",
+      "line": 141,
+      "lines": 22,
+      "code_lines": 22,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_record_save",
+      "line": 165,
+      "lines": 17,
+      "code_lines": 17,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_record_clear",
+      "line": 184,
+      "lines": 17,
+      "code_lines": 17,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_current_version_save",
+      "line": 203,
+      "lines": 17,
+      "code_lines": 17,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_current_version_load",
+      "line": 222,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_record_init",
+      "line": 242,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_record_matches",
+      "line": 255,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_report_status",
+      "line": 283,
+      "lines": 43,
+      "code_lines": 38,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_engine_sink",
+      "line": 367,
+      "lines": 41,
+      "code_lines": 39,
+      "if_count": 9,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_engine_restart",
+      "line": 423,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_download_task",
+      "line": 456,
+      "lines": 217,
+      "code_lines": 159,
+      "if_count": 20,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_engine_start",
+      "line": 687,
+      "lines": 35,
+      "code_lines": 29,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_engine_is_running",
+      "line": 723,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/audio_assets/audio_engine.c",
+      "name": "audio_engine_get_current_version",
+      "line": 731,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/audio_assets/audio_service.c",
+      "name": "audio_service_init",
+      "line": 40,
+      "lines": 5,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/audio_assets/audio_service.c",
+      "name": "audio_service_handle_response",
+      "line": 63,
+      "lines": 39,
+      "code_lines": 22,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fault.c",
+      "name": "julia_fault_reason_name",
+      "line": 27,
+      "lines": 17,
+      "code_lines": 17,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fault.c",
+      "name": "julia_fault_read_last",
+      "line": 45,
+      "lines": 21,
+      "code_lines": 19,
+      "if_count": 6,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fault.c",
+      "name": "julia_fault_record",
+      "line": 67,
+      "lines": 61,
+      "code_lines": 58,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fault.c",
+      "name": "julia_fault_reset_allowed",
+      "line": 129,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "default_on_enter",
+      "line": 86,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "default_on_exit",
+      "line": 96,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "julia_fsm_state_is_valid",
+      "line": 111,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "julia_fsm_state_is_valid_full",
+      "line": 125,
+      "lines": 18,
+      "code_lines": 18,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "target_is",
+      "line": 145,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "target_is_disconnected",
+      "line": 155,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "target_is_fault",
+      "line": 164,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "julia_fsm_can_transition_full",
+      "line": 180,
+      "lines": 126,
+      "code_lines": 111,
+      "if_count": 8,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "julia_fsm_can_transition",
+      "line": 311,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "julia_fsm_transition_to_full",
+      "line": 329,
+      "lines": 48,
+      "code_lines": 47,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "julia_fsm_transition_to",
+      "line": 378,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "julia_fsm_init",
+      "line": 390,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "julia_fsm_handle_event",
+      "line": 403,
+      "lines": 178,
+      "code_lines": 150,
+      "if_count": 28,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "julia_fsm_main_state_name",
+      "line": 582,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "julia_fsm_s2_sub_state_name",
+      "line": 588,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "julia_fsm_s7_sub_state_name",
+      "line": 594,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm.c",
+      "name": "julia_fsm_event_name",
+      "line": 600,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "play_local_prompt",
+      "line": 135,
+      "lines": 17,
+      "code_lines": 17,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "standby_timer_callback",
+      "line": 167,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "silent_timer_callback",
+      "line": 176,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "disconnect_timer_callback",
+      "line": 185,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "service_init_timer_callback",
+      "line": 194,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "boot_try_handoff",
+      "line": 209,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "service_state_apply_event",
+      "line": 224,
+      "lines": 58,
+      "code_lines": 56,
+      "if_count": 12,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "service_state_reconcile",
+      "line": 294,
+      "lines": 33,
+      "code_lines": 30,
+      "if_count": 7,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "presentation_for",
+      "line": 328,
+      "lines": 29,
+      "code_lines": 26,
+      "if_count": 7,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "presentation_name",
+      "line": 358,
+      "lines": 15,
+      "code_lines": 15,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "state_status_text",
+      "line": 374,
+      "lines": 36,
+      "code_lines": 36,
+      "if_count": 3,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "apply_presentation",
+      "line": 413,
+      "lines": 95,
+      "code_lines": 88,
+      "if_count": 4,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "play_ota_prompt",
+      "line": 509,
+      "lines": 15,
+      "code_lines": 13,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "local_prompt_poll",
+      "line": 525,
+      "lines": 41,
+      "code_lines": 35,
+      "if_count": 8,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "runtime_on_enter",
+      "line": 567,
+      "lines": 97,
+      "code_lines": 83,
+      "if_count": 15,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "runtime_on_exit",
+      "line": 667,
+      "lines": 28,
+      "code_lines": 28,
+      "if_count": 10,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "event_deadline",
+      "line": 698,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "interaction_event_allowed",
+      "line": 711,
+      "lines": 15,
+      "code_lines": 14,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "runtime_process_event",
+      "line": 733,
+      "lines": 58,
+      "code_lines": 46,
+      "if_count": 14,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "runtime_check_deadlines",
+      "line": 794,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "runtime_process_message_event",
+      "line": 807,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "ota_terminal_poll",
+      "line": 817,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "play_fault_restart_prompt",
+      "line": 832,
+      "lines": 22,
+      "code_lines": 22,
+      "if_count": 3,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "runtime_process_control",
+      "line": 856,
+      "lines": 37,
+      "code_lines": 37,
+      "if_count": 8,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "fsm_task",
+      "line": 894,
+      "lines": 109,
+      "code_lines": 85,
+      "if_count": 11,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "runtime_control_sync",
+      "line": 1004,
+      "lines": 17,
+      "code_lines": 16,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_start",
+      "line": 1022,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_finish_boot_animation",
+      "line": 1027,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_wait_boot_decision",
+      "line": 1032,
+      "lines": 9,
+      "code_lines": 8,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_start_cloud_window",
+      "line": 1042,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_init",
+      "line": 1047,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_prepare",
+      "line": 1053,
+      "lines": 103,
+      "code_lines": 101,
+      "if_count": 16,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_set_state_observer",
+      "line": 1157,
+      "lines": 10,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_post",
+      "line": 1168,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_listen_idle_timeout",
+      "line": 1180,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "runtime_post_sync_checked",
+      "line": 1192,
+      "lines": 27,
+      "code_lines": 24,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_post_sync",
+      "line": 1220,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_require_wake",
+      "line": 1225,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_raise_fault",
+      "line": 1230,
+      "lines": 15,
+      "code_lines": 13,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_get_state",
+      "line": 1246,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_get_s2_sub_state",
+      "line": 1255,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_get_s7_sub_state",
+      "line": 1264,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_get_snapshot",
+      "line": 1275,
+      "lines": 17,
+      "code_lines": 17,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_fsm_runtime.c",
+      "name": "julia_fsm_runtime_get_service_state",
+      "line": 1293,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_idle_display.c",
+      "name": "post_fsm_event",
+      "line": 52,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_idle_display.c",
+      "name": "transition_is_current",
+      "line": 66,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_idle_display.c",
+      "name": "display_enter_standby",
+      "line": 82,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_idle_display.c",
+      "name": "display_theme_task",
+      "line": 94,
+      "lines": 46,
+      "code_lines": 42,
+      "if_count": 4,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "main/behavior/julia_idle_display.c",
+      "name": "julia_idle_display_init",
+      "line": 148,
+      "lines": 22,
+      "code_lines": 21,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_idle_display.c",
+      "name": "julia_idle_display_note_activity",
+      "line": 176,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_idle_display.c",
+      "name": "julia_idle_display_set_busy",
+      "line": 192,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_idle_display.c",
+      "name": "julia_idle_display_is_sleeping",
+      "line": 208,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_motion.c",
+      "name": "julia_motion_ready",
+      "line": 20,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_motion.c",
+      "name": "julia_motion_notify",
+      "line": 45,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_motion.c",
+      "name": "motion_monitor_state",
+      "line": 49,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_motion.c",
+      "name": "motion_task",
+      "line": 60,
+      "lines": 101,
+      "code_lines": 88,
+      "if_count": 11,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/behavior/julia_motion.c",
+      "name": "julia_motion_init",
+      "line": 165,
+      "lines": 19,
+      "code_lines": 17,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_motion.c",
+      "name": "julia_motion_notify",
+      "line": 185,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_motion.c",
+      "name": "julia_motion_init",
+      "line": 186,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_night_schedule.c",
+      "name": "julia_night_schedule_notify",
+      "line": 39,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_night_schedule.c",
+      "name": "hour_is_night",
+      "line": 46,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_night_schedule.c",
+      "name": "post_event",
+      "line": 55,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_night_schedule.c",
+      "name": "night_schedule_task",
+      "line": 66,
+      "lines": 100,
+      "code_lines": 87,
+      "if_count": 17,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "main/behavior/julia_night_schedule.c",
+      "name": "julia_night_schedule_init",
+      "line": 169,
+      "lines": 16,
+      "code_lines": 16,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/behavior/julia_night_schedule.c",
+      "name": "julia_night_schedule_notify",
+      "line": 186,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_night_schedule.c",
+      "name": "julia_night_schedule_init",
+      "line": 187,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_quiet_power.c",
+      "name": "set_capture",
+      "line": 38,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_quiet_power.c",
+      "name": "quiet_power_task",
+      "line": 46,
+      "lines": 66,
+      "code_lines": 55,
+      "if_count": 9,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "main/behavior/julia_quiet_power.c",
+      "name": "julia_quiet_power_notify",
+      "line": 115,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/behavior/julia_quiet_power.c",
+      "name": "julia_quiet_power_init",
+      "line": 120,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/diagnostics/imu_logger.c",
+      "name": "stage",
+      "line": 49,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/diagnostics/imu_logger.c",
+      "name": "beep",
+      "line": 59,
+      "lines": 15,
+      "code_lines": 15,
+      "if_count": 1,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/diagnostics/imu_logger.c",
+      "name": "sample_tick",
+      "line": 75,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/diagnostics/imu_logger.c",
+      "name": "make_csv",
+      "line": 82,
+      "lines": 34,
+      "code_lines": 29,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/diagnostics/imu_logger.c",
+      "name": "receive_ack",
+      "line": 118,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/diagnostics/imu_logger.c",
+      "name": "upload",
+      "line": 131,
+      "lines": 19,
+      "code_lines": 19,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/diagnostics/imu_logger.c",
+      "name": "capture",
+      "line": 151,
+      "lines": 49,
+      "code_lines": 49,
+      "if_count": 12,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/diagnostics/imu_logger.c",
+      "name": "worker",
+      "line": 201,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 3,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/diagnostics/imu_logger.c",
+      "name": "status_handler",
+      "line": 216,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/diagnostics/imu_logger.c",
+      "name": "format_peer_ipv4",
+      "line": 228,
+      "lines": 15,
+      "code_lines": 15,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/diagnostics/imu_logger.c",
+      "name": "command_handler",
+      "line": 244,
+      "lines": 55,
+      "code_lines": 55,
+      "if_count": 12,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/diagnostics/imu_logger.c",
+      "name": "ip_ready",
+      "line": 300,
+      "lines": 15,
+      "code_lines": 15,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/diagnostics/imu_logger.c",
+      "name": "imu_logger_start",
+      "line": 316,
+      "lines": 37,
+      "code_lines": 37,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/display/esp_lcd_st77916.c",
+      "name": "esp_lcd_new_panel_st77916",
+      "line": 99,
+      "lines": 76,
+      "code_lines": 68,
+      "if_count": 4,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/display/esp_lcd_st77916.c",
+      "name": "tx_param",
+      "line": 178,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/display/esp_lcd_st77916.c",
+      "name": "tx_color",
+      "line": 190,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/display/esp_lcd_st77916.c",
+      "name": "panel_st77916_del",
+      "line": 204,
+      "lines": 11,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/display/esp_lcd_st77916.c",
+      "name": "panel_st77916_reset",
+      "line": 226,
+      "lines": 17,
+      "code_lines": 15,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/display/esp_lcd_st77916.c",
+      "name": "panel_st77916_init",
+      "line": 466,
+      "lines": 57,
+      "code_lines": 50,
+      "if_count": 4,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/display/esp_lcd_st77916.c",
+      "name": "panel_st77916_draw_bitmap",
+      "line": 537,
+      "lines": 27,
+      "code_lines": 24,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/display/esp_lcd_st77916.c",
+      "name": "panel_st77916_invert_color",
+      "line": 566,
+      "lines": 13,
+      "code_lines": 13,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/display/esp_lcd_st77916.c",
+      "name": "panel_st77916_mirror",
+      "line": 583,
+      "lines": 21,
+      "code_lines": 20,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/display/esp_lcd_st77916.c",
+      "name": "panel_st77916_swap_xy",
+      "line": 607,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/display/esp_lcd_st77916.c",
+      "name": "panel_st77916_set_gap",
+      "line": 622,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/esp_lcd_st77916.c",
+      "name": "panel_st77916_disp_on_off",
+      "line": 636,
+      "lines": 19,
+      "code_lines": 18,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "resume_pwm",
+      "line": 96,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "control_lock",
+      "line": 102,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "control_unlock",
+      "line": 108,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "duty_for",
+      "line": 111,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "curve_duty",
+      "line": 118,
+      "lines": 15,
+      "code_lines": 15,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "fade_done",
+      "line": 135,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "start_segment",
+      "line": 144,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "breathe_task",
+      "line": 154,
+      "lines": 44,
+      "code_lines": 43,
+      "if_count": 9,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "julia_backlight_init",
+      "line": 202,
+      "lines": 31,
+      "code_lines": 31,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "julia_backlight_breathe_stop",
+      "line": 234,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "julia_backlight_set",
+      "line": 244,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "julia_backlight_fade_to",
+      "line": 257,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 4,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "julia_backlight_wait_fade",
+      "line": 277,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "julia_backlight_breathe_start",
+      "line": 284,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "julia_backlight_breathe_start_ex",
+      "line": 292,
+      "lines": 33,
+      "code_lines": 33,
+      "if_count": 4,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "julia_backlight_set_gamma",
+      "line": 327,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "julia_backlight_gamma_enabled",
+      "line": 337,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "julia_backlight_breathing",
+      "line": 339,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "julia_backlight_get_percent",
+      "line": 340,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "julia_backlight_get_duty",
+      "line": 341,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "julia_backlight_get_gpio_level",
+      "line": 342,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_backlight.c",
+      "name": "julia_backlight_force_off",
+      "line": 347,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_display.c",
+      "name": "reset_panel_via_existing_tca9554",
+      "line": 256,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/julia_display.c",
+      "name": "julia_display_init",
+      "line": 291,
+      "lines": 72,
+      "code_lines": 66,
+      "if_count": 1,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/display/julia_display.c",
+      "name": "julia_display_is_ready",
+      "line": 365,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "lvgl_port_color_trans_done",
+      "line": 71,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "lvgl_port_draw_bitmap_sync",
+      "line": 99,
+      "lines": 21,
+      "code_lines": 21,
+      "if_count": 5,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "lvgl_flush_cb",
+      "line": 132,
+      "lines": 25,
+      "code_lines": 25,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "lvgl_port_refr_now_sync",
+      "line": 169,
+      "lines": 10,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "lvgl_port_get_flush_metrics",
+      "line": 180,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 3,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "lvgl_tick_cb",
+      "line": 189,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "lvgl_task",
+      "line": 201,
+      "lines": 22,
+      "code_lines": 20,
+      "if_count": 3,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "lvgl_port_set_display_off",
+      "line": 235,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "apply_display_target",
+      "line": 244,
+      "lines": 24,
+      "code_lines": 24,
+      "if_count": 8,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "lvgl_port_display_off",
+      "line": 269,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "lvgl_port_set_refresh_paused",
+      "line": 273,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "lvgl_port_refresh_paused",
+      "line": 278,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "lvgl_port_lock",
+      "line": 286,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "lvgl_port_unlock",
+      "line": 291,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/display/lvgl_port/lvgl_port.c",
+      "name": "lvgl_port_init",
+      "line": 309,
+      "lines": 49,
+      "code_lines": 40,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/breathing_led.c",
+      "name": "lerp_u8",
+      "line": 63,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/breathing_led.c",
+      "name": "lerp_color",
+      "line": 69,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/breathing_led.c",
+      "name": "apply_profile",
+      "line": 87,
+      "lines": 15,
+      "code_lines": 15,
+      "if_count": 4,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/hardware/breathing_led.c",
+      "name": "breathing_led_update",
+      "line": 118,
+      "lines": 29,
+      "code_lines": 29,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/breathing_led.c",
+      "name": "led_set_state",
+      "line": 158,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/breathing_led.c",
+      "name": "led_transition_to",
+      "line": 179,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/breathing_led.c",
+      "name": "led_set_emotion_color",
+      "line": 195,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/breathing_led.c",
+      "name": "breathing_led_transition_active",
+      "line": 201,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/breathing_led.c",
+      "name": "breathing_led_set_display_sleep",
+      "line": 210,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/julia_battery.c",
+      "name": "percent_for_voltage",
+      "line": 83,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/hardware/julia_battery.c",
+      "name": "battery_state_name",
+      "line": 98,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/julia_battery.c",
+      "name": "read_voltage",
+      "line": 110,
+      "lines": 34,
+      "code_lines": 33,
+      "if_count": 7,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/hardware/julia_battery.c",
+      "name": "update_status",
+      "line": 148,
+      "lines": 32,
+      "code_lines": 30,
+      "if_count": 4,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/hardware/julia_battery.c",
+      "name": "julia_battery_diagnostics_init",
+      "line": 183,
+      "lines": 48,
+      "code_lines": 44,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/julia_battery.c",
+      "name": "julia_battery_log_stage",
+      "line": 232,
+      "lines": 21,
+      "code_lines": 21,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/julia_battery.c",
+      "name": "battery_monitor_task",
+      "line": 254,
+      "lines": 19,
+      "code_lines": 19,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/hardware/julia_battery.c",
+      "name": "julia_battery_monitor_start",
+      "line": 277,
+      "lines": 19,
+      "code_lines": 19,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/julia_battery.c",
+      "name": "julia_battery_get_status",
+      "line": 297,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/julia_led.c",
+      "name": "ws2812_encode",
+      "line": 71,
+      "lines": 18,
+      "code_lines": 18,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/julia_led.c",
+      "name": "ws2812_del",
+      "line": 90,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/julia_led.c",
+      "name": "ws2812_reset",
+      "line": 97,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/julia_led.c",
+      "name": "new_ws2812_encoder",
+      "line": 114,
+      "lines": 17,
+      "code_lines": 17,
+      "if_count": 3,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/hardware/julia_led.c",
+      "name": "output",
+      "line": 148,
+      "lines": 18,
+      "code_lines": 18,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/julia_led.c",
+      "name": "led_task",
+      "line": 179,
+      "lines": 22,
+      "code_lines": 22,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/hardware/julia_led.c",
+      "name": "julia_led_init",
+      "line": 210,
+      "lines": 16,
+      "code_lines": 16,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/julia_led.c",
+      "name": "configure",
+      "line": 234,
+      "lines": 2,
+      "code_lines": 2,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/julia_led.c",
+      "name": "julia_led_set_breathing",
+      "line": 247,
+      "lines": 2,
+      "code_lines": 2,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/julia_led.c",
+      "name": "julia_led_set_solid",
+      "line": 255,
+      "lines": 2,
+      "code_lines": 2,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/julia_led.c",
+      "name": "julia_led_set_off",
+      "line": 259,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/julia_led.c",
+      "name": "julia_led_set_emotion",
+      "line": 269,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/julia_led.c",
+      "name": "julia_led_hsv_to_rgb",
+      "line": 289,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/julia_power.c",
+      "name": "julia_power_boost_begin",
+      "line": 23,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/julia_power.c",
+      "name": "julia_power_boost_end",
+      "line": 28,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/julia_power.c",
+      "name": "configure_cpu_limit",
+      "line": 35,
+      "lines": 13,
+      "code_lines": 13,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/julia_power.c",
+      "name": "julia_power_hold_enable",
+      "line": 49,
+      "lines": 26,
+      "code_lines": 21,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/julia_power.c",
+      "name": "julia_power_management_init",
+      "line": 79,
+      "lines": 10,
+      "code_lines": 8,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/julia_power.c",
+      "name": "julia_power_runtime_profile_enable",
+      "line": 93,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/pcf85063_shared.c",
+      "name": "write_regs",
+      "line": 37,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/pcf85063_shared.c",
+      "name": "read_regs",
+      "line": 46,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/pcf85063_shared.c",
+      "name": "board_rtc_init",
+      "line": 60,
+      "lines": 24,
+      "code_lines": 23,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/pcf85063_shared.c",
+      "name": "board_rtc_ready",
+      "line": 85,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/pcf85063_shared.c",
+      "name": "board_rtc_read_time",
+      "line": 97,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/pcf85063_shared.c",
+      "name": "board_rtc_set_time",
+      "line": 113,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/qmi8658_shared.c",
+      "name": "read_regs",
+      "line": 52,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/qmi8658_shared.c",
+      "name": "write_reg",
+      "line": 59,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/qmi8658_shared.c",
+      "name": "try_address",
+      "line": 68,
+      "lines": 21,
+      "code_lines": 21,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/qmi8658_shared.c",
+      "name": "board_imu_init",
+      "line": 90,
+      "lines": 26,
+      "code_lines": 22,
+      "if_count": 7,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/qmi8658_shared.c",
+      "name": "board_imu_set_enabled",
+      "line": 117,
+      "lines": 5,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/qmi8658_shared.c",
+      "name": "le_i16",
+      "line": 123,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/qmi8658_shared.c",
+      "name": "board_imu_read",
+      "line": 130,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/qmi8658_shared.c",
+      "name": "board_imu_logger_configure",
+      "line": 146,
+      "lines": 13,
+      "code_lines": 12,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/qmi8658_shared.c",
+      "name": "board_imu_logger_read",
+      "line": 160,
+      "lines": 19,
+      "code_lines": 17,
+      "if_count": 5,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/rtc_calendar.c",
+      "name": "board_rtc_datetime_valid",
+      "line": 20,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/rtc_calendar.c",
+      "name": "bcd",
+      "line": 31,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/rtc_calendar.c",
+      "name": "board_rtc_encode",
+      "line": 35,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/rtc_calendar.c",
+      "name": "board_rtc_decode",
+      "line": 47,
+      "lines": 17,
+      "code_lines": 17,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/tca9554.c",
+      "name": "read_reg",
+      "line": 41,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/hardware/tca9554.c",
+      "name": "write_reg",
+      "line": 46,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/tca9554.c",
+      "name": "tca9554_init",
+      "line": 60,
+      "lines": 41,
+      "code_lines": 40,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/tca9554.c",
+      "name": "tca9554_write_pin",
+      "line": 120,
+      "lines": 30,
+      "code_lines": 29,
+      "if_count": 6,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/hardware/tca9554.c",
+      "name": "tca9554_read_pin",
+      "line": 159,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/hardware/tca9554.c",
+      "name": "tca9554_i2c_bus",
+      "line": 175,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/download_protocol.c",
+      "name": "ascii_equal",
+      "line": 14,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/download_protocol.c",
+      "name": "download_response_header",
+      "line": 26,
+      "lines": 24,
+      "code_lines": 22,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/download_protocol.c",
+      "name": "read_size",
+      "line": 51,
+      "lines": 16,
+      "code_lines": 15,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/download_protocol.c",
+      "name": "download_parse_content_range",
+      "line": 68,
+      "lines": 17,
+      "code_lines": 15,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/download_protocol.c",
+      "name": "download_url_host_allowed",
+      "line": 86,
+      "lines": 24,
+      "code_lines": 23,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/download_protocol.c",
+      "name": "download_server_url",
+      "line": 111,
+      "lines": 20,
+      "code_lines": 20,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/http_downloader.c",
+      "name": "http_downloader_collect_headers",
+      "line": 55,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/http_downloader.c",
+      "name": "http_downloader_open_failure_reason",
+      "line": 69,
+      "lines": 15,
+      "code_lines": 15,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/http_downloader.c",
+      "name": "http_downloader_run",
+      "line": 98,
+      "lines": 264,
+      "code_lines": 220,
+      "if_count": 33,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_release_cpu_boost",
+      "line": 65,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_uri_uses_tls",
+      "line": 72,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_start_finish",
+      "line": 206,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_get_device_auth",
+      "line": 235,
+      "lines": 56,
+      "code_lines": 54,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_status_find_event_locked",
+      "line": 298,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_status_find_free_locked",
+      "line": 313,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_status_transport",
+      "line": 336,
+      "lines": 47,
+      "code_lines": 45,
+      "if_count": 9,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_status_is_ready",
+      "line": 393,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_status_drain_one_critical",
+      "line": 413,
+      "lines": 38,
+      "code_lines": 35,
+      "if_count": 7,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_status_drain_progress",
+      "line": 465,
+      "lines": 33,
+      "code_lines": 32,
+      "if_count": 7,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_status_process_published",
+      "line": 515,
+      "lines": 35,
+      "code_lines": 32,
+      "if_count": 4,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_status_expire_tracks",
+      "line": 561,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_status_task",
+      "line": 585,
+      "lines": 44,
+      "code_lines": 42,
+      "if_count": 8,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_status_handle_published",
+      "line": 637,
+      "lines": 10,
+      "code_lines": 8,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_status_handle_disconnected",
+      "line": 655,
+      "lines": 9,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_status_cleanup",
+      "line": 670,
+      "lines": 23,
+      "code_lines": 23,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_find_registered_topic",
+      "line": 702,
+      "lines": 18,
+      "code_lines": 18,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_all_critical_subscribed",
+      "line": 732,
+      "lines": 13,
+      "code_lines": 13,
+      "if_count": 1,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_reset_sub_msg_ids",
+      "line": 751,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_comm_register_topic",
+      "line": 760,
+      "lines": 47,
+      "code_lines": 36,
+      "if_count": 4,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_seconds_to_ticks",
+      "line": 817,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_next_check_delay",
+      "line": 838,
+      "lines": 12,
+      "code_lines": 11,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_check_retry_delay",
+      "line": 862,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_recovery_wait_seconds",
+      "line": 884,
+      "lines": 13,
+      "code_lines": 13,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_recovery_check_delay",
+      "line": 907,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_check_request_session_reset",
+      "line": 924,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_check_set_waiting",
+      "line": 937,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_check_is_waiting",
+      "line": 950,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_check_take_session_reset",
+      "line": 966,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_request_reconnect",
+      "line": 985,
+      "lines": 15,
+      "code_lines": 15,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_publish_ota_check",
+      "line": 1014,
+      "lines": 20,
+      "code_lines": 17,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_ota_check_task",
+      "line": 1060,
+      "lines": 185,
+      "code_lines": 160,
+      "if_count": 26,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_reset_payload",
+      "line": 1252,
+      "lines": 7,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_handle_notify_json",
+      "line": 1271,
+      "lines": 47,
+      "code_lines": 44,
+      "if_count": 6,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_handle_ota_response",
+      "line": 1329,
+      "lines": 25,
+      "code_lines": 21,
+      "if_count": 6,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_handle_data",
+      "line": 1375,
+      "lines": 46,
+      "code_lines": 34,
+      "if_count": 5,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_suback_succeeded",
+      "line": 1437,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 3,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_event_handler",
+      "line": 1447,
+      "lines": 148,
+      "code_lines": 122,
+      "if_count": 16,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_comm_start",
+      "line": 1612,
+      "lines": 179,
+      "code_lines": 156,
+      "if_count": 18,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_comm_publish",
+      "line": 1798,
+      "lines": 16,
+      "code_lines": 16,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_comm_publish_voice_status",
+      "line": 1827,
+      "lines": 12,
+      "code_lines": 11,
+      "if_count": 4,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_comm_ip_ready",
+      "line": 1843,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_comm_set_paused",
+      "line": 1854,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_comm_is_paused",
+      "line": 1862,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/mqtt_comm.c",
+      "name": "mqtt_comm_is_ready",
+      "line": 1869,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_lifecycle_set_paused",
+      "line": 75,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_lifecycle_is_paused",
+      "line": 82,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_lifecycle_cleanup",
+      "line": 120,
+      "lines": 45,
+      "code_lines": 45,
+      "if_count": 6,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_backoff_delay_ms",
+      "line": 180,
+      "lines": 32,
+      "code_lines": 27,
+      "if_count": 4,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_next_retry_delay_ms",
+      "line": 214,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_schedule_retry_locked",
+      "line": 221,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_apply_wifi_profile",
+      "line": 228,
+      "lines": 29,
+      "code_lines": 29,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_log_initial_scan",
+      "line": 260,
+      "lines": 42,
+      "code_lines": 41,
+      "if_count": 7,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_reset_service_slots_locked",
+      "line": 310,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_wifi_event_handler",
+      "line": 328,
+      "lines": 45,
+      "code_lines": 38,
+      "if_count": 4,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_got_ip_handler",
+      "line": 380,
+      "lines": 26,
+      "code_lines": 24,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_wait_ticks_until",
+      "line": 417,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_lifecycle_retry_services",
+      "line": 434,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_dispatch_service_slots",
+      "line": 455,
+      "lines": 41,
+      "code_lines": 39,
+      "if_count": 4,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_service_retry_deadline",
+      "line": 503,
+      "lines": 16,
+      "code_lines": 16,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_lifecycle_task",
+      "line": 530,
+      "lines": 120,
+      "code_lines": 111,
+      "if_count": 21,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_lifecycle_register_ip_ready",
+      "line": 651,
+      "lines": 21,
+      "code_lines": 21,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_lifecycle_start_impl",
+      "line": 673,
+      "lines": 129,
+      "code_lines": 114,
+      "if_count": 16,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/network/network_lifecycle.c",
+      "name": "network_lifecycle_start",
+      "line": 803,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_transport_defer_retry",
+      "line": 172,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_set_owner_end_reason",
+      "line": 209,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_take_requested_end",
+      "line": 218,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_log_session_probe",
+      "line": 232,
+      "lines": 32,
+      "code_lines": 30,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_log_tls_write_probe",
+      "line": 266,
+      "lines": 35,
+      "code_lines": 32,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_tls_would_block",
+      "line": 303,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_tls_write_once",
+      "line": 309,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_tls_write_now_us",
+      "line": 321,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_tls_write_wait_once",
+      "line": 327,
+      "lines": 6,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_tls_write_is_transient",
+      "line": 334,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_tls_write_should_abort",
+      "line": 344,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_set_receive_timeout",
+      "line": 363,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_tls_write_all",
+      "line": 390,
+      "lines": 48,
+      "code_lines": 45,
+      "if_count": 4,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_tls_read_exact",
+      "line": 449,
+      "lines": 40,
+      "code_lines": 39,
+      "if_count": 7,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_ws_send",
+      "line": 513,
+      "lines": 80,
+      "code_lines": 73,
+      "if_count": 9,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_send_close",
+      "line": 603,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_send_protocol_close",
+      "line": 615,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_reply_close_and_wait",
+      "line": 629,
+      "lines": 27,
+      "code_lines": 26,
+      "if_count": 3,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_ws_recv",
+      "line": 674,
+      "lines": 102,
+      "code_lines": 96,
+      "if_count": 19,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_token",
+      "line": 786,
+      "lines": 13,
+      "code_lines": 13,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_ascii_ci_equal",
+      "line": 801,
+      "lines": 17,
+      "code_lines": 17,
+      "if_count": 3,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_header_name_is",
+      "line": 820,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_value_has_token",
+      "line": 838,
+      "lines": 23,
+      "code_lines": 23,
+      "if_count": 1,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_ws_accept_matches",
+      "line": 873,
+      "lines": 29,
+      "code_lines": 27,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_ws_validate_response",
+      "line": 914,
+      "lines": 56,
+      "code_lines": 55,
+      "if_count": 8,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_ws_handshake",
+      "line": 980,
+      "lines": 85,
+      "code_lines": 71,
+      "if_count": 12,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_quiet_blocks",
+      "line": 1069,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_connect",
+      "line": 1087,
+      "lines": 58,
+      "code_lines": 49,
+      "if_count": 8,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_drain_queue",
+      "line": 1155,
+      "lines": 13,
+      "code_lines": 11,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_apply_requested_end",
+      "line": 1169,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_service_outbound",
+      "line": 1180,
+      "lines": 17,
+      "code_lines": 17,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_text_is_valid_utf8",
+      "line": 1207,
+      "lines": 40,
+      "code_lines": 37,
+      "if_count": 9,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_close_code_is_valid",
+      "line": 1258,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_run_session",
+      "line": 1279,
+      "lines": 244,
+      "code_lines": 217,
+      "if_count": 40,
+      "max_brace_depth": 6
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_session_task",
+      "line": 1534,
+      "lines": 36,
+      "code_lines": 34,
+      "if_count": 7,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_transport_start",
+      "line": 1591,
+      "lines": 66,
+      "code_lines": 59,
+      "if_count": 10,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_transport_set_paused",
+      "line": 1658,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_transport_is_paused",
+      "line": 1664,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_transport_enqueue",
+      "line": 1680,
+      "lines": 20,
+      "code_lines": 20,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_transport_enqueue_control",
+      "line": 1701,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 4,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_transport_fail_session",
+      "line": 1716,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_transport_request_session_end",
+      "line": 1722,
+      "lines": 24,
+      "code_lines": 21,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_transport_is_ready",
+      "line": 1747,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_transport_end_reason_name",
+      "line": 1757,
+      "lines": 16,
+      "code_lines": 16,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/network/wss/wss_transport.c",
+      "name": "wss_transport_send_now",
+      "line": 1786,
+      "lines": 16,
+      "code_lines": 15,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/network/wss/wss_tx_writer.c",
+      "name": "finish_stats",
+      "line": 9,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/network/wss/wss_tx_writer.c",
+      "name": "wss_tx_write_all",
+      "line": 15,
+      "lines": 70,
+      "code_lines": 57,
+      "if_count": 9,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/ota/ota_boot_flow.c",
+      "name": "diagnostic",
+      "line": 46,
+      "lines": 22,
+      "code_lines": 15,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_boot_flow.c",
+      "name": "ota_local_health_check",
+      "line": 83,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_boot_flow.c",
+      "name": "__attribute__",
+      "line": 111,
+      "lines": 12,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_boot_flow.c",
+      "name": "ota_get_last_invalid_version",
+      "line": 135,
+      "lines": 19,
+      "code_lines": 19,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_boot_flow.c",
+      "name": "ota_boot_flow_run",
+      "line": 156,
+      "lines": 64,
+      "code_lines": 51,
+      "if_count": 9,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ota/ota_boot_flow.c",
+      "name": "ota_reconcile_boot_state",
+      "line": 221,
+      "lines": 27,
+      "code_lines": 27,
+      "if_count": 5,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "main/ota/ota_boot_flow.c",
+      "name": "ota_boot_flow_complete",
+      "line": 261,
+      "lines": 44,
+      "code_lines": 41,
+      "if_count": 6,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ota/ota_boot_flow.c",
+      "name": "ota_boot_flow_pending",
+      "line": 306,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_boot_health.c",
+      "name": "ota_boot_health_begin",
+      "line": 36,
+      "lines": 30,
+      "code_lines": 25,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_boot_health.c",
+      "name": "ota_boot_health_confirm",
+      "line": 67,
+      "lines": 11,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_boot_health.c",
+      "name": "ota_boot_health_reject",
+      "line": 79,
+      "lines": 17,
+      "code_lines": 13,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_boot_health.c",
+      "name": "__attribute__",
+      "line": 102,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_boot_health.c",
+      "name": "ota_boot_health_check",
+      "line": 122,
+      "lines": 85,
+      "code_lines": 70,
+      "if_count": 10,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_boot_health.c",
+      "name": "ota_boot_health_enter_safe_mode",
+      "line": 215,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_control_plane.c",
+      "name": "ota_control_plane_set_last_request_id",
+      "line": 75,
+      "lines": 8,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_control_plane.c",
+      "name": "ota_control_plane_request_id_matches",
+      "line": 91,
+      "lines": 11,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_control_plane.c",
+      "name": "ota_control_plane_hex_to_nibble",
+      "line": 118,
+      "lines": 13,
+      "code_lines": 13,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_control_plane.c",
+      "name": "ota_control_plane_parse_sha256",
+      "line": 140,
+      "lines": 18,
+      "code_lines": 16,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ota/ota_control_plane.c",
+      "name": "ota_control_plane_copy_string",
+      "line": 168,
+      "lines": 16,
+      "code_lines": 13,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_control_plane.c",
+      "name": "ota_control_plane_get_u32",
+      "line": 193,
+      "lines": 12,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_control_plane.c",
+      "name": "ota_control_plane_get_i64",
+      "line": 214,
+      "lines": 13,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_control_plane.c",
+      "name": "ota_control_plane_parse_version",
+      "line": 243,
+      "lines": 35,
+      "code_lines": 32,
+      "if_count": 6,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/ota/ota_control_plane.c",
+      "name": "ota_control_plane_compare_version",
+      "line": 280,
+      "lines": 13,
+      "code_lines": 13,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ota/ota_control_plane.c",
+      "name": "ota_control_plane_url_host_allowed",
+      "line": 308,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_control_plane.c",
+      "name": "native_ota_get_device_id",
+      "line": 322,
+      "lines": 18,
+      "code_lines": 15,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_control_plane.c",
+      "name": "native_ota_build_check_request",
+      "line": 359,
+      "lines": 44,
+      "code_lines": 36,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_control_plane.c",
+      "name": "ota_control_plane_parse_server_response",
+      "line": 415,
+      "lines": 199,
+      "code_lines": 172,
+      "if_count": 23,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_log_memory",
+      "line": 64,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_cooldown_seconds",
+      "line": 88,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_failure_requires_s7",
+      "line": 105,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_fault_reason",
+      "line": 115,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_http_open_failure_reason",
+      "line": 123,
+      "lines": 22,
+      "code_lines": 21,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_clear_in_progress",
+      "line": 192,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_engine_is_running",
+      "line": 207,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_engine_handle_server_json",
+      "line": 235,
+      "lines": 59,
+      "code_lines": 50,
+      "if_count": 8,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_engine_trigger_json",
+      "line": 308,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "calculate_partition_sha256",
+      "line": 344,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_record_init",
+      "line": 360,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_normalize_resume_offset",
+      "line": 374,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_save_checkpoint",
+      "line": 391,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_quarantine_record",
+      "line": 405,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_parse_content_range",
+      "line": 424,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_validate_image_header",
+      "line": 445,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_validate_partition_header",
+      "line": 463,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_pre_commit_check",
+      "line": 481,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_report_state_for_failure",
+      "line": 496,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_engine.c",
+      "name": "ota_engine_task",
+      "line": 520,
+      "lines": 677,
+      "code_lines": 589,
+      "if_count": 95,
+      "max_brace_depth": 8
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "ota_report_take_lock",
+      "line": 122,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "ota_report_give_lock",
+      "line": 132,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "ota_report_store_load",
+      "line": 148,
+      "lines": 44,
+      "code_lines": 40,
+      "if_count": 5,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "ota_report_store_save_locked",
+      "line": 201,
+      "lines": 19,
+      "code_lines": 18,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "ota_report_find_pending_locked",
+      "line": 227,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "ota_report_state_is_terminal",
+      "line": 244,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "ota_report_make_event_id",
+      "line": 258,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "native_ota_report_state_name",
+      "line": 274,
+      "lines": 15,
+      "code_lines": 15,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "ota_report_build_message",
+      "line": 313,
+      "lines": 75,
+      "code_lines": 67,
+      "if_count": 8,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "ota_report_submit",
+      "line": 400,
+      "lines": 18,
+      "code_lines": 17,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "ota_report_ack_task",
+      "line": 427,
+      "lines": 31,
+      "code_lines": 27,
+      "if_count": 3,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "native_ota_report_init",
+      "line": 468,
+      "lines": 37,
+      "code_lines": 33,
+      "if_count": 6,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "native_ota_report_set_transport",
+      "line": 515,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "native_ota_report_context_init",
+      "line": 540,
+      "lines": 23,
+      "code_lines": 22,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "native_ota_report_event",
+      "line": 584,
+      "lines": 85,
+      "code_lines": 71,
+      "if_count": 11,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "native_ota_report_progress",
+      "line": 681,
+      "lines": 49,
+      "code_lines": 44,
+      "if_count": 6,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "ota_report_flush_pending",
+      "line": 754,
+      "lines": 53,
+      "code_lines": 49,
+      "if_count": 8,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "native_ota_report_flush_pending",
+      "line": 808,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "native_ota_report_retry_pending",
+      "line": 813,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "native_ota_report_ack_event",
+      "line": 825,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "ota_report_get_boot_context",
+      "line": 852,
+      "lines": 13,
+      "code_lines": 13,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "native_ota_report_boot_pending_verify",
+      "line": 874,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "native_ota_report_boot_succeeded",
+      "line": 891,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "native_ota_report_boot_rolled_back",
+      "line": 909,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_report.c",
+      "name": "native_ota_report_reconcile_rollback",
+      "line": 931,
+      "lines": 24,
+      "code_lines": 23,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_stability.c",
+      "name": "native_ota_failure_reason_name",
+      "line": 50,
+      "lines": 23,
+      "code_lines": 23,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_stability.c",
+      "name": "ota_stability_record_init",
+      "line": 114,
+      "lines": 15,
+      "code_lines": 14,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_stability.c",
+      "name": "ota_stability_normalize_resume_offset",
+      "line": 136,
+      "lines": 10,
+      "code_lines": 7,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_stability.c",
+      "name": "ota_stability_save_checkpoint",
+      "line": 155,
+      "lines": 21,
+      "code_lines": 13,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_stability.c",
+      "name": "ota_stability_quarantine_record",
+      "line": 185,
+      "lines": 16,
+      "code_lines": 14,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_stability.c",
+      "name": "ota_stability_parse_content_range",
+      "line": 209,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_stability.c",
+      "name": "ota_stability_validate_image_header",
+      "line": 225,
+      "lines": 51,
+      "code_lines": 45,
+      "if_count": 7,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_stability.c",
+      "name": "ota_stability_validate_partition_header",
+      "line": 285,
+      "lines": 12,
+      "code_lines": 11,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_stability.c",
+      "name": "ota_stability_calculate_partition_sha256",
+      "line": 308,
+      "lines": 52,
+      "code_lines": 43,
+      "if_count": 6,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ota/ota_stability.c",
+      "name": "ota_stability_pre_commit_check",
+      "line": 370,
+      "lines": 38,
+      "code_lines": 27,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_state_store.c",
+      "name": "ota_state_store_log_nvs_usage",
+      "line": 22,
+      "lines": 39,
+      "code_lines": 36,
+      "if_count": 4,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ota/ota_state_store.c",
+      "name": "record_is_valid",
+      "line": 71,
+      "lines": 15,
+      "code_lines": 12,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ota/ota_state_store.c",
+      "name": "ota_state_store_load",
+      "line": 100,
+      "lines": 33,
+      "code_lines": 29,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_state_store.c",
+      "name": "ota_state_store_save",
+      "line": 144,
+      "lines": 24,
+      "code_lines": 21,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_state_store.c",
+      "name": "ota_state_store_clear",
+      "line": 177,
+      "lines": 25,
+      "code_lines": 23,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_state_store.c",
+      "name": "ota_state_store_matches_manifest",
+      "line": 213,
+      "lines": 16,
+      "code_lines": 14,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ota/ota_state_store.c",
+      "name": "ota_state_store_reconcile_running_version",
+      "line": 239,
+      "lines": 23,
+      "code_lines": 20,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/storage/sd_card.c",
+      "name": "sd_card_start",
+      "line": 35,
+      "lines": 59,
+      "code_lines": 50,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/storage/sd_card.c",
+      "name": "sd_card_is_mounted",
+      "line": 95,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/time/julia_time.c",
+      "name": "datetime_valid",
+      "line": 54,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/time/julia_time.c",
+      "name": "mark_time_valid",
+      "line": 63,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/time/julia_time.c",
+      "name": "sync_rtc_from_system",
+      "line": 80,
+      "lines": 30,
+      "code_lines": 28,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/time/julia_time.c",
+      "name": "restore_system_time_from_rtc",
+      "line": 123,
+      "lines": 27,
+      "code_lines": 27,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/time/julia_time.c",
+      "name": "julia_time_init",
+      "line": 158,
+      "lines": 21,
+      "code_lines": 21,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/time/julia_time.c",
+      "name": "julia_time_ip_ready",
+      "line": 190,
+      "lines": 26,
+      "code_lines": 25,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/time/julia_time.c",
+      "name": "julia_time_valid",
+      "line": 230,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "eye_y_for_frame",
+      "line": 59,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "in_eye_region",
+      "line": 67,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "avatar_eyes_correct_pupils_rgb565",
+      "line": 75,
+      "lines": 26,
+      "code_lines": 26,
+      "if_count": 6,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "avatar_eyes_has_green_blob_rgb565",
+      "line": 105,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "left_source",
+      "line": 118,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "right_source",
+      "line": 128,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "avatar_eyes_show",
+      "line": 142,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "blink_task",
+      "line": 164,
+      "lines": 23,
+      "code_lines": 23,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "avatar_eyes_init",
+      "line": 190,
+      "lines": 15,
+      "code_lines": 15,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "avatar_eyes_set_state",
+      "line": 210,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "avatar_eyes_set_idle_closed",
+      "line": 218,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "avatar_eyes_set_transition_active",
+      "line": 226,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "avatar_eyes_set_visible",
+      "line": 235,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "avatar_eyes_left_object",
+      "line": 249,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_eyes.c",
+      "name": "avatar_eyes_right_object",
+      "line": 250,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_mouth.c",
+      "name": "source_for",
+      "line": 37,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 3,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_mouth.c",
+      "name": "avatar_mouth_init",
+      "line": 47,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_mouth.c",
+      "name": "avatar_mouth_set_shape",
+      "line": 60,
+      "lines": 16,
+      "code_lines": 16,
+      "if_count": 4,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_mouth.c",
+      "name": "avatar_mouth_set_rms",
+      "line": 81,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_mouth.c",
+      "name": "avatar_mouth_set_transition_active",
+      "line": 91,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_mouth.c",
+      "name": "avatar_mouth_set_visible",
+      "line": 102,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/avatar_parts/avatar_mouth.c",
+      "name": "avatar_mouth_object",
+      "line": 115,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_rle.c",
+      "name": "read_u16_le",
+      "line": 26,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/avatar_rle.c",
+      "name": "avatar_rle_decode_rgb565",
+      "line": 37,
+      "lines": 43,
+      "code_lines": 36,
+      "if_count": 5,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "julia_avatar_set_suspended",
+      "line": 106,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "battery_display_percent",
+      "line": 127,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "battery_label_apply",
+      "line": 133,
+      "lines": 18,
+      "code_lines": 18,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "status_label_place",
+      "line": 152,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "status_label_sync",
+      "line": 160,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "julia_avatar_set_status_text",
+      "line": 173,
+      "lines": 12,
+      "code_lines": 11,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "offline_label_sync",
+      "line": 186,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 3,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "julia_avatar_set_offline",
+      "line": 199,
+      "lines": 10,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "julia_avatar_set_battery_status",
+      "line": 214,
+      "lines": 14,
+      "code_lines": 13,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "dialog_phase_name",
+      "line": 267,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "dialog_phase_is_current",
+      "line": 278,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "__attribute__",
+      "line": 290,
+      "lines": 51,
+      "code_lines": 47,
+      "if_count": 8,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "avatar_source_for_phase",
+      "line": 344,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "avatar_sync_mouth",
+      "line": 354,
+      "lines": 22,
+      "code_lines": 21,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "avatar_apply_phase_eyes",
+      "line": 378,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "avatar_apply_dialog_phase",
+      "line": 394,
+      "lines": 31,
+      "code_lines": 29,
+      "if_count": 6,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "julia_avatar_set_dozing",
+      "line": 428,
+      "lines": 39,
+      "code_lines": 38,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "integer_sqrt_u64",
+      "line": 470,
+      "lines": 18,
+      "code_lines": 18,
+      "if_count": 1,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "mouth_level_for_frame",
+      "line": 492,
+      "lines": 24,
+      "code_lines": 20,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "julia_avatar_feed_pcm",
+      "line": 519,
+      "lines": 18,
+      "code_lines": 16,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "julia_avatar_talking_start",
+      "line": 540,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "julia_avatar_talking_stop",
+      "line": 553,
+      "lines": 11,
+      "code_lines": 10,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "julia_avatar_set_dialog_phase",
+      "line": 567,
+      "lines": 19,
+      "code_lines": 18,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "julia_avatar_get_dialog_phase",
+      "line": 587,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "update_micro_motion",
+      "line": 599,
+      "lines": 35,
+      "code_lines": 30,
+      "if_count": 5,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "avatar_task",
+      "line": 640,
+      "lines": 22,
+      "code_lines": 22,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "julia_avatar_init",
+      "line": 666,
+      "lines": 98,
+      "code_lines": 86,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "julia_avatar_is_ready",
+      "line": 765,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "boot_eye_frame",
+      "line": 770,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/ui/julia_avatar.c",
+      "name": "julia_avatar_play_boot_sequence",
+      "line": 785,
+      "lines": 50,
+      "code_lines": 41,
+      "if_count": 6,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/capture/voice_local_capture.c",
+      "name": "put32",
+      "line": 69,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/capture/voice_local_capture.c",
+      "name": "output",
+      "line": 76,
+      "lines": 71,
+      "code_lines": 48,
+      "if_count": 10,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/capture/voice_local_capture.c",
+      "name": "voice_local_capture_init",
+      "line": 149,
+      "lines": 36,
+      "code_lines": 31,
+      "if_count": 6,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/capture/voice_local_capture.c",
+      "name": "voice_local_capture_connection",
+      "line": 190,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/capture/voice_local_capture.c",
+      "name": "voice_local_capture_ready",
+      "line": 199,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/capture/voice_local_capture.c",
+      "name": "voice_local_capture_mode",
+      "line": 200,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/capture/voice_local_capture.c",
+      "name": "voice_local_capture_poll",
+      "line": 205,
+      "lines": 24,
+      "code_lines": 20,
+      "if_count": 4,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/capture/voice_local_capture.c",
+      "name": "voice_local_capture_text",
+      "line": 232,
+      "lines": 38,
+      "code_lines": 33,
+      "if_count": 8,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/voice/capture/voice_local_capture.c",
+      "name": "voice_local_capture_listen_window",
+      "line": 272,
+      "lines": 10,
+      "code_lines": 9,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/capture/voice_local_capture.c",
+      "name": "voice_local_capture_frame",
+      "line": 284,
+      "lines": 97,
+      "code_lines": 71,
+      "if_count": 18,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/voice/capture/wake_detector.c",
+      "name": "wake_detector_set_paused",
+      "line": 60,
+      "lines": 10,
+      "code_lines": 8,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/capture/wake_detector.c",
+      "name": "wake_afe_feed",
+      "line": 97,
+      "lines": 43,
+      "code_lines": 38,
+      "if_count": 6,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/capture/wake_detector.c",
+      "name": "wake_detect_task",
+      "line": 160,
+      "lines": 44,
+      "code_lines": 39,
+      "if_count": 6,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/voice/capture/wake_detector.c",
+      "name": "wake_detector_init",
+      "line": 225,
+      "lines": 65,
+      "code_lines": 48,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/capture/wake_detector.c",
+      "name": "wake_detector_is_ready",
+      "line": 291,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/demo/voice_push_demo.c",
+      "name": "demo_enqueue_blocking",
+      "line": 83,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/demo/voice_push_demo.c",
+      "name": "demo_push_list_once",
+      "line": 105,
+      "lines": 17,
+      "code_lines": 17,
+      "if_count": 1,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/demo/voice_push_demo.c",
+      "name": "voice_push_demo_task",
+      "line": 131,
+      "lines": 19,
+      "code_lines": 17,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/demo/voice_push_demo.c",
+      "name": "voice_push_demo_start",
+      "line": 168,
+      "lines": 24,
+      "code_lines": 23,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/playback/pcm_buffer.c",
+      "name": "pcm_buffer_init",
+      "line": 8,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/playback/pcm_buffer.c",
+      "name": "pcm_buffer_reset",
+      "line": 13,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/pcm_buffer.c",
+      "name": "pcm_buffer_write",
+      "line": 20,
+      "lines": 14,
+      "code_lines": 14,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/playback/pcm_buffer.c",
+      "name": "pcm_buffer_read",
+      "line": 35,
+      "lines": 13,
+      "code_lines": 13,
+      "if_count": 3,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/pcm_buffer.c",
+      "name": "pcm_buffer_end",
+      "line": 49,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/pcm_buffer.c",
+      "name": "pcm_buffer_finished",
+      "line": 50,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "lock",
+      "line": 57,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "unlock",
+      "line": 58,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "complete",
+      "line": 60,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "playback_task",
+      "line": 73,
+      "lines": 159,
+      "code_lines": 140,
+      "if_count": 24,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "voice_playback_init",
+      "line": 233,
+      "lines": 28,
+      "code_lines": 26,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "voice_playback_set_interaction",
+      "line": 262,
+      "lines": 10,
+      "code_lines": 8,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "voice_playback_start",
+      "line": 273,
+      "lines": 24,
+      "code_lines": 22,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "start_local",
+      "line": 298,
+      "lines": 32,
+      "code_lines": 31,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "voice_playback_start_local",
+      "line": 331,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "voice_playback_try_start_local",
+      "line": 337,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "read_le32",
+      "line": 343,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "read_le16",
+      "line": 349,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "voice_playback_start_local_wav",
+      "line": 354,
+      "lines": 16,
+      "code_lines": 14,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "voice_playback_write",
+      "line": 371,
+      "lines": 27,
+      "code_lines": 24,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "voice_playback_finish",
+      "line": 399,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "stop_generation",
+      "line": 408,
+      "lines": 20,
+      "code_lines": 19,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "voice_playback_stop",
+      "line": 429,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "voice_playback_stop_generation",
+      "line": 434,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "voice_playback_generation_is_active",
+      "line": 439,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "voice_playback_is_active",
+      "line": 448,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "voice_playback_get_timing",
+      "line": 457,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/playback/voice_playback.c",
+      "name": "voice_playback_take_completion",
+      "line": 467,
+      "lines": 16,
+      "code_lines": 16,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_control_guard.c",
+      "name": "voice_control_parse",
+      "line": 14,
+      "lines": 33,
+      "code_lines": 33,
+      "if_count": 11,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/voice/protocol/voice_control_guard.c",
+      "name": "valid_id",
+      "line": 48,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_control_guard.c",
+      "name": "voice_control_guard_check",
+      "line": 58,
+      "lines": 24,
+      "code_lines": 24,
+      "if_count": 7,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/voice/protocol/voice_control_guard.c",
+      "name": "voice_control_uint",
+      "line": 83,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_control_guard.c",
+      "name": "voice_control_begin",
+      "line": 91,
+      "lines": 13,
+      "code_lines": 13,
+      "if_count": 3,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_control_guard.c",
+      "name": "fingerprint",
+      "line": 108,
+      "lines": 22,
+      "code_lines": 19,
+      "if_count": 4,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_control_guard.c",
+      "name": "voice_control_evaluate",
+      "line": 131,
+      "lines": 34,
+      "code_lines": 34,
+      "if_count": 10,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/protocol/voice_control_guard.c",
+      "name": "voice_control_record",
+      "line": 166,
+      "lines": 18,
+      "code_lines": 14,
+      "if_count": 3,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_control_guard.c",
+      "name": "voice_control_guard_reset",
+      "line": 185,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "voice_state_sync_session_id",
+      "line": 65,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "set_ready",
+      "line": 67,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "voice_state_sync_is_ready",
+      "line": 74,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "valid_id",
+      "line": 84,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "substate",
+      "line": 95,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "wake_required",
+      "line": 108,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "send_text",
+      "line": 115,
+      "lines": 12,
+      "code_lines": 11,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "prepare_state",
+      "line": 130,
+      "lines": 30,
+      "code_lines": 29,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "voice_state_sync_end",
+      "line": 163,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "voice_state_sync_start",
+      "line": 178,
+      "lines": 18,
+      "code_lines": 18,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "voice_state_sync_poll",
+      "line": 200,
+      "lines": 30,
+      "code_lines": 30,
+      "if_count": 7,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "json_revision",
+      "line": 231,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "handle_require_wake",
+      "line": 245,
+      "lines": 42,
+      "code_lines": 40,
+      "if_count": 5,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "voice_state_sync_handle_text",
+      "line": 291,
+      "lines": 75,
+      "code_lines": 73,
+      "if_count": 17,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "voice_state_sync_session_id",
+      "line": 370,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "voice_state_sync_start",
+      "line": 371,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "voice_state_sync_end",
+      "line": 372,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "voice_state_sync_poll",
+      "line": 373,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "voice_state_sync_is_ready",
+      "line": 374,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_state_sync.c",
+      "name": "voice_state_sync_handle_text",
+      "line": 375,
+      "lines": 2,
+      "code_lines": 2,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/protocol/voice_uri.c",
+      "name": "voice_uri_segments_safe",
+      "line": 41,
+      "lines": 22,
+      "code_lines": 21,
+      "if_count": 3,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/protocol/voice_uri.c",
+      "name": "voice_uri_to_path",
+      "line": 80,
+      "lines": 25,
+      "code_lines": 25,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_pump.c",
+      "name": "start_catchup",
+      "line": 9,
+      "lines": 15,
+      "code_lines": 13,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_pump.c",
+      "name": "update_catchup_peak",
+      "line": 25,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_pump.c",
+      "name": "voice_uplink_pump_init",
+      "line": 32,
+      "lines": 17,
+      "code_lines": 17,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_pump.c",
+      "name": "voice_uplink_pump_start_generation",
+      "line": 50,
+      "lines": 9,
+      "code_lines": 9,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_pump.c",
+      "name": "voice_uplink_pump_stop",
+      "line": 60,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_pump.c",
+      "name": "voice_uplink_pump_run",
+      "line": 65,
+      "lines": 78,
+      "code_lines": 65,
+      "if_count": 9,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "load_u32_acquire",
+      "line": 17,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "load_u32_relaxed",
+      "line": 26,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "store_u32_release",
+      "line": 35,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "load_bool_acquire",
+      "line": 44,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "store_bool_release",
+      "line": 53,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "publish_fence",
+      "line": 62,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "discard_published",
+      "line": 73,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "voice_uplink_ring_init",
+      "line": 79,
+      "lines": 26,
+      "code_lines": 25,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "voice_uplink_ring_start_generation",
+      "line": 106,
+      "lines": 13,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "voice_uplink_ring_stop_generation",
+      "line": 120,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "voice_uplink_ring_close_generation",
+      "line": 127,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "voice_uplink_ring_push",
+      "line": 133,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "voice_uplink_ring_push_generation",
+      "line": 140,
+      "lines": 39,
+      "code_lines": 31,
+      "if_count": 5,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "voice_uplink_ring_peek",
+      "line": 180,
+      "lines": 29,
+      "code_lines": 24,
+      "if_count": 3,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "voice_uplink_ring_consume",
+      "line": 210,
+      "lines": 11,
+      "code_lines": 9,
+      "if_count": 2,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "voice_uplink_ring_count",
+      "line": 222,
+      "lines": 9,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "voice_uplink_ring_generation",
+      "line": 232,
+      "lines": 6,
+      "code_lines": 6,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/uplink/voice_uplink_ring.c",
+      "name": "voice_uplink_ring_is_accepting",
+      "line": 239,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "post_fsm_event",
+      "line": 58,
+      "lines": 12,
+      "code_lines": 9,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "playback_role_is_terminal",
+      "line": 132,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_timing_poll",
+      "line": 166,
+      "lines": 18,
+      "code_lines": 18,
+      "if_count": 4,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_mic_is_streaming",
+      "line": 223,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_uplink_ring_init",
+      "line": 232,
+      "lines": 38,
+      "code_lines": 38,
+      "if_count": 4,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_next_uplink_generation",
+      "line": 273,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_pause_uplink_for_file",
+      "line": 283,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_resume_uplink_after_file",
+      "line": 293,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_disarm_companion_timer",
+      "line": 307,
+      "lines": 1,
+      "code_lines": 1,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_disarm_companion_timer",
+      "line": 309,
+      "lines": 13,
+      "code_lines": 12,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_companion_timeout",
+      "line": 324,
+      "lines": 20,
+      "code_lines": 18,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_arm_companion_timer",
+      "line": 345,
+      "lines": 33,
+      "code_lines": 31,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_on_board_audio_frame",
+      "line": 384,
+      "lines": 38,
+      "code_lines": 35,
+      "if_count": 6,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_path_is_allowed",
+      "line": 425,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_send_error",
+      "line": 439,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_push_file",
+      "line": 455,
+      "lines": 86,
+      "code_lines": 75,
+      "if_count": 9,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_close_file",
+      "line": 542,
+      "lines": 11,
+      "code_lines": 11,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_cancel_file",
+      "line": 554,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_file_poll",
+      "line": 565,
+      "lines": 28,
+      "code_lines": 28,
+      "if_count": 5,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_speaker_done",
+      "line": 594,
+      "lines": 46,
+      "code_lines": 41,
+      "if_count": 7,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_send_uplink_frame",
+      "line": 641,
+      "lines": 10,
+      "code_lines": 10,
+      "if_count": 1,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_uplink_now_us",
+      "line": 652,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_uplink_poll",
+      "line": 659,
+      "lines": 23,
+      "code_lines": 23,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_state_ready_poll",
+      "line": 683,
+      "lines": 33,
+      "code_lines": 32,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_reply_timeout_poll",
+      "line": 717,
+      "lines": 21,
+      "code_lines": 18,
+      "if_count": 3,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_busy_wait",
+      "line": 739,
+      "lines": 14,
+      "code_lines": 11,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_poll",
+      "line": 754,
+      "lines": 68,
+      "code_lines": 64,
+      "if_count": 13,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_played_pcm",
+      "line": 823,
+      "lines": 5,
+      "code_lines": 5,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_apply_mic_start",
+      "line": 830,
+      "lines": 85,
+      "code_lines": 74,
+      "if_count": 13,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_apply_mic_stop",
+      "line": 917,
+      "lines": 28,
+      "code_lines": 22,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "interaction_id_is_valid",
+      "line": 946,
+      "lines": 12,
+      "code_lines": 12,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_start_wake_prompt",
+      "line": 960,
+      "lines": 24,
+      "code_lines": 22,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_handle_wake_json",
+      "line": 986,
+      "lines": 89,
+      "code_lines": 85,
+      "if_count": 11,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_on_server_text",
+      "line": 1085,
+      "lines": 160,
+      "code_lines": 149,
+      "if_count": 34,
+      "max_brace_depth": 4
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_on_binary",
+      "line": 1252,
+      "lines": 24,
+      "code_lines": 24,
+      "if_count": 8,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_on_queue_item",
+      "line": 1285,
+      "lines": 44,
+      "code_lines": 44,
+      "if_count": 4,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_on_session_start",
+      "line": 1331,
+      "lines": 58,
+      "code_lines": 53,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_on_session_end",
+      "line": 1394,
+      "lines": 40,
+      "code_lines": 38,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_enqueue",
+      "line": 1437,
+      "lines": 29,
+      "code_lines": 29,
+      "if_count": 8,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_on_fsm_state",
+      "line": 1468,
+      "lines": 42,
+      "code_lines": 40,
+      "if_count": 3,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_apply_terminal_intent",
+      "line": 1514,
+      "lines": 62,
+      "code_lines": 56,
+      "if_count": 6,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_handle_intent_json",
+      "line": 1584,
+      "lines": 38,
+      "code_lines": 35,
+      "if_count": 8,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_handle_control_json",
+      "line": 1625,
+      "lines": 87,
+      "code_lines": 83,
+      "if_count": 16,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_apply_scoped_control",
+      "line": 1713,
+      "lines": 75,
+      "code_lines": 72,
+      "if_count": 19,
+      "max_brace_depth": 5
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_on_mqtt_command",
+      "line": 1799,
+      "lines": 54,
+      "code_lines": 50,
+      "if_count": 12,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_init",
+      "line": 1858,
+      "lines": 31,
+      "code_lines": 30,
+      "if_count": 2,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_local_capture_event",
+      "line": 1892,
+      "lines": 21,
+      "code_lines": 19,
+      "if_count": 6,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_init_board_audio",
+      "line": 1914,
+      "lines": 17,
+      "code_lines": 15,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_ip_ready",
+      "line": 1932,
+      "lines": 17,
+      "code_lines": 16,
+      "if_count": 0,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_send_file",
+      "line": 1950,
+      "lines": 12,
+      "code_lines": 11,
+      "if_count": 2,
+      "max_brace_depth": 2
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_send_chunk",
+      "line": 1963,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_send_capture_record",
+      "line": 1971,
+      "lines": 31,
+      "code_lines": 29,
+      "if_count": 4,
+      "max_brace_depth": 3
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_mic_start",
+      "line": 2003,
+      "lines": 8,
+      "code_lines": 8,
+      "if_count": 1,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_mic_stop",
+      "line": 2012,
+      "lines": 4,
+      "code_lines": 4,
+      "if_count": 0,
+      "max_brace_depth": 1
+    },
+    {
+      "path": "main/voice/voice_service.c",
+      "name": "voice_service_file_busy",
+      "line": 2017,
+      "lines": 7,
+      "code_lines": 7,
+      "if_count": 0,
+      "max_brace_depth": 1
+    }
+  ]
+}

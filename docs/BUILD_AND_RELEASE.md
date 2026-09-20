@@ -47,7 +47,7 @@ idf.py -B build build
 | `CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE` | 默认开启协议 v2；云端须先支持 session_sync 和 device_state 回执，否则设备不会放行语音 |
 | `CONFIG_COMM_MQTT_BROKER_URI` | MQTT 地址；`mqtt://` 为明文，`mqtts://` 才是 TLS |
 | `CONFIG_COMM_DEVICE_AUTH_*` | MQTT 设备认证方式；默认 NONE 仅适合受控开发 |
-| `CONFIG_WSS_SERVER_HOST`／`PORT`／`PATH` | WSS 主机、端口、路径，端口 9443、路径 `/voice` |
+| `CONFIG_WSS_SERVER_HOST`／`PORT`／`PATH` | WSS 主机、端口、路径；当前默认端口 19443（legacy 端口档为 9443），路径 `/voice` |
 | `CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE`／`CONFIG_WSS_TOKEN` | WSS 优先使用前者，空值时使用后者，与 MQTT 认证模式分开理解 |
 | `CONFIG_OTA_ALLOWED_URL_HOSTS` | OTA HTTPS 主机允许列表；空值会放行非空主机，不是默认白名单 |
 | `CONFIG_JULIA_LOCAL_CAPTURE_ENABLE` | 默认开发配置启用；需要 capture-v1 云端能力 ACK，首轮固定 16kHz；尚未部署 |
@@ -68,8 +68,8 @@ idf.py -B build build
 | `CONFIG_NETWORK_WIFI_RETRY_BASE_MS`／`MAX_MS`／`JITTER_PERCENT` | Wi-Fi重连从约1秒指数退避到最多60秒，并减去最多20%的随机抖动；取得 IP 后计数清零 |
 | `CONFIG_NETWORK_WIFI_CONNECT_TIMEOUT_MS` | 单次 `esp_wifi_connect()` 等待 GOT_IP或断开事件的看门狗，默认20秒；超时会取消本次尝试并继续退避重连 |
 | `CONFIG_NETWORK_WIFI_MAX_TX_POWER_DBM`／`INITIAL_DIAGNOSTIC_SCAN` | Wi-Fi 发射上限默认14dBm；额外阻塞式 AP 列表扫描默认关闭 |
-| `CONFIG_JULIA_COMPANION_BRIGHTNESS_PERCENT`／`CONFIG_JULIA_SILENT_BRIGHTNESS_PERCENT` | S1、S5 固定背光，默认均为 50% |
-| `CONFIG_JULIA_DISPLAY_BREATHE_*` | S3 背光呼吸范围与周期，默认 5%–30%、4000ms；S6 背光熄灭 |
+| `CONFIG_JULIA_COMPANION_BRIGHTNESS_PERCENT`／`CONFIG_JULIA_SILENT_BRIGHTNESS_PERCENT` | S1、S5 固定背光，默认分别为 50% 与 30% |
+| `CONFIG_JULIA_DISPLAY_BREATHE_*` | S3 背光呼吸范围与周期，默认 0%–30%、4000ms（下限 0 时驱动让每周期 60% 保持全黑）；S6 背光熄灭 |
 | `CONFIG_JULIA_NIGHT_SLEEP_*` | 夜间开始／结束小时、入睡宽限和轮询周期 |
 | `CONFIG_JULIA_FAULT_*` | S7.2 复位等待、快速故障窗口和自动复位次数上限 |
 | `CONFIG_JULIA_IMU_*` | IMU 采样、连续帧、冷却、加速度和陀螺仪阈值 |

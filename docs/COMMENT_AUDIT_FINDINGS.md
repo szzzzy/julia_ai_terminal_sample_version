@@ -14,7 +14,7 @@
 | VOICE-06 | 命令确认 | MQTT 仅支持 MIC_START、MIC_STOP、FILE_SEND，没有 vstatus 应用回执 | 服务器不能把 PUBACK 当作执行成功；定义实际回执再对接 |
 | FILE-01 | 文件与语音 | 文件按块推进、读取失败关闭会话；语音启动可发 file_cancelled 结束文件区间 | 服务端需处理取消并丢弃部分文件；SD 底层 I/O 时延仍需测试 |
 | FILE-02 | SD 生命周期 | `sd_card_start()` 只尝试挂载，没有后台重试／拔卡检测；文件服务的 SD 锁是弱默认实现 | 验证无卡、失败挂载和读取中断；建立共享访问和卡状态管理 |
-| HW-01 | 共享 I2C／IMU | TCA9554 初始化失败清理已修复；QMI8658 固定为每轴 ±64dps，陀螺仪门限现为 `CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS=30`，落在量程内（三轴合成上界约 110.9dps） | 验证低内存恢复；陀螺仪量程与门限仍需上板标定确认 |
+| HW-01 | 共享 I2C／IMU | TCA9554 初始化失败清理已修复；QMI8658 量程已对齐标定录制，固定为 ±16g／每轴 ±1024dps（±1024dps 是 QMI8658C Rev A 的上限），三轴合成角速度上界约 1773.6dps，因此 `CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS=400` 可达、角速度支路不再恒假。该组取值（20 ms 扫描周期／10 帧／0 ms 冷却／450 mg／400 dps）已在本文件所指的 Kconfig 默认、`sdkconfig.defaults` 与生效 `sdkconfig` 三处统一，依据是 `tools/imu_logger/tune_motion.py` 对 `imu_records/latest` 11 段典型场景的回放（`tuning/replay.json`，误报 0／漏报 0） | 上板确认误触率与唤醒延迟；该回放属同数据拟合、无留出集验证，且录制约 112 Hz 而驱动 ODR 约 30 Hz，回放时序不等于产品时序；验证低内存恢复 |
 | DISPLAY-01 | 显示驱动契约 | `julia_display_set_backlight()` 只有声明；ST77916 `swap_xy` 的 QSPI 路径绕过命令封装并忽略错误；panel 开关错误现在保留为待重试状态 | 新代码使用 `julia_backlight`；修复 QSPI 命令与错误传播后再开放对应 API |
 
 源码定位：[voice_service.c](../main/voice/voice_service.c)、[wss_transport.c](../main/network/wss/wss_transport.c)、[board_audio.c](../components/julia_board_audio/board_audio.c)、[sd_card.c](../main/storage/sd_card.c)、[tca9554.c](../main/hardware/tca9554.c)、[qmi8658_shared.c](../main/hardware/qmi8658_shared.c)、[esp_lcd_st77916.c](../main/display/esp_lcd_st77916.c)。
@@ -41,14 +41,17 @@ OTA 下载已经通过 FSM 确认准入，S2/S4/S5/S6 的清单以已有 deferre
 
 ## 3. 安全、隐私与功耗
 
-当前开发配置与行为：
+当前开发配置与行为（以下以本机生效的 `sdkconfig` 为准；`sdkconfig` 不入库，`sdkconfig.defaults` 是默认模板，两者存在分歧时见第 1 节 HW-01 与 `sdkconfig.defaults` 顶部说明）：
 
-- MQTT 使用 `mqtt://`，设备认证方式为 NONE；共享语音主题没有自动设备后缀。
-- WSS 使用 CA，但 `skip_common_name=true`；服务器名称校验尚未作为生产约束落实。
-- OTA URL 主机允许列表为空时放行；未启用安全启动、Flash 加密及强制签名镜像。
-- 默认服务器唤醒会持续上传 MIC；MICS 在该模式下被忽略，MIC_STOP 不关闭上传。
+- MQTT 使用 `mqtts://`（TLS，端口随 `JULIA_LEGACY_SERVER_PORTS`），设备认证方式为**用户名／密码**（`COMM_DEVICE_AUTH_USERNAME_PASSWORD=y`），不是 NONE；凭证只存在于本机 `sdkconfig`。启用 `JULIA_MULTI_DEVICE_ENABLE=y` 后使用设备维度主题 `voice/{stable-device-id}/vcmd`，共享主题 `COMM_MQTT_VOICE_CMD_TOPIC` 在该模式下不再被使用。
+- WSS 使用 CA 校验，且 `EXAMPLE_SKIP_COMMON_NAME_CHECK` 与 `EXAMPLE_SKIP_VERSION_CHECK` 均未打开，因此服务器名称校验生效；`OTA_ALLOWED_URL_HOSTS` 当前写入了开发服务器地址，不再是空列表放行。
+- 未启用安全启动、Flash 加密及强制签名镜像（`OTA_REQUIRE_SIGNED_IMAGE=n`）。
+- 默认服务器唤醒（`JULIA_SERVER_WAKE_ENABLE=y`）会持续上传 MIC；MICS 在该模式下被忽略，MIC_STOP 不关闭上传。
+- 本地分段采音的降噪历史门控当前**已打开**（`JULIA_CAPTURE_NOISE_WINDOW=y`、`JULIA_CAPTURE_NOISE_TAIL=y`），参数取 `docs/NOISE_TAIL.md` 的实验组合（R=200‰、C=800 Hz、W=15 帧、最少 5 能量帧、60%、确认 1 帧、尾段恢复 R=200‰/C=700 Hz、结束保护 500 ms），尚未上板标定。
 - 屏幕休眠只有显示策略，不等于 MIC、I2S、功放、Wi-Fi 和 CPU 的联合节能。
 - Wi-Fi 使用 `WIFI_PS_MIN_MODEM`（`network_lifecycle.c`）；当前无按行为状态实施的完整电源管理闭环。
+- IMU 运动唤醒取 20 ms 扫描周期／10 帧确认／0 ms 冷却／450 mg 加速度／400 dps 角速度；该组值已在 Kconfig 默认、`sdkconfig.defaults` 与生效 `sdkconfig` 三处统一。驱动量程为 ±16 g／每轴 ±1024 dps（`qmi8658_shared.c`），与标定录制 `imu_records/latest` 一致，角速度合成上界约 1773.6 dps，400 dps 可达。注意扫描周期与传感器 ODR 是两个参数：驱动 ODR 固定在 30 Hz（约 33 ms 一个新样本），20 ms 周期会重复读到同一批样本；重复采样会让加速度差分 delta 归零并清零连续帧计数，目前由角速度支路兜住（它按当前样本模长判定，不怕重复读），因此不要收窄陀螺量程、也不要在关闭角速度支路后仍保持 20 ms 轮询。整组值来自同数据拟合（`imu_records/tuning/replay.json`，误报 0／漏报 0），无留出集验证，需上板确认。
+- 呼吸周期 4000 ms 与 S5 静默驻留 300 s 也已在三处统一。目前仅在 `AUDIO_MAX_FILE_SIZE` 上仍存分歧：Kconfig 默认 3145728，而 `sdkconfig.defaults` 与生效配置均为 1048576（受 `audio_data` 分区 1 MiB 限制）。
 
 持续 16kHz 单声道 PCM16 的裸数据速率为 32000 字节／秒，即 256kbps；全天连续上传约 2.7648GB，不包含协议开销。这是格式推算，不是网络流量或功耗实测。
 

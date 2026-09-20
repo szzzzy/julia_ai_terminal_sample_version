@@ -1090,7 +1090,11 @@ static void mqtt_ota_check_task(void *pv_parameter)
             continue;
         }
         if (atomic_load(&s_power_stopped) && s_client != NULL) {
-            if (esp_mqtt_client_start(s_client) != ESP_OK) {
+            esp_err_t start_err = esp_mqtt_client_start(s_client);
+            if (start_err != ESP_OK) {
+                /* 客户端没有运行任务，不能依赖 SDK 自动重连；保留 stopped 并定时重试。 */
+                ESP_LOGW(TAG, "Failed to start MQTT client: %s; retry in 1000 ms",
+                         esp_err_to_name(start_err));
                 wait_ticks = pdMS_TO_TICKS(1000);
                 continue;
             }
@@ -1110,15 +1114,20 @@ static void mqtt_ota_check_task(void *pv_parameter)
             s_reconnect_requested = false;
             if (s_client != NULL) {
                 ESP_LOGW(TAG, "Rebuilding MQTT client connection");
-                (void)esp_mqtt_client_stop(s_client);
-                mqtt_release_cpu_boost();
-                esp_err_t restart_err = esp_mqtt_client_start(s_client);
-                if (restart_err != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to restart MQTT client: %s",
-                             esp_err_to_name(restart_err));
+                esp_err_t stop_err = esp_mqtt_client_stop(s_client);
+                if (stop_err != ESP_OK) {
+                    /* 未确认停止，不能重复创建客户端任务；保留重建请求后重试停止。 */
+                    ESP_LOGW(TAG, "Failed to stop MQTT client: %s; retry in 200 ms",
+                             esp_err_to_name(stop_err));
+                    s_reconnect_requested = true;
+                    wait_ticks = pdMS_TO_TICKS(200);
+                    continue;
                 }
+                mqtt_release_cpu_boost();
+                /* 与暂停后的恢复共用启动路径；start 失败时不能退回无限等待通知。 */
+                atomic_store(&s_power_stopped, true);
             }
-            wait_ticks = portMAX_DELAY;
+            wait_ticks = s_client != NULL ? 0 : portMAX_DELAY;
             continue;
         }
 

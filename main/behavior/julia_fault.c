@@ -75,15 +75,20 @@ esp_err_t julia_fault_record(julia_fault_reason_t reason, esp_err_t error,
     }
 
     julia_fault_record_t previous;
-    bool previous_valid = julia_fault_read_last(&previous) == ESP_OK;
+    esp_err_t previous_err = julia_fault_read_last(&previous);
+    if (reason == JULIA_FAULT_CORE_TASK_STALLED && previous_err != ESP_OK &&
+        previous_err != ESP_ERR_NOT_FOUND) return previous_err;
+    bool previous_valid = previous_err == ESP_OK;
     uint32_t sequence = previous_valid ? previous.sequence + 1U : 1U;
     const esp_app_desc_t *app = esp_app_get_description();
     uint64_t uptime_ms = (uint64_t)esp_timer_get_time() / 1000ULL;
     const uint64_t quick_ms = (uint64_t)CONFIG_JULIA_FAULT_QUICK_UPTIME_SECONDS * 1000ULL;
-    /* 健康运行或换版后是新的故障链；不能让历史启动故障禁用本次运行期恢复。 */
+    /* 启动故障在健康运行或换版后重置。CORE_TASK_STALLED 的检测期本来就长于
+     * quick_ms，因此同一版本的同类停滞累计计数，不能每次当作首次故障反复重启。 */
     uint32_t repeat_count = previous_valid &&
                             previous.reason == (uint32_t)reason &&
-                            previous.uptime_ms < quick_ms && uptime_ms < quick_ms &&
+                            (reason == JULIA_FAULT_CORE_TASK_STALLED ||
+                             (previous.uptime_ms < quick_ms && uptime_ms < quick_ms)) &&
                             app != NULL &&
                             strncmp(previous.firmware_version, app->version,
                                     sizeof(previous.firmware_version)) == 0

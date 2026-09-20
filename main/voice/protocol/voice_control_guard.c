@@ -1,3 +1,15 @@
+/**
+ * @file voice_control_guard.c
+ * @brief 严格模式控制面的解析自检、身份校验与按轮次去重。
+ *
+ * 模块职责：在交给 cJSON 之前拒绝会绕过身份与序号校验的输入形态；解析后维护轮次序号水位与
+ * 结果缓存，使重复请求只回放原结果而不重复执行业务动作。
+ * 模块边界：不执行任何业务动作，也不发起网络操作，只给出“能否执行 / 是否回放”的判定。
+ * 关键依赖：cJSON；身份字段与序号的语义由 voice_control_guard.h 定义。
+ * 核心不变量：结果缓存按 VOICE_CONTROL_CACHE_SIZE 环形覆盖，淘汰不降低 high_water，
+ * 低于水位的旧命令不会再执行；守卫状态只在 WSS owner 内使用。
+ */
+
 #include "voice_control_guard.h"
 #include <string.h>
 #include <stdio.h>

@@ -1,1 +1,3 @@
+# ESP32-H2 目标专用的默认值覆盖：启用 OpenThread。
+# 当前工程目标为 ESP32-S3（见 sdkconfig 的 CONFIG_IDF_TARGET），本文件不参与本机构建。
 CONFIG_OPENTHREAD_ENABLED=y

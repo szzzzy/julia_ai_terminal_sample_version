@@ -1,3 +1,14 @@
+/**
+ * @file pcm_buffer.c
+ * @brief 实现 PCM16 字节 FIFO：只操作调用方提供的存储，不含锁，也不分配内存。
+ *
+ * 模块职责：为播放链路提供固定容量、按字节读写且不拆分 16 位样本的 FIFO。
+ * 模块边界：不做同步（无锁、无 RTOS 调用），也不管理 storage 的生命周期；read/write 与
+ * end/reset 之间的互斥、以及缓冲区分配都由持有者负责（见 voice_playback.c）。
+ * 关键依赖：仅 <string.h>；接口契约与不变量集中写在 pcm_buffer.h，本文件不新增语义。
+ * 核心不变量：write 满时整块拒绝，不做部分写入；end 只关闭输入，finished 表示最后一帧已被取走。
+ */
+
 #include "pcm_buffer.h"
 
 #include <string.h>

@@ -20,6 +20,10 @@ import re
 from imu_capture import AXES, parse_record
 
 ROOT = Path(__file__).resolve().parents[2]
+# 产品驱动当前量程（见 main/hardware/qmi8658_shared.c 的 CTRL2/CTRL3 与换算常量）。
+# 录制量程与之不一致时，dps/mg 绝对门限不能直接对比，因此下面会逐条提示。
+PRODUCT_ACCEL_RANGE_G = 16
+PRODUCT_GYRO_RANGE_DPS = 1024
 KEYS = dict(sample_ms='MOTION_SAMPLE_MS', confirm_frames='MOTION_CONFIRM_FRAMES',
             cooldown_ms='MOTION_COOLDOWN_MS', accel_mg='ACCEL_DELTA_MG',
             gyro_dps='GYRO_THRESHOLD_DPS')
@@ -247,13 +251,19 @@ def main():
     print('Cooldown affects repeat triggers only. Default stops after first trigger (entry into S4).')
     if not args.combined_or:
         print('NEW RULE: A or G must independently reach N consecutive hits; production firmware is not changed.')
-    print('WARNING: product +/-64 dps ODR~30Hz differs from logger; high gyro thresholds need matching hardware settings.')
+    print('WARNING: logger ODR (~112 Hz at code 6) differs from product ODR (~30 Hz); '
+          'replayed timings are not product timings.')
     if args.continuous:
         print('CONTINUOUS is hypothetical: ignores the real FSM leaving monitoring after trigger.')
     for r in records:
         m = r['meta']
         if m['clipped_samples'] or m['missed_samples'] or m['read_errors']:
             print(f'Quality {m["label"]}: clipped={m["clipped_samples"]}, missed={m["missed_samples"]}, errors={m["read_errors"]}')
+        recorded = (m.get('accel_range_g'), m.get('gyro_range_dps'))
+        if None not in recorded and recorded != (PRODUCT_ACCEL_RANGE_G, PRODUCT_GYRO_RANGE_DPS):
+            print(f'Range  {m["label"]}: recorded +/-{recorded[0]}g / +/-{recorded[1]}dps '
+                  f'!= product +/-{PRODUCT_ACCEL_RANGE_G}g / +/-{PRODUCT_GYRO_RANGE_DPS}dps; '
+                  'dps/mg thresholds are not directly comparable.')
     if args.interactive or (not overrides and not args.scan and not args.once):
         interactive(records, args, params)
     else:

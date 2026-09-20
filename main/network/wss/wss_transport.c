@@ -94,6 +94,11 @@
 
 #include "wss_transport.h"
 #include "wss_tx_writer.h"
+#include "wss_health.h"
+#include "julia_fsm_runtime.h"
+#include "mqtt_comm.h"
+#include "voice_state_sync.h"
+#include "esp_netif.h"
 
 static const char *TAG = "wss_transport";
 
@@ -143,6 +148,124 @@ static bool s_starting;
 static bool s_session_ready;
 /** 整个程序唯一负责建立连接、收发消息和处理待发送请求的任务。 */
 static TaskHandle_t s_session_task;
+static TaskHandle_t s_monitor_task;
+static wss_health_t s_health;
+static wss_phase_t s_before_fsm_phase;
+
+static void wss_phase(wss_phase_t phase, uint32_t budget_ms)
+{
+    int64_t now = esp_timer_get_time();
+    portENTER_CRITICAL(&s_start_lock);
+    if (s_health.phase != phase) s_health.since_us = now;
+    s_health.phase = phase;
+    s_health.progress_us = now;
+    s_health.budget_us = (int64_t)budget_ms * 1000;
+    portEXIT_CRITICAL(&s_start_lock);
+}
+
+uint32_t wss_transport_generation(void)
+{
+    portENTER_CRITICAL(&s_start_lock);
+    uint32_t generation = s_health.generation;
+    portEXIT_CRITICAL(&s_start_lock);
+    return generation;
+}
+
+bool wss_transport_is_owner(void)
+{
+    return s_session_task && xTaskGetCurrentTaskHandle() == s_session_task;
+}
+
+void wss_transport_fsm_wait(bool waiting)
+{
+    if (!wss_transport_is_owner()) return;
+    if (waiting) {
+        s_before_fsm_phase = s_health.phase; /* only owner changes phase */
+        wss_phase(WSS_PHASE_FSM_WAIT, 20000);
+    } else wss_phase(s_before_fsm_phase, 30000);
+}
+
+static void wss_health_log(const wss_health_t *h, int64_t now, int64_t fsm_us,
+                           const char *kind)
+{
+    static const char *const names[] = {"stopped", "connect", "handshake", "rx",
+        "tx", "callback", "fsm_wait", "cleanup", "backoff", "keepalive"};
+    wifi_ap_record_t ap;
+    bool wifi = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+    esp_netif_ip_info_t ip = {0};
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    bool has_ip = netif && esp_netif_is_netif_up(netif) &&
+                  esp_netif_get_ip_info(netif, &ip) == ESP_OK && ip.ip.addr != 0;
+    ESP_LOGW(TAG, "health kind=%s phase=%s since_ms=%lld progress_age_ms=%lld "
+                  "budget_ms=%lld gen=%lu attempts=%lu failures=%lu "
+                  "fsm=%d fsm_age_ms=%lld wifi=%d ip=%d mqtt=%d wss=%d sync=%d "
+                  "heap=%u internal=%u largest=%u min=%u",
+             kind, names[h->phase], (long long)(h->since_us/1000),
+             (long long)((now-h->progress_us)/1000), (long long)(h->budget_us/1000),
+             (unsigned long)h->generation, (unsigned long)h->attempts,
+             (unsigned long)h->failures, (int)julia_fsm_runtime_get_state(),
+             (long long)(fsm_us ? (now-fsm_us)/1000 : 0), wifi, has_ip,
+             mqtt_comm_is_ready(), wss_transport_is_ready(), voice_state_sync_is_ready(),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)esp_get_minimum_free_heap_size());
+}
+
+/* 独立 Task：不销毁 TLS、不获取播放/UI 锁、也不等待 FSM。
+ * 协作式清理无法推进时，直接走既有故障策略落盘并复位；
+ * NVS 落盘或回读失败时按 fail closed 处理（不复位），避免复位循环。 */
+static void wss_monitor_task(void *argument)
+{
+    (void)argument;
+    int64_t stalled_since = 0, last_log = 0;
+    bool recovery_attempted = false;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        int64_t now = esp_timer_get_time();
+        portENTER_CRITICAL(&s_start_lock);
+        wss_health_t h = s_health;
+        portEXIT_CRITICAL(&s_start_lock);
+        int64_t fsm_us = julia_fsm_runtime_progress_us();
+        bool stalled = wss_health_stalled(&h, now) ||
+                       (fsm_us && now - fsm_us > 30000000LL);
+        unsigned level = wss_health_recovery_level(stalled, now, &stalled_since);
+        if ((stalled || h.failures) && (!last_log || now-last_log >= 60000000LL)) {
+            wss_health_log(&h, now, fsm_us, stalled ? "stalled" : "connect_failures");
+            last_log = now;
+        }
+        if (level == 1) {
+            ESP_LOGE(TAG, "health soft_recovery: request owner cleanup");
+            (void)wss_transport_request_session_end(WSS_TRANSPORT_END_APPLICATION_ERROR);
+        }
+        if (level == 2 && !recovery_attempted) {
+            recovery_attempted = true; /* one attempt per boot even if NVS fails */
+            julia_fsm_snapshot_t state;
+            julia_fsm_runtime_get_snapshot(&state);
+            esp_err_t err = julia_fault_record(JULIA_FAULT_CORE_TASK_STALLED,
+                ESP_ERR_TIMEOUT, state.main_state, state.s2_sub_state);
+            julia_fault_record_t record;
+            if (err == ESP_OK) err = julia_fault_read_last(&record);
+            /* 与 boot 初始化阶段的故障不同，此路径在持久化无法证明计数时必须 fail closed：
+             * 回读失败不等于出现了一次新的故障。 */
+            if (err == ESP_OK && record.reason == JULIA_FAULT_CORE_TASK_STALLED &&
+                record.repeat_count <= CONFIG_JULIA_FAULT_AUTO_RESET_LIMIT) {
+                ESP_LOGE(TAG, "health controlled_restart: owner/FSM still stalled");
+                vTaskDelay(pdMS_TO_TICKS(CONFIG_JULIA_FAULT_RESET_DELAY_MS));
+                portENTER_CRITICAL(&s_start_lock);
+                h = s_health;
+                portEXIT_CRITICAL(&s_start_lock);
+                now = esp_timer_get_time();
+                fsm_us = julia_fsm_runtime_progress_us();
+                if (wss_health_stalled(&h, now) ||
+                    (fsm_us && now - fsm_us > 30000000LL)) esp_restart();
+                else ESP_LOGW(TAG, "health recovered before restart; reset cancelled");
+            } else ESP_LOGE(TAG, "health reset_suppressed: persistent limit or NVS error=%s",
+                            esp_err_to_name(err));
+        }
+    }
+}
+
 /** 其它任务提交给语音连接的普通待发送请求；容量固定，满时明确拒绝。 */
 static QueueHandle_t s_cmd_queue;
 static QueueHandle_t s_control_queue;
@@ -510,7 +633,7 @@ static esp_err_t wss_tls_read_exact(void *data, size_t len)
  *         payload 为 NULL。
  * @return ESP_FAIL 会话无效或写出失败。
  */
-static esp_err_t wss_ws_send(uint8_t opcode, const uint8_t *payload, size_t len)
+static esp_err_t wss_ws_send_impl(uint8_t opcode, const uint8_t *payload, size_t len)
 {
     s_last_write_end_reason = WSS_TRANSPORT_END_NONE;
     if (s_tls == NULL) {
@@ -600,6 +723,18 @@ static esp_err_t wss_ws_send(uint8_t opcode, const uint8_t *payload, size_t len)
  * @param[in] code 状态码（主机字节序），0 表示不带状态码。
  * @return ESP_OK 发送完成；ESP_FAIL 会话无效或写出失败。
  */
+static esp_err_t wss_ws_send(uint8_t opcode, const uint8_t *payload, size_t len)
+{
+    /* 回调/握手中发生嵌套发送后，要恢复调用方原来的 phase。
+     * 这些字段只由 owner 写入，monitor 在 s_start_lock 下读取。 */
+    wss_phase_t previous = s_health.phase;
+    uint32_t budget_ms = (uint32_t)(s_health.budget_us / 1000);
+    wss_phase(opcode == 0x9 || opcode == 0xA ? WSS_PHASE_KEEPALIVE : WSS_PHASE_TX, 15000);
+    esp_err_t err = wss_ws_send_impl(opcode, payload, len);
+    wss_phase(previous, budget_ms);
+    return err;
+}
+
 static esp_err_t wss_send_close(uint16_t code)
 {
     uint8_t payload[2];
@@ -979,6 +1114,7 @@ static bool wss_ws_validate_response(const char *resp, size_t resp_len, const ch
  */
 static esp_err_t wss_ws_handshake(void)
 {
+    wss_phase(WSS_PHASE_HANDSHAKE, 30000);
     if (s_tls == NULL) {
         return ESP_FAIL;
     }
@@ -1101,6 +1237,7 @@ static bool wss_connect(void)
                                     &s_tls_cfg, tls);
     if (ret != 1) {
         ESP_LOGW(TAG, "WSS TLS connect failed (%d)", ret);
+        wss_phase(WSS_PHASE_CLEANUP, 30000);
         (void)esp_tls_conn_destroy(tls);
         return false;
     }
@@ -1131,6 +1268,7 @@ static bool wss_connect(void)
 
     s_tls = tls;
     if (wss_ws_handshake() != ESP_OK) {
+        wss_phase(WSS_PHASE_CLEANUP, 30000);
         (void)esp_tls_conn_destroy(s_tls);
         s_tls = NULL;
         return false;
@@ -1160,6 +1298,7 @@ static void wss_drain_queue(void)
     for (size_t q = 0; q < 2 && !s_session_failed; ++q) {
         for (unsigned n = 0; n < 4; ++n) {
             if (xQueueReceive(queues[q], s_queue_item, 0) != pdTRUE) break;
+            wss_phase(WSS_PHASE_CALLBACK, 30000);
             s_config.on_queue_item(s_queue_item, s_config.queue_item_size);
             if (s_session_failed) break;
         }
@@ -1183,6 +1322,7 @@ static bool wss_service_outbound(void)
     wss_drain_queue();
     if (wss_apply_requested_end()) return false;
     if (!s_session_failed && s_config.on_poll != NULL) {
+        wss_phase(WSS_PHASE_CALLBACK, 30000);
         s_config.on_poll();
     }
     if (wss_apply_requested_end()) return false;
@@ -1302,9 +1442,12 @@ static void wss_run_session(void)
     portENTER_CRITICAL(&s_start_lock);
     s_requested_end_reason = WSS_TRANSPORT_END_NONE;
     s_session_ready = true;
+    if (++s_health.generation == 0) ++s_health.generation;
+    s_health.failures = 0;
     portEXIT_CRITICAL(&s_start_lock);
 
     if (s_config.on_session_start != NULL) {
+        wss_phase(WSS_PHASE_CALLBACK, 30000);
         s_config.on_session_start();
     }
 
@@ -1312,6 +1455,14 @@ static void wss_run_session(void)
            !wss_quiet_blocks()) {
         (void)ulTaskNotifyTake(pdTRUE, 0);
         if (wss_apply_requested_end()) break;
+        if (s_config.can_receive != NULL) {
+            wss_phase(WSS_PHASE_CALLBACK, 30000);
+            if (!s_config.can_receive()) {
+                if (s_session_failed || !wss_service_outbound()) break;
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+        }
         /* 先收一帧再处理上行：持续 MIC 上传时也要优先看到服务端 CLOSE，避免服务端
          * 停止读取后，本机先因排队 PCM 写失败而跳过关闭握手。空闲读取仅阻塞 20ms。 */
         uint8_t op = 0;
@@ -1320,6 +1471,7 @@ static void wss_run_session(void)
         size_t len = 0;
         bool idle = false;
         bool fin = true;
+        wss_phase(WSS_PHASE_RX, 30000);
         if (wss_ws_recv(&op, frame_payload, sizeof(frame_payload) - 1,
                         &len, &idle, &fin) != ESP_OK) {
             wss_set_owner_end_reason(WSS_TRANSPORT_END_RX_ERROR);
@@ -1471,6 +1623,7 @@ static void wss_run_session(void)
                 break;
             }
             if (s_config.on_text != NULL) {
+                wss_phase(WSS_PHASE_CALLBACK, 30000);
                 s_config.on_text(s_msg_payload, msg_len);
                 if (s_session_failed) {
                     break;
@@ -1478,6 +1631,7 @@ static void wss_run_session(void)
             }
         } else if (msg_opcode == 0x2) {
             if (s_config.on_binary != NULL) {
+                wss_phase(WSS_PHASE_CALLBACK, 30000);
                 s_config.on_binary(s_msg_payload, msg_len);
                 if (s_session_failed) {
                     break;
@@ -1502,6 +1656,7 @@ static void wss_run_session(void)
                                      ? WSS_TRANSPORT_END_APPLICATION_ERROR
                                      : WSS_TRANSPORT_END_RX_ERROR);
     }
+    wss_phase(WSS_PHASE_CLEANUP, 30000);
     wss_log_session_probe(wss_transport_end_reason_name(s_session_end_reason));
     (void)esp_tls_conn_destroy(s_tls);
     s_tls = NULL;
@@ -1536,23 +1691,35 @@ static void wss_session_task(void *parameter)
     (void)parameter;
     for (;;) {
         if (atomic_load(&s_power_paused)) {
+            wss_phase(WSS_PHASE_STOPPED, 0);
             atomic_store(&s_power_stopped, true);
             (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             continue;
         }
         if (wss_quiet_blocks()) {
+            wss_phase(WSS_PHASE_STOPPED, 0);
             (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
             continue;
         }
         atomic_store(&s_power_stopped, false);
         /* CPU boost 只包住建连阶段（TLS 握手 + HTTP 升级），不覆盖整个会话：
          * begin/end 必须成对，因此失败路径也要在本行之后立即 end，再决定是否进会话。 */
+        wss_phase(WSS_PHASE_CONNECT, 60000);
+        portENTER_CRITICAL(&s_start_lock);
+        ++s_health.attempts;
+        portEXIT_CRITICAL(&s_start_lock);
         bool boosted = julia_power_boost_begin();
         bool connected = wss_connect();
         if (boosted) julia_power_boost_end();
+        if (!connected) {
+            portENTER_CRITICAL(&s_start_lock);
+            ++s_health.failures;
+            portEXIT_CRITICAL(&s_start_lock);
+        }
         if (connected) {
             if (atomic_load(&s_power_paused) ||
                 wss_quiet_blocks()) {
+                wss_phase(WSS_PHASE_CLEANUP, 30000);
                 (void)esp_tls_conn_destroy(s_tls);
                 s_tls = NULL;
                 continue;
@@ -1563,6 +1730,7 @@ static void wss_session_task(void *parameter)
         }
         uint32_t delay_s = wss_auth_retry_seconds(s_auth_rejected, CONFIG_WSS_RECONNECT_INTERVAL_SECONDS);
         if(delay_s<s_retry_floor_s) delay_s=s_retry_floor_s;
+        wss_phase(WSS_PHASE_BACKOFF, delay_s * 1000U + 30000U);
         if (!atomic_load(&s_power_paused))
             (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(delay_s * 1000U));
     }
@@ -1633,6 +1801,13 @@ esp_err_t wss_transport_start(const wss_transport_config_t *config)
     }
     if (s_control_queue == NULL) s_control_queue = xQueueCreate(4, config->queue_item_size);
     if (s_control_queue == NULL) {
+        err = ESP_ERR_NO_MEM;
+        goto finish;
+    }
+    /* monitor 分配失败就不启动无人监管的 owner。
+     * 若 owner 分配失败，空闲的 monitor 会在下次 start 时被复用。 */
+    if (s_monitor_task == NULL &&
+        xTaskCreate(wss_monitor_task, "wss_health", 4096, NULL, 3, &s_monitor_task) != pdPASS) {
         err = ESP_ERR_NO_MEM;
         goto finish;
     }

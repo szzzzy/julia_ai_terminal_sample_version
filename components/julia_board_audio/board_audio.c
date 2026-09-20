@@ -37,6 +37,7 @@
 #define SPK_BCLK GPIO_NUM_48
 #define SPK_WS GPIO_NUM_38
 #define SPK_DOUT GPIO_NUM_47
+/* 采集固定 320 样本/帧＝16 kHz 下的 20 ms；本地判决、PCM1 报文和 VAD 都以该长度为前提。 */
 #define MIC_SAMPLES 320
 /* 单次 board_audio_speaker_write() 接受的"单声道输入"字节上限：参数校验里
  * bytes > MAX_SPK_BYTES 即拒绝。它与 MIC 侧 320 样本（640 字节）的采集帧无关，
@@ -57,13 +58,16 @@ static int16_t mic_pcm[MIC_SAMPLES];
 static int16_t sleep_preroll[SLEEP_PREROLL_FRAMES][MIC_SAMPLES];
 static volatile bool mic_sleeping;
 static volatile bool mic_wake_triggered;
+/* 门限触发模式下的比较基准，单位 0.01 dBFS。只在 board_audio_mic_sleep() 里由上层写入，
+ * 之后不随环境更新：底噪发生漂移时，+5 dB 的判定会相应偏保守或偏灵敏。
+ * 默认值 -6000 即 −60.00 dBFS（上电默认）。 */
 static volatile int16_t sleep_background_dbfs_x100 = -6000;
 static size_t sleep_preroll_write;
 static size_t sleep_preroll_count;
 static uint32_t sleep_active_frames;
 /* 立体声展开缓冲按"元素个数"计：MAX_SPK_BYTES 个 int16 = 8192 字节，正好容纳单次上限
  * 4096 单声道字节展开后的立体声样本（count = bytes / 2 个样本，每样本写左右各一份，
- * 共 2 * count 个 int16）。 */
+ * 共 2 * count 个 int16）。write 与自检都只在该缓冲上展开，因此必须整体持 s_spk_lock。 */
 static int16_t spk_stereo[MAX_SPK_BYTES];
 
 /* Speaker 串行化：start/write/stop/self_test 整体持锁，
@@ -116,6 +120,8 @@ static esp_err_t mic_init(void)
         .gpio_cfg = {.mclk = I2S_GPIO_UNUSED, .bclk = MIC_BCLK, .ws = MIC_WS,
                      .dout = I2S_GPIO_UNUSED, .din = MIC_DIN},
     };
+    /* 通道按单声道、32 位槽配置，但只取右槽：麦克风数据落在右声道，
+     * 有效位深与后续 14 位右移的换算关系见 mic_task 里的增益注释。 */
     s.slot_cfg.slot_mask = I2S_STD_SLOT_RIGHT;
     esp_err_t err = i2s_channel_init_std_mode(mic_rx, &s);
     if (err == ESP_OK) err = i2s_channel_enable(mic_rx);
@@ -133,6 +139,8 @@ static esp_err_t speaker_init(uint32_t rate, bool enable)
         if (spk_enabled) ESP_RETURN_ON_ERROR(i2s_channel_disable(spk_tx), TAG, "disable SPK");
         spk_enabled = false;
         ESP_RETURN_ON_ERROR(i2s_channel_reconfig_std_clock(spk_tx, &clk), TAG, "reconfig SPK clock");
+        /* 停播时 speaker_clocks_low() 会把这些脚改成普通 GPIO 输出，重新启用前必须先把它们
+         * 交回 I2S 外设，否则会出现“有数据但时钟脚不再由 I2S 驱动”的静默失败。 */
         const i2s_std_gpio_config_t gpio = {.mclk = I2S_GPIO_UNUSED, .bclk = SPK_BCLK,
             .ws = SPK_WS, .dout = SPK_DOUT, .din = I2S_GPIO_UNUSED};
         ESP_RETURN_ON_ERROR(i2s_channel_reconfig_std_gpio(spk_tx, &gpio), TAG, "restore SPK pins");
@@ -172,6 +180,8 @@ static int16_t scale_sample(int16_t sample)
 
 static int16_t mic_dbfs_x100(const int16_t *x, size_t count)
 {
+    /* 与 lc_rms_dbfs 共用同一套 dBFS 定义，保证 PCM1 头里的电平与本地判决口径一致；
+     * 传输用百分之一 dB 只作诊断，不参与阈值比较。 */
     return (int16_t)lrint(100 * lc_rms_dbfs(x, count));
 }
 

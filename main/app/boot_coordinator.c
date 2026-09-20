@@ -1,3 +1,18 @@
+/**
+ * @file    boot_coordinator.c
+ * @brief   boot_coordinator 的实现：上下文引用计数、每分支一个 worker Task、结果汇总与云门控。
+ *
+ * 实现要点与不变量：
+ * - 协调者与每个成功创建的 worker 各持一份上下文引用，只有把引用减到 0 的一方销毁完成
+ *   队列和上下文；因此协调者超时退出后，晚到的 worker 仍能安全发布结果并回收。
+ * - 完成队列固定 4 槽（1 个资源里程碑 + 3 个终态），正好覆盖“只有一个分支设置 finish”
+ *   的约定，所以 worker 用 0 等待发送不会因队列满而失败。
+ * - worker 只把 branches[i] 复制进自己的工作参数，发布自己的终态结果，结束时自删；
+ *   协调者从不删除 worker，也不在超时后抢占或回收分支资源。
+ *
+ * 本文件不判断业务故障类型、不记录故障、不触发复位：这些由调用方（app/main.c）根据
+ * results[] 决定。模块边界与启动预算见 docs/BOOT_INITIALIZATION.md。
+ */
 #include "boot_coordinator.h"
 #include <stdlib.h>
 #include <stdatomic.h>
@@ -68,7 +83,7 @@ esp_err_t boot_coordinator_run(const boot_branch_t branches[3],
             ESP_LOGE("BOOT", "branch=%s create_failed t=%lldms", branches[i].name,
                      (long long)(esp_timer_get_time()/1000));
             release(context);
-            completion_t failure = {i, ESP_ERR_NO_MEM};
+            completion_t failure = {i, ESP_ERR_NO_MEM, false};
             (void)xQueueSend(context->completions, &failure, 0);
         }
     }

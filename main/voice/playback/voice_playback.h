@@ -81,3 +81,25 @@ typedef struct {
     int64_t completed_us;
 } voice_playback_timing_t;
 bool voice_playback_get_timing(uint32_t generation, voice_playback_timing_t *out);
+
+typedef struct {
+    uint32_t generation;
+    uint32_t rate;
+    size_t queued;
+    size_t capacity;
+    int64_t first_output_us;
+    int64_t last_output_us;
+    int64_t started_us;
+    int64_t first_input_us;
+    int64_t last_input_us;
+    int64_t i2s_request_us;
+    int64_t i2s_started_us;
+    uint32_t configured_rate; /* successful driver configuration, not measured WS clock */
+    uint64_t received_bytes;
+    uint64_t accepted_bytes;
+    uint64_t dequeued_bytes;
+    uint64_t output_bytes; /* mono source bytes successfully submitted to I2S, not acoustic output */
+} voice_playback_buffer_status_t;
+/** 在短临界区内复制一份快照。只有“网络 PCM 输入处于活动且未结束”时返回 true；
+ * 本地提示音与已完成/已取消的播放都不得因此限流 WSS 下行。 */
+bool voice_playback_get_buffer_status(voice_playback_buffer_status_t *out);

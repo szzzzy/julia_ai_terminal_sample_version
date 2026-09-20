@@ -1,11 +1,15 @@
-/** 设备状态同步（control protocol v2）：按连接做握手、带 revision 的状态快照和请求校验。
+/**
+ * @file voice_state_sync.c
+ * @brief 设备状态同步（control protocol v2）：按连接做握手、带 revision 的状态快照和请求校验。
  *
+ * 模块职责：在一条 WSS 连接内完成握手、上报状态快照，并校验和幂等处理云端请求。
  * 模块边界：所有状态变更都只在 WSS owner 任务里发生；FSM 观察者只投递事件，不得在这里发起
  * 网络操作。其它任务只能读 is_ready()；session_id 是 owner-only 的，内容会在 start/end 被改写，
  * 不得跨任务读取或缓存。
- *
- * 关闭 CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE 时本文件退化为空实现：is_ready() 恒为 true、
- * session_id 为空串、handle_text() 恒返回 false，语音链路按无状态同步方式继续工作。
+ * 关键依赖：WSS 连接与其 generation、julia_fsm_runtime 的快照与唤醒接口、cJSON。
+ * 核心不变量：session_id 只用于归属比对，不是授权凭据；未确认报文在 SYNC_MAX_SENDS 次发送
+ * 内重试；关闭 CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE 时本文件退化为空实现：is_ready() 恒为
+ * true、session_id 为空串、handle_text() 恒返回 false，语音链路按无状态同步方式继续工作。
  */
 #include "julia_power.h"
 #include "voice_state_sync.h"

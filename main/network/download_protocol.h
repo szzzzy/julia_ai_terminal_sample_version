@@ -71,7 +71,7 @@ bool download_parse_content_range(const char *value, size_t *start,
  */
 bool download_url_host_allowed(const char *url, const char *allowlist);
 
-/* Copy a URL for transport, mapping only the old development HTTPS authority.
- * Input/output must not overlap. Never logs paths, query strings or credentials.
- * Persistent manifest identity is deliberately left unchanged. */
+/* 复制 URL 供传输层使用，只重映射旧开发期 HTTPS 主机名；
+ * 输入输出缓冲不得重叠；不记录路径、查询串与凭证；
+ * 持久化的清单身份字段有意保持不变。 */
 bool download_server_url(const char *url, bool legacy, char *out, size_t capacity);

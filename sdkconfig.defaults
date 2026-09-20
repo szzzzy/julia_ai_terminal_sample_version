@@ -1,16 +1,25 @@
-# Default sdkconfig parameters to use the OTA.
-# Global Wi-Fi MIN_MODEM is selected in network_lifecycle.c. These timers
-# control RF activity and AP idle keepalive, not MQTT/WSS heartbeat intervals.
+# 本文件是**新检出的默认配置**，只保存可公开的默认值：不含 Wi-Fi 密码、
+# MQTT/WSS 令牌与客户端证书。本机实际生效值在仓库根目录的 `sdkconfig`
+# （被 .gitignore 排除，含凭证），两者不一致时以 `sdkconfig` 为准；
+# 各配置项的完整含义与取值依据见 main/Kconfig.projbuild 的 help 文本。
+#
+# 同步状态：IMU 运动参数（扫描周期 20 ms、确认 10 帧、冷却 0 ms、加速度 450 mg、
+# 陀螺仪 400 dps）、呼吸周期 4000 ms、S5 静默驻留 300 s 已在本文件、Kconfig 默认值
+# 与生效 `sdkconfig` 三处统一。唯一仍不一致的是 AUDIO_MAX_FILE_SIZE：Kconfig 默认
+# 3145728，本文件与生效配置均为 1048576（受 audio_data 分区 1 MiB 限制）。
+
+# 全局 Wi-Fi 省电由 network_lifecycle.c 选为 MIN_MODEM；下面两个定时器控制的是
+# 射频活动窗口与 AP 空闲保活，不是 MQTT/WSS 心跳间隔。单位：毫秒。
 CONFIG_ESP_WIFI_SLP_DEFAULT_MIN_ACTIVE_TIME=20
 CONFIG_ESP_WIFI_SLP_DEFAULT_MAX_ACTIVE_TIME=60
-# The project targets a 16 MiB SPI flash and uses a custom table based on the
-# official ESP-IDF two-OTA layout, expanded to fill the available capacity.
+# 目标 Flash 为 16 MiB，分区表在官方双 OTA 布局基础上扩展，填满可用容量。
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_16mb.csv"
 
-# PSRAM与CPU：该板使用8 MiB Octal/OPI、80 MHz，CLK=IO30 / CS=IO26。
-# 240 MHz同时为UI、TLS流式音频及可选本地WakeNet回退留出余量。
+# PSRAM 与 CPU：本板为 8 MiB Octal/OPI、80 MHz，CLK=IO30 / CS=IO26。
+# 240 MHz 为 UI、TLS 流式音频以及可选的本地 WakeNet 回退留出余量；
+# 应用启动后会先降到 BOOT 档，再由 julia_power_runtime_profile_enable() 切到 RUNTIME 档。
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_TYPE_AUTO=y
@@ -27,15 +36,20 @@ CONFIG_SPIRAM_MEMTEST=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
-# WSS and OTA TLS coexist; allocate TLS buffers in the board's 8 MiB PSRAM.
+# WSS 与 OTA 的 TLS 会同时存在，因此把 TLS 缓冲放在 8 MiB PSRAM 中。
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+# 电池锁存引脚（BAT_Control）与启动/运行两档 CPU 上限，单位为 MHz。
 CONFIG_JULIA_BAT_CONTROL_GPIO=7
 CONFIG_JULIA_BOOT_CPU_MAX_FREQ_80=y
 CONFIG_JULIA_RUNTIME_CPU_MAX_FREQ_160=y
+# 本地服务（显示/音频/语音/RTC）初始化的等待上限，单位毫秒。
 CONFIG_JULIA_LOCAL_INIT_TIMEOUT_MS=20000
+# 开机眨眼序列使用的最高背光亮度，单位百分比 0–100。
 CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT=50
+# 电池诊断与运行期监测：采样次数为单轮 ADC 平均次数；监测周期单位秒；
+# PRESENT 区间是"电压合理"判据，不是插头检测；15%/25% 为低电量提示的进入/退出滞回。
 CONFIG_JULIA_BATTERY_DIAGNOSTICS=y
 CONFIG_JULIA_BATTERY_SAMPLE_COUNT=16
 CONFIG_JULIA_BATTERY_MONITOR_INTERVAL_SECONDS=10
@@ -43,8 +57,8 @@ CONFIG_JULIA_BATTERY_PRESENT_MIN_MV=2500
 CONFIG_JULIA_BATTERY_PRESENT_MAX_MV=4350
 CONFIG_JULIA_BATTERY_LOW_ENTER_PERCENT=15
 CONFIG_JULIA_BATTERY_LOW_EXIT_PERCENT=25
-# LVGL 8.3 display format.  Generated avatar RGB565 assets are byte-swapped
-# for the ST77916 SPI wire order and enforce this setting at compile time.
+# LVGL 8.3 显示格式：生成的立绘 RGB565 资源按 ST77916 SPI 字节序做过交换，
+# 与 LV_COLOR_16_SWAP 绑定，改这两项必须同时重新生成资源。
 CONFIG_LV_CONF_SKIP=y
 CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_COLOR_DEPTH=16
@@ -52,25 +66,25 @@ CONFIG_LV_COLOR_16_SWAP=y
 CONFIG_LV_MEM_CUSTOM=y
 CONFIG_LV_MEM_CUSTOM_INCLUDE="stdlib.h"
 
-# 本地WakeNet回退配置。CONFIG_JULIA_SERVER_WAKE_ENABLE=y时组件注册为空，
+# 本地 WakeNet 回退配置。CONFIG_JULIA_SERVER_WAKE_ENABLE=y 时组件注册为空，
 # 这些选项不参与当前固件；关闭服务器唤醒开关即可恢复并打包该模型。
 CONFIG_USE_AFE=y
 CONFIG_AFE_INTERFACE_V1=y
 CONFIG_USE_WAKENET=y
 CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y
 
-# The table keeps a 512 KiB model slot for a future custom wake model and a
-# 1 MiB FAT audio-data partition. Never accept an artifact larger than FAT.
+# 分区表保留 512 KiB 模型槽位（供后续自定义唤醒模型）与 1 MiB FAT 音频素材分区。
+# 音频素材下载上限不得大于 FAT 分区容量，单位字节。
 CONFIG_AUDIO_MAX_FILE_SIZE=1048576
 
-# Enable bootloader-managed first-boot validation and rollback.
+# 交给 bootloader 做首启校验与回滚。
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
-# OTA image identity must match project(julia_fused_base) in CMakeLists.txt.
+# OTA 镜像标识必须与 CMakeLists.txt 的 project(julia_fused_base) 一致。
 CONFIG_OTA_IMAGE_PROJECT_NAME="julia_fused_base"
 
-# Communication reliability defaults. The local WSS integration token is configured
-# below; production credentials must be injected through a protected provisioning flow.
+# 通信可靠性默认值。WSS 集成令牌在下方配置；生产凭证应通过受控注入流程下发，
+# 不得写入本文件。单位：秒。
 CONFIG_OTA_PRODUCT_ID="julia-ai-device"
 CONFIG_COMM_HEARTBEAT_INTERVAL_SECONDS=60
 CONFIG_COMM_RECONNECT_INTERVAL_SECONDS=10
@@ -83,8 +97,8 @@ CONFIG_OTA_CHECK_RECOVERY_INITIAL_SECONDS=30
 CONFIG_OTA_CHECK_RECOVERY_MAX_SECONDS=300
 CONFIG_COMM_MQTT_SUBACK_TIMEOUT_SECONDS=15
 
-# WSS voice stream keepalive: idle links are healthy; liveness is probed with
-# client PINGs and only a missing PONG tears the link down.
+# WSS 语音流保活：空闲链路本身是健康的，用客户端 PING 探活，
+# 只有收不到 PONG 才结束连接。单位：秒（CLOSE_WAIT_MS 为毫秒）。
 CONFIG_WSS_KEEPALIVE_INTERVAL_SECONDS=15
 CONFIG_WSS_PONG_TIMEOUT_SECONDS=10
 CONFIG_WSS_CLOSE_WAIT_MS=500
@@ -92,24 +106,22 @@ CONFIG_WSS_TOKEN=""
 CONFIG_WSS_SERVER_HOST="192.168.137.1"
 CONFIG_JULIA_SERVER_WAKE_ENABLE=y
 CONFIG_WSS_FRAME_WRITE_BUDGET_MS=3500
+# 麦克风数字增益与扬声器固定音量，单位百分比 0–100。
 CONFIG_JULIA_MIC_GAIN_PERCENT=70
 CONFIG_JULIA_SPEAKER_VOLUME_PERCENT=50
 
-# The configured local hotspot is WPA2-PSK, not open authentication.
+# 配置的热点为 WPA2-PSK，不是开放认证。单位：无。
 CONFIG_EXAMPLE_WIFI_AUTH_WPA2_PSK=y
-# Windows Mobile Hotspot advertises WPA2/WPA3 transition mode. Force the
-# station onto its WPA2 path because SAE authentication repeatedly expires.
+# Windows 移动热点会广播 WPA2/WPA3 过渡模式；因 SAE 认证反复超时，
+# 这里强制站点走 WPA2 路径。
 CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
 
-# Voice push demo (device-initiated) is DISABLED by default: the WSS session is
-# driven by the cloud server (server sends FILE_SEND, device pushes the file).
-# Set CONFIG_VOICE_PUSH_DEMO_ENABLE=y to also test unsolicited device-initiated
-# pushes (see voice_push_demo.c).
+# 设备主动推送演示默认关闭：WSS 会话由云端驱动（服务器发 FILE_SEND，设备推文件）。
+# 置 CONFIG_VOICE_PUSH_DEMO_ENABLE=y 才会额外测试设备主动推送（见 voice_push_demo.c）。
 
-# SD card (SDMMC 1-bit, Waveshare ESP32-S3-LCD-1.85): CLK=IO14, CMD=IO17,
-# D0=IO16; D3/CS via the on-board TCA9554 P2 (Extend_IO3, I2C SCL=IO10/SDA=IO11,
-# addr 0x20). Legacy settings; SD driver/startup are excluded from this firmware.
-# Disabling mounting does not switch off an inserted card's power supply.
+# SD 卡（SDMMC 1-bit，Waveshare ESP32-S3-LCD-1.85）：CLK=IO14、CMD=IO17、D0=IO16；
+# D3/CS 走板载 TCA9554 的 P2（Extend_IO3，I2C SCL=IO10/SDA=IO11，地址 0x20）。
+# 这些是遗留设置：SD 驱动与挂载未编入当前固件；不挂载不等于切断卡供电。
 # CONFIG_SD_CARD_ENABLE is not set
 CONFIG_SD_CARD_PIN_CLK=14
 CONFIG_SD_CARD_PIN_CMD=17
@@ -118,17 +130,16 @@ CONFIG_SD_CARD_I2C_SCL=10
 CONFIG_SD_CARD_I2C_SDA=11
 CONFIG_SD_CARD_FREQ_KHZ=20000
 
-# OTA transport failures remain retryable. After the threshold, use a bounded,
-# persistent cooldown instead of permanently quarantining the artifact.
+# OTA 传输失败可重试；超过阈值后使用有界且持久化的冷却，
+# 而不是把制品永久隔离。单位：次数/秒。
 CONFIG_OTA_DOWNLOAD_RETRY_THRESHOLD=3
 CONFIG_OTA_DOWNLOAD_COOLDOWN_BASE_SECONDS=60
 CONFIG_OTA_DOWNLOAD_COOLDOWN_MAX_SECONDS=3600
 
-# TCP WebSocket transport is not part of this application.
+# TCP WebSocket 传输不属于本应用。
 # CONFIG_WS_TRANSPORT is not set
-# Wi-Fi remains a background service.  Retry timing is configured by the
-# application lifecycle manager rather than the example component's finite
-# synchronous retry loop.
+# Wi-Fi 作为后台服务长期运行；重试节奏由应用侧 network_lifecycle 管理，
+# 不依赖示例组件那个有限的同步重试循环。单位：毫秒，抖动为百分比。
 CONFIG_NETWORK_WIFI_RETRY_BASE_MS=1000
 CONFIG_NETWORK_WIFI_RETRY_MAX_MS=60000
 CONFIG_NETWORK_WIFI_RETRY_JITTER_PERCENT=20
@@ -140,7 +151,8 @@ CONFIG_USE_MULTINET=n
 CONFIG_SR_MN_CN_NONE=y
 CONFIG_SR_MN_EN_NONE=y
 
-# Julia display idle policy and RTC/SNTP wall clock.
+# 显示空闲策略与 RTC/SNTP 墙钟。时间单位见各项名称（秒/毫秒）；
+# 亮度为百分比；故障复位延迟为毫秒；自动复位上限为次数。
 CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS=10
 CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS=300
 CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS=300
@@ -153,29 +165,46 @@ CONFIG_JULIA_FAULT_AUTO_RESET_LIMIT=3
 CONFIG_JULIA_DISPLAY_ACTIVITY_POLL_MS=500
 CONFIG_JULIA_DISPLAY_BREATHE_MIN_PERCENT=0
 CONFIG_JULIA_DISPLAY_BREATHE_MAX_PERCENT=30
-CONFIG_JULIA_DISPLAY_BREATHE_PERIOD_MS=8000
+CONFIG_JULIA_DISPLAY_BREATHE_PERIOD_MS=4000
 CONFIG_JULIA_RTC_ENABLE=y
 CONFIG_JULIA_NIGHT_SLEEP_ENABLE=y
 CONFIG_JULIA_NIGHT_SLEEP_START_HOUR=23
 CONFIG_JULIA_NIGHT_SLEEP_END_HOUR=7
 CONFIG_JULIA_NIGHT_SLEEP_GRACE_SECONDS=300
 CONFIG_JULIA_NIGHT_SCHEDULE_POLL_MS=5000
+# 运动唤醒输入：扫描周期/冷却为毫秒，确认帧数为帧，加速度门限为毫 g（三轴变化量之和），
+# 角速度门限为 dps。取值来自 tools/imu_logger/tune_motion.py 对 imu_records/latest 的 11 段
+# 典型场景回放（tuning/replay.json，误报 0／漏报 0），属同数据拟合，未上板确认。
+# 驱动量程已对齐该录制的 ±16 g／±1024 dps（见 qmi8658_shared.c），所以 400 dps 角速度门限
+# 可达；不要单独收窄量程，否则该支路恒不成立。
+# 扫描周期 20 ms 与传感器 ODR 是两个参数：ODR 固定在 30 Hz 寄存器编码（约 33 ms 一个新样本），
+# 因此 20 ms 会重复读到同一批样本。重复采样会让加速度差分 delta 归零并清零连续计数，目前靠
+# 角速度支路兜住（它按当前样本模长判定，不怕重复读）；一旦角速度支路被关闭或量程被收窄，
+# 就必须把轮询周期放慢到不短于 ODR，否则连续确认帧无法累加、运动唤醒不再触发。
 CONFIG_JULIA_IMU_MOTION_ENABLE=y
-CONFIG_JULIA_IMU_MOTION_SAMPLE_MS=200
-CONFIG_JULIA_IMU_MOTION_CONFIRM_FRAMES=4
-CONFIG_JULIA_IMU_MOTION_COOLDOWN_MS=10000
-CONFIG_JULIA_IMU_ACCEL_DELTA_MG=750
-CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS=90
+CONFIG_JULIA_IMU_MOTION_SAMPLE_MS=20
+CONFIG_JULIA_IMU_MOTION_CONFIRM_FRAMES=10
+CONFIG_JULIA_IMU_MOTION_COOLDOWN_MS=0
+CONFIG_JULIA_IMU_ACCEL_DELTA_MG=450
+CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS=400
 CONFIG_JULIA_TIMEZONE="CST-8"
 CONFIG_JULIA_SNTP_SERVER="pool.ntp.org"
 CONFIG_JULIA_MULTI_DEVICE_ENABLE=y
 CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE=y
+# 设备认证方式：当前使用用户名/密码（严格模式），其余三种未启用。
 CONFIG_COMM_DEVICE_AUTH_USERNAME_PASSWORD=y
 # CONFIG_COMM_DEVICE_AUTH_NONE is not set
 # CONFIG_COMM_DEVICE_AUTH_TOKEN is not set
 # CONFIG_COMM_DEVICE_AUTH_CERTIFICATE is not set
 CONFIG_COMM_MQTT_BROKER_URI="mqtts://8.133.215.254:11883"
 
+# 本地分段采音（capture-v1）能力协商：开启 FFT 门控与 WebRTC VAD。
+# VAD_MODE 为 0–3 的激进程度；两个 TAIL 是"静音尾"时长，单位毫秒（按 20 ms 帧向上取整）。
+# 注意：本文件只列出"与 Kconfig 默认不同"的项，因此不含降噪历史门控
+# （JULIA_CAPTURE_NOISE_*）。但本机生效的 sdkconfig 已把 NOISE_WINDOW 与 NOISE_TAIL
+# 打开，取值与 docs/NOISE_TAIL.md 的参考组合一致（R=200‰、C=800 Hz、W=15 帧、最少 5
+# 个能量帧、60%、确认 1 帧、尾段恢复 R=200‰/C=700 Hz、结束保护 500 ms），也就是说
+# 这些参数当前是生效的；需要关闭降噪时在 sdkconfig 里置 n，本文件不负责开关它。
 CONFIG_JULIA_LOCAL_CAPTURE_ENABLE=y
 CONFIG_JULIA_CAPTURE_FFT_GATE=y
 CONFIG_JULIA_CAPTURE_VAD_ENABLE=y
@@ -183,7 +212,7 @@ CONFIG_JULIA_CAPTURE_VAD_MODE=1
 CONFIG_JULIA_CAPTURE_VAD_WAKE_TAIL_MS=500
 CONFIG_JULIA_CAPTURE_VAD_DIALOG_TAIL_MS=700
 
-# Development server endpoint profile (credentials remain local).
+# 开发用服务器端点（凭证仍只存在于本机 sdkconfig）。
 # CONFIG_JULIA_LEGACY_SERVER_PORTS is not set
 CONFIG_WSS_SERVER_HOST="8.133.215.254"
 CONFIG_WSS_SERVER_PORT=19443

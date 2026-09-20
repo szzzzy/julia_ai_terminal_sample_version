@@ -87,6 +87,7 @@ typedef enum {
     EVT_REQUIRE_WAKE,            /**< 云端请求结束 S1 陪伴；活动交互期间拒绝。 */
     EVT_VOICE_BUSY,              /**< 云端资源忙碌，结束当前交互并回到等待唤醒。 */
     EVT_IMU_UNAVAILABLE,          /**< 无法可靠检测搬动，退出静默以免无法唤醒。 */
+    EVT_LISTEN_IDLE_TIMEOUT,      /**< S4 未起音，正常回到待唤醒态。 */
     EVT_COUNT,
 } fsm_event_t;
 
@@ -110,6 +111,8 @@ struct julia_fsm {
     julia_main_state_t s7_return_state;
     julia_fsm_state_cb_t on_enter;
     julia_fsm_state_cb_t on_exit;
+    /** 可选取消闸门：在 exit 处理之后、状态提交之前调用；返回 false 即放弃本次提交。 */
+    bool (*commit_allowed)(julia_fsm_t *fsm);
     void *user_ctx;
 };
 

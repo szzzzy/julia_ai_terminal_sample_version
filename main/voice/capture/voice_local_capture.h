@@ -12,8 +12,9 @@
  * （板级 PCM1 组帧缓冲会被下一帧复用）。generation 是采集时的连接代次；返回非 ESP_OK
  * 会让采集器置 failed，进而结束本次会话。 */
 typedef esp_err_t (*voice_capture_send_t)(const uint8_t *, size_t, uint32_t generation);
-/* 本地起音/结束事件回调，同样运行在采音任务上下文；只负责传达状态语义，是否据此改变语音状态由上层决定。 */
-typedef void (*voice_capture_event_t)(lc_event_t, lc_mode_t);
+/* 本地起音/结束或未起音超时回调，在采音任务上下文执行。
+ * listen_revision 绑定 S4 状态版本；LC_IDLE_TIMEOUT 仅为本地通知，没有线上音频段。 */
+typedef void (*voice_capture_event_t)(lc_event_t, lc_mode_t, uint32_t listen_revision);
 /* 幂等：重复调用返回 ESP_OK 且不替换已注册的回调。工作内存（底噪窗、预录、判决历史）分配在
  * PSRAM；回调运行在板级采音任务上下文，必须快速返回，不能阻塞或直接触碰网络接口。 */
 esp_err_t voice_local_capture_init(voice_capture_send_t send, voice_capture_event_t event);
@@ -32,5 +33,8 @@ bool voice_local_capture_text(const uint8_t *text, size_t len);
 void voice_local_capture_frame(const uint8_t *pcm1, size_t len);
 /* 只设置期望模式；实际是否起音还要 capture_ready 已放行，未就绪时内部保持 LC_OFF。 */
 void voice_local_capture_mode(lc_mode_t mode);
+/* 只能由采集 owner 在 frame() 之前调用：传入 S4 快照的 revision，0 表示关闭
+ * “无起音窗口”门控（S1/唤醒段）。revision 变化即重新开窗。 */
+void voice_local_capture_listen_window(uint32_t revision);
 /* capture_ready 且代次未被替换时为 true，可在任意任务只读。 */
 bool voice_local_capture_ready(void);

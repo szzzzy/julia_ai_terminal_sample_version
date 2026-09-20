@@ -12,6 +12,8 @@
  */
 
 #include "voice_service.h"
+#include "voice_timing.h"
+#include "esp_random.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -54,6 +56,48 @@ __attribute__((weak)) bool julia_wireless_sd_lock(uint32_t timeout_ms)
 __attribute__((weak)) void julia_wireless_sd_unlock(void) {}
 
 static const char *TAG = "voice_service";
+static int64_t s_rx_backpressure_since_us, s_last_backpressure_log_us;
+static uint32_t s_rx_backpressure_generation;
+
+/* 读下一帧之前先预留一条最大报文的空间：TCP 流控负责吸收服务器突发，
+ * 这样既不必复制或丢弃部分 PCM，也不必在 on_binary 内等待。
+ * 控制帧同样可能被拖后，因此不能无限期等待停住的播放 worker：
+ * 一秒内腾不出空间就结束本次会话。 */
+static bool voice_service_can_receive(void)
+{
+    voice_playback_buffer_status_t status;
+    if (!voice_playback_get_buffer_status(&status) ||
+        status.capacity - status.queued >= WSS_TRANSPORT_MAX_PAYLOAD) {
+        s_rx_backpressure_since_us = 0;
+        return true;
+    }
+    int64_t now = esp_timer_get_time();
+    if (!s_rx_backpressure_since_us || s_rx_backpressure_generation != status.generation) {
+        s_rx_backpressure_since_us = now;
+        s_rx_backpressure_generation = status.generation;
+    }
+    bool stalled = now - s_rx_backpressure_since_us >= 1000000LL;
+    if (stalled || !s_last_backpressure_log_us || now - s_last_backpressure_log_us >= 60000000LL) {
+        s_last_backpressure_log_us = now;
+        ESP_LOGW(TAG, "playback backpressure stalled=%d generation=%lu queued=%u capacity=%u rate=%lu "
+                      "rx=%llu accepted=%llu dequeued=%llu i2s_bytes=%llu configured_rate=%lu "
+                      "first_rx_us=%lld last_rx_us=%lld i2s_request_us=%lld i2s_started_us=%lld "
+                      "first_output_us=%lld output_age_ms=%lld",
+                 stalled, (unsigned long)status.generation, (unsigned)status.queued,
+                 (unsigned)status.capacity, (unsigned long)status.rate,
+                 (unsigned long long)status.received_bytes, (unsigned long long)status.accepted_bytes,
+                 (unsigned long long)status.dequeued_bytes, (unsigned long long)status.output_bytes,
+                 (unsigned long)status.configured_rate, (long long)status.first_input_us,
+                 (long long)status.last_input_us, (long long)status.i2s_request_us,
+                 (long long)status.i2s_started_us,
+                 (long long)status.first_output_us,
+                 (long long)(status.last_output_us ? (now-status.last_output_us)/1000 : -1));
+    }
+    if (stalled) {
+        wss_transport_fail_session();
+    }
+    return false;
+}
 
 static void post_fsm_event(fsm_event_t event)
 {
@@ -152,6 +196,12 @@ extern const uint8_t wake_prompt_wav_end[]
 static uint32_t s_playback_generation;
 static voice_playback_role_t s_playback_role;
 static bool s_session_activated;
+#if CONFIG_JULIA_VOICE_TIMING
+/* 仅 WSS owner 使用；与上行 generation 分开统计，后者可能在会话中途变化。 */
+static uint32_t s_timing_epoch;
+static uint32_t s_timing_tx_id, s_timing_pcm_frames;
+static int64_t s_timing_last_pcm, s_timing_max_send;
+#endif
 /* 该时间戳由 MIC producer 在临界区内存入、会话开始时清零；诊断日志统一由 WSS owner
  * 输出，采音任务和 I2S 任务都不做 telemetry 打印。 */
 static int64_t s_last_capture_us;
@@ -178,6 +228,13 @@ static void voice_service_timing_poll(bool completed)
              s_audio_timing.session, s_audio_timing.interaction[0] ? s_audio_timing.interaction : "unknown",
              timing.generation, last_capture, s_audio_timing.spks_us, s_audio_timing.first_pcm_us,
              timing.first_output_us, timing.completed_us);
+    /* SPKS 不带 utterance ID：只上报播放 generation，不猜测轮次；
+     * collector 只关联已完成且判决为 speech 的无歧义片段。 */
+#if CONFIG_JULIA_VOICE_TIMING
+    if (!s_audio_timing.output_reported && timing.first_output_us)
+        voice_timing_record(VT_FIRST_I2S,s_timing_epoch,0,timing.generation,
+                            timing.first_output_us,0,0);
+#endif
     s_audio_timing.output_reported = true;
     if (completed) s_audio_timing.generation = 0;
 }
@@ -389,19 +446,23 @@ static void voice_service_on_board_audio_frame(const uint8_t *frame, size_t byte
     static int64_t playback_guard_until_us;
     int64_t now_us = esp_timer_get_time();
     if (voice_playback_is_active()) playback_guard_until_us = now_us + 600000;
-    julia_main_state_t state = julia_fsm_runtime_get_state();
+    julia_fsm_snapshot_t capture_snapshot;
+    julia_fsm_runtime_get_snapshot(&capture_snapshot);
+    julia_main_state_t state = capture_snapshot.main_state;
+    bool listen_window = state == JULIA_MAIN_STATE_S4_INTERACTION;
     lc_mode_t mode = LC_OFF;
     if (state == JULIA_MAIN_STATE_S3_STANDBY || state == JULIA_MAIN_STATE_S5_SILENT ||
         state == JULIA_MAIN_STATE_S6_SLEEP) mode = LC_WAKE;
     else if (state == JULIA_MAIN_STATE_S1_COMPANION || state == JULIA_MAIN_STATE_S4_INTERACTION ||
              (state == JULIA_MAIN_STATE_S2_DIALOG &&
-              julia_fsm_runtime_get_s2_sub_state() == JULIA_S2_SUB_STATE_S2_1_LISTENING)) mode = LC_DIALOG;
+              capture_snapshot.s2_sub_state == JULIA_S2_SUB_STATE_S2_1_LISTENING)) mode = LC_DIALOG;
     /* S4 提交与播放任务启动之间也不能开麦；回执发出前保留门控，避免首句先于云端握手。 */
     portENTER_CRITICAL(&s_mic_state_lock);
     bool wake_pending = s_wake_reply_expected || s_s4_ready_pending;
     portEXIT_CRITICAL(&s_mic_state_lock);
     if (now_us < playback_guard_until_us ||
         (state == JULIA_MAIN_STATE_S4_INTERACTION && wake_pending)) mode = LC_OFF;
+    voice_local_capture_listen_window(listen_window ? capture_snapshot.revision : 0);
     voice_local_capture_mode(mode);
     voice_local_capture_frame(frame, bytes);
     return;
@@ -638,7 +699,44 @@ static bool voice_service_send_uplink_frame(void *ctx, const uint8_t *data,
                                             size_t len)
 {
     (void)ctx;
-    if (wss_transport_send_now(data[0] == '{' ? 0x1 : 0x2, data, len) != ESP_OK) {
+#if CONFIG_JULIA_VOICE_TIMING
+    int64_t tx_begin = esp_timer_get_time();
+#endif
+    esp_err_t sent = wss_transport_send_now(data[0] == '{' ? 0x1 : 0x2, data, len);
+#if CONFIG_JULIA_VOICE_TIMING
+    int64_t tx_end = esp_timer_get_time();
+    uint32_t uid = 0;
+    if (len == 656 && !memcmp(data,"PCM2",4)) {
+        uid = (uint32_t)data[4] | ((uint32_t)data[5]<<8) |
+              ((uint32_t)data[6]<<16) | ((uint32_t)data[7]<<24);
+        if (sent == ESP_OK && uid == s_timing_tx_id) {
+            if (!s_timing_pcm_frames)
+                voice_timing_record(VT_FIRST_PCM_TX,s_timing_epoch,uid,0,tx_end,tx_begin,0);
+            ++s_timing_pcm_frames;
+            s_timing_last_pcm=tx_end;
+            if (tx_end-tx_begin>s_timing_max_send) s_timing_max_send=tx_end-tx_begin;
+        }
+    } else if (len && data[0]=='{') {
+        cJSON *o=cJSON_ParseWithLength((const char *)data,len);
+        const cJSON *type=cJSON_GetObjectItemCaseSensitive(o,"type");
+        if (voice_control_uint(o,"utterance_id",&uid) && cJSON_IsString(type)) {
+            voice_timing_kind_t k = !strcmp(type->valuestring,"capture_start") ? VT_START_TX :
+                !strcmp(type->valuestring,"capture_end") ? VT_END_TX : VT_ABORT_TX;
+            if (sent == ESP_OK) {
+                voice_timing_record(k,s_timing_epoch,uid,0,tx_end,tx_begin,0);
+                if (k==VT_START_TX) {
+                    s_timing_tx_id=uid;s_timing_pcm_frames=0;s_timing_last_pcm=s_timing_max_send=0;
+                } else if (uid==s_timing_tx_id) {
+                    if (s_timing_last_pcm) voice_timing_record(VT_LAST_PCM_TX,s_timing_epoch,uid,0,s_timing_last_pcm,0,0);
+                    voice_timing_record(VT_UPLINK_STATS,s_timing_epoch,uid,0,tx_end,s_timing_max_send,s_timing_pcm_frames);
+                }
+            }
+        }
+        cJSON_Delete(o);
+    }
+    if (sent != ESP_OK) voice_timing_record(VT_TX_FAILED,s_timing_epoch,uid,0,tx_end,tx_begin,sent);
+#endif
+    if (sent != ESP_OK) {
         ESP_LOGW(TAG, "Failed to send %u-byte MIC ring frame", (unsigned)len);
         return false;
     }
@@ -788,10 +886,22 @@ static void voice_service_poll(void)
      * 不补播、也不拿它收尾当前这一轮，避免旧回答的结束动作打断新回答。 */
     if (voice_playback_take_completion(&generation, &result) &&
         generation == s_playback_generation) {
+#if CONFIG_JULIA_VOICE_TIMING
+        voice_playback_timing_t trace_done;
+        if (voice_playback_get_timing(generation,&trace_done))
+            voice_timing_record(VT_PLAY_DONE,s_timing_epoch,0,generation,
+                                trace_done.completed_us,result,s_playback_role);
+#endif
         voice_service_timing_poll(true);
         bool local_terminal = playback_role_is_terminal(s_playback_role);
         bool local_wake = CONFIG_JULIA_LOCAL_CAPTURE_ENABLE &&
                           s_playback_role == VOICE_PLAYBACK_ROLE_WAKE_REPLY;
+        if (result == ESP_ERR_NO_MEM) {
+            /* 溢出属于本轮话语失败，不得当作正常播完上报 speaker_done。 */
+            (void)voice_service_send_error("ERROR playback_overflow");
+            wss_transport_fail_session();
+            return;
+        }
         if (result != ESP_OK && local_wake) {
             /* 应答失败不能被当成正常播完而开放首句；保留门控直至会话清场。 */
             julia_avatar_talking_stop();
@@ -1148,6 +1258,10 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
     /* 回答声音必须先用 SPKS 声明采样率和用途，再发送二进制声音，最后用 SPKE
      * 表示服务器已经发完。顺序错误的声音会被拒绝，避免未知数据进入扬声器。 */
     if (len == 4 && memcmp(text, "SPKE", 4) == 0) {
+#if CONFIG_JULIA_VOICE_TIMING
+        if (s_playback_generation && s_playback_role==VOICE_PLAYBACK_ROLE_DIALOG_REPLY)
+            voice_timing_record(VT_SPKE,s_timing_epoch,0,s_playback_generation,esp_timer_get_time(),0,0);
+#endif
         /* END 排在所有已接收 PCM 之后；播放任务负责报告完成。
          * 已被打断或不存在的播放代次无需执行结束动作。 */
         if (s_playback_generation != 0 &&
@@ -1190,6 +1304,9 @@ static void voice_service_on_server_text(const uint8_t *text, size_t len)
                      voice_state_sync_session_id());
             snprintf(s_audio_timing.interaction, sizeof(s_audio_timing.interaction), "%s", s_interaction_id);
             s_playback_role = role;
+#if CONFIG_JULIA_VOICE_TIMING
+            voice_timing_record(VT_SPKS,s_timing_epoch,0,s_playback_generation,received_us,role,rate);
+#endif
             if (role == VOICE_PLAYBACK_ROLE_WAKE_REPLY) s_wake_reply_expected = false;
             voice_service_cancel_file();
             voice_service_disarm_companion_timer();
@@ -1264,9 +1381,18 @@ static void voice_service_on_binary(const uint8_t *data, size_t len)
     }
     esp_err_t err = voice_playback_write(data, len);
     if (err == ESP_OK && s_audio_timing.generation == s_playback_generation &&
-        s_audio_timing.first_pcm_us == 0) s_audio_timing.first_pcm_us = received_us;
+        s_audio_timing.first_pcm_us == 0) {
+        s_audio_timing.first_pcm_us = received_us;
+#if CONFIG_JULIA_VOICE_TIMING
+        voice_timing_record(VT_FIRST_PCM_RX,s_timing_epoch,0,s_playback_generation,received_us,len,0);
+#endif
+    }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Downlink PCM write failed: %s", esp_err_to_name(err));
+        if (err == ESP_ERR_NO_MEM) {
+            (void)voice_service_send_error("ERROR playback_overflow");
+            wss_transport_fail_session();
+        }
     }
 }
 
@@ -1326,6 +1452,7 @@ static void voice_service_on_queue_item(void *item, size_t item_size)
 /** 新语音连接从空的麦克风缓冲开始，断线前未发出的声音绝不在重连后补发。 */
 static void voice_service_on_session_start(void)
 {
+    s_rx_backpressure_since_us = 0;
 #if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
     voice_local_capture_connection(0);
 #endif
@@ -1346,6 +1473,10 @@ static void voice_service_on_session_start(void)
         return;
     }
     uint32_t generation = voice_service_next_uplink_generation();
+#if CONFIG_JULIA_VOICE_TIMING
+    s_timing_epoch=generation;s_timing_tx_id=s_timing_pcm_frames=0;
+    voice_timing_record(VT_SESSION_START,generation,0,0,esp_timer_get_time(),0,0);
+#endif
     if (!s_uplink_ring_ready ||
         !voice_uplink_ring_start_generation(&s_uplink_ring, generation)) {
         ESP_LOGE(TAG, "Cannot start MIC uplink generation=%" PRIu32, generation);
@@ -1389,6 +1520,10 @@ static void voice_service_on_session_start(void)
  */
 static void voice_service_on_session_end(wss_transport_end_reason_t reason)
 {
+    s_rx_backpressure_since_us = 0;
+#if CONFIG_JULIA_VOICE_TIMING
+    voice_timing_record(VT_SESSION_END,s_timing_epoch,0,0,esp_timer_get_time(),reason,0);
+#endif
 #if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
     voice_local_capture_connection(0);
 #endif
@@ -1423,7 +1558,7 @@ static void voice_service_on_session_end(wss_transport_end_reason_t reason)
                   " ended reason=%s; discarded MIC ring frames=%u",
              s_uplink_generation, wss_transport_end_reason_name(reason),
              (unsigned)discarded_frames);
-    post_fsm_event(EVT_WSS_DISCONNECTED);
+    julia_fsm_runtime_wss_disconnected(wss_transport_generation());
     /* 断线不是用户主动交流，只结束“正在处理”的标记，不能因此点亮睡眠中的屏幕。 */
     julia_idle_display_set_busy(false);
 }
@@ -1885,11 +2020,17 @@ esp_err_t voice_service_init(void)
 
 static esp_err_t voice_service_send_capture_record(const uint8_t *, size_t, uint32_t);
 
-static void voice_service_local_capture_event(lc_event_t event, lc_mode_t mode)
+static void voice_service_local_capture_event(lc_event_t event, lc_mode_t mode,
+                                              uint32_t listen_revision)
 {
     /* 本函数由采音任务在产出 LC_START/LC_END 记录后回调，运行在采音任务上下文；
      * LC_START 等价于云端 MIC_START：先停掉正在播放的声音，再把本轮标记为“正在处理”。 */
     if (mode != LC_DIALOG) return;
+    if (event == LC_IDLE_TIMEOUT) {
+        if (julia_fsm_runtime_listen_idle_timeout(listen_revision) != ESP_OK)
+            wss_transport_fail_session();
+        return;
+    }
     if (event == LC_START) voice_playback_stop();
     julia_idle_display_note_activity();
     julia_idle_display_set_busy(true);
@@ -1903,6 +2044,10 @@ static void voice_service_local_capture_event(lc_event_t event, lc_mode_t mode)
 
 esp_err_t voice_service_init_board_audio(void)
 {
+#if CONFIG_JULIA_VOICE_TIMING
+    static bool trace_initialized;
+    if (!trace_initialized) { voice_timing_init(esp_random()); trace_initialized=true; }
+#endif
     ESP_RETURN_ON_ERROR(voice_service_uplink_ring_init(), TAG,
                         "init MIC uplink ring");
 #if CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
@@ -1930,6 +2075,7 @@ esp_err_t voice_service_ip_ready(void *arg)
         .on_session_start = voice_service_on_session_start,
         .on_session_end = voice_service_on_session_end,
         .on_poll = voice_service_poll,
+        .can_receive = voice_service_can_receive,
         .queue_item_size = sizeof(voice_job_t),
         /* 麦克风声音走独立缓冲；普通队列只保留最小容量以满足连接层通用接口。 */
         .queue_depth = VOICE_TRANSPORT_QUEUE_DEPTH,

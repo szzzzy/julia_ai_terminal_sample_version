@@ -57,6 +57,7 @@ static const char *const s_event_names[EVT_COUNT] = {
     [EVT_USER_LEAVE] = "EVT_USER_LEAVE",
     [EVT_USER_CALL] = "EVT_USER_CALL",
     [EVT_LOCAL_SPEECH_START] = "EVT_LOCAL_SPEECH_START",
+    [EVT_LISTEN_IDLE_TIMEOUT] = "EVT_LISTEN_IDLE_TIMEOUT",
     [EVT_SILENCE_TIMEOUT] = "EVT_SILENCE_TIMEOUT",
     [EVT_NIGHT_TIME] = "EVT_NIGHT_TIME",
     [EVT_STANDBY_TIMEOUT] = "EVT_STANDBY_TIMEOUT",
@@ -348,6 +349,7 @@ bool julia_fsm_transition_to_full(julia_fsm_t *fsm,
     if (fsm->on_exit != NULL) {
         fsm->on_exit(fsm, from_main_state, from_s2_sub_state, reason);
     }
+    if (fsm->commit_allowed && !fsm->commit_allowed(fsm)) return false;
     fsm->main_state = to_main_state;
     fsm->s2_sub_state = to_s2_sub_state;
     fsm->s7_sub_state = to_s7_sub_state;
@@ -395,6 +397,7 @@ void julia_fsm_init(julia_fsm_t *fsm)
     fsm->s7_return_state = JULIA_MAIN_STATE_S3_STANDBY;
     fsm->on_enter = default_on_enter;
     fsm->on_exit = default_on_exit;
+    fsm->commit_allowed = NULL;
     fsm->user_ctx = NULL;
     fsm->on_enter(fsm, fsm->main_state, fsm->s2_sub_state, EVT_NONE);
 }
@@ -423,6 +426,11 @@ bool julia_fsm_handle_event(julia_fsm_t *fsm, fsm_event_t event, void *data)
 
     /* S4 已经承担 S2.1 的听音职责：起音只确认事件，不重复迁移、呈现或重启
      * 听音计时；段结束的 EVT_START_DIALOG 直接进入 S2.2。S2.1 重复起音同理。 */
+    if (event == EVT_LISTEN_IDLE_TIMEOUT) {
+        if (fsm->main_state != JULIA_MAIN_STATE_S4_INTERACTION) return false;
+        return julia_fsm_transition_to(fsm, JULIA_MAIN_STATE_S3_STANDBY,
+                                      JULIA_S2_SUB_STATE_NONE, event);
+    }
     if (event == EVT_LOCAL_SPEECH_START &&
         (fsm->main_state == JULIA_MAIN_STATE_S4_INTERACTION ||
          (fsm->main_state == JULIA_MAIN_STATE_S2_DIALOG &&

@@ -10,7 +10,7 @@
  * 从而避免两个任务同时操作同一个加密连接造成帧交叉或连接损坏。
  *
  * 证书复用构建内嵌的 server_certs/ca_cert.pem 信任锚；本模块不访问 OTA 分区、
- * 不写 NVS、不打开文件。
+ * 不打开文件；独立停滞监测仅在升级恢复时通过 julia_fault 写入 NVS 故障记录。
  *
  * 例如“必须先收到开始播放命令才能接收回答声音”“文件必须以 BEGIN/END 包围”
  * 都是语音业务规则，由语音服务检查；本模块只保证消息完整、顺序正确且不超长。
@@ -18,6 +18,7 @@
 #pragma once
 
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -26,6 +27,11 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+uint32_t wss_transport_generation(void);
+bool wss_transport_is_owner(void);
+/* 运行时观测接口：只在 WSS owner 上调用；其他上下文调用为空操作。 */
+void wss_transport_fsm_wait(bool waiting);
 
 /** 一条完整文本或二进制消息允许携带的最大业务数据量。 */
 #define WSS_TRANSPORT_MAX_PAYLOAD 1200
@@ -102,6 +108,9 @@ typedef struct {
     wss_transport_session_end_cb_t on_session_end; /**< 会话结束回调，可为 NULL。 */
     void (*on_poll)(void); /**< 每轮收到一帧（含空闲超时）后调用一次，用于推进少量语音或文件
                             *   数据；必须保持有界、不得阻塞。可为 NULL。 */
+    /** 可选的下行背压门控：返回 false 时把 recv 推迟 10 ms，但仍继续处理发送与 on_poll；
+     * 回调必须自己负责在下行长期停滞时结束会话。 */
+    bool (*can_receive)(void);
     size_t queue_item_size; /**< 每项待发送业务内容占用的字节数；普通队列与固定 4 槽的控制队列共用。 */
     unsigned queue_depth; /**< 普通待发送内容的队列深度；控制队列固定 4 槽，不受该字段影响。 */
 } wss_transport_config_t;

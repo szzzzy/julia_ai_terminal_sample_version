@@ -6,6 +6,7 @@
 /sdkconfig.imu-test
 /sdkconfig.imu-test.old
 /imu_records/
+/logs/voice_timing/
 
 # Python test cache
 __pycache__/

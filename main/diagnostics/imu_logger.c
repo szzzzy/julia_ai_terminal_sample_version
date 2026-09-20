@@ -1,5 +1,18 @@
-/* Temporary characterization harness. One RAM record, no product FSM/voice tasks.
- * HTTP handlers only enqueue work; this worker alone owns IMU and speaker I/O. */
+/**
+ * @file imu_logger.c
+ * @brief 独立的 IMU 特性采集固件（实验用途，不是产品固件）：用 HTTP 触发一次 8 秒动作记录，
+ *        采样数据留在 RAM，再由发起请求的电脑取走 CSV。
+ *
+ * 生效条件：只有 `CONFIG_JULIA_IMU_LOGGER_ENABLE=y`（Kconfig 默认 n，本机 sdkconfig 为 not set）
+ * 时才会被 main/CMakeLists.txt 编入；打开后 app_main 只启动本模块，**不再启动产品语音、显示与
+ * 行为 FSM**，期间设备上的录音接口对同网段主机是开放的，不得当作产品固件部署。
+ *
+ * 线程与所有权：HTTP 处理函数只把命令投进队列，不做任何硬件操作；唯一的工作任务（worker）
+ * 独占 IMU 与扬声器 I/O，并按“先采一次、再上传”的顺序串行执行。`s_stage` 由 s_lock 保护。
+ *
+ * 时间基准：时间戳统一用 esp_timer 的单调微秒（启动以来）；`sample_t.t_us` 记录的是本次读取
+ * 起止时刻的中点相对采集起点的偏移。
+ */
 #include "imu_logger.h"
 #include <inttypes.h>
 #include <stdio.h>
@@ -27,10 +40,16 @@
 #include "network_lifecycle.h"
 #include "qmi8658_shared.h"
 
+/* 采集窗口：8 秒（µs）；样本上限 1200 条（8 s 内约 150 Hz，超出即提前结束并标记 full）；
+ * CSV 缓冲上限 256 KiB，分配在 PSRAM。三个常量共同决定“一次记录”的内存与时长上界。 */
 #define RECORD_US 8000000LL
 #define MAX_SAMPLES 1200
 #define CSV_BYTES (256 * 1024)
+/* 一条样本：t_us=相对采集起点的时刻（µs）；counter=传感器 24 位采样计数（用于发现漏读）；
+ * raw[6]=三轴加速度 + 三轴角速度的原始 int16 计数（未经单位换算）。 */
 typedef struct { uint32_t t_us, counter; int16_t raw[6]; } sample_t;
+/* 一条命令：retry=true 表示只重传上一次的 CSV（不重新采集）；label/ip/port 由 HTTP 请求带入，
+ * 决定上传地址与记录标识。 */
 typedef struct { bool retry; char label[49], ip[16]; unsigned port; } command_t;
 static const char *TAG = "imu_logger";
 static sample_t *s_samples;
@@ -55,7 +74,7 @@ static void stage(const char *value, const char *display)
     ESP_LOGI(TAG, "%s", value);
 }
 
-/* Blocking tone only outside capture; append silence to drain DMA before stop. */
+/* 提示音只在采集区间之外播放（阻塞式写 I2S），并在停止前补静音排空 DMA。 */
 static esp_err_t beep(unsigned count)
 {
     int16_t wave[160];
@@ -78,7 +97,7 @@ static void sample_tick(void *arg)
     xTaskNotifyGive(s_worker);
 }
 
-/* CSV is prepared only after sampling has stopped. Raw counts remain inspectable. */
+/* CSV 只在采样停止后生成，原始计数保持可核对（不做单位换算）。 */
 static bool make_csv(unsigned count, unsigned errors, unsigned raced, unsigned missed,
                      unsigned clipped, bool full, bool cue_ok)
 {
@@ -158,9 +177,11 @@ static bool capture(void)
         (void)board_imu_set_enabled(false);
         return false;
     }
+    /* 3 秒静置：等传感器稳定、并让提示音的机械振动衰减，保证它不进入记录区间。 */
     vTaskDelay(pdMS_TO_TICKS(3000)); /* Sensor settling and acoustic vibration decay. */
     stage("capturing", "IMU: RECORDING 8s");
     (void)ulTaskNotifyTake(pdTRUE, 0);
+    /* 2 ms 周期定时器只负责唤醒采样循环；实际采样间隔以 t_us 实测为准。 */
     if (esp_timer_start_periodic(s_tick, 2000) != ESP_OK) {
         (void)board_imu_set_enabled(false);
         return false;
@@ -173,11 +194,12 @@ static bool capture(void)
         sample_t row;
         esp_err_t err = board_imu_logger_read(&row.counter, row.raw);
         int64_t end = esp_timer_get_time();
-        if (err == ESP_ERR_NOT_FINISHED) { ++raced; continue; }
+        if (err == ESP_ERR_NOT_FINISHED) { ++raced; continue; }   /* 新样本还没就绪：本轮跳过，不计错误。 */
         if (err != ESP_OK) { ++errors; continue; }
         if (end - start >= RECORD_US) break;
-        if (have_last && row.counter == last) continue;
+        if (have_last && row.counter == last) continue;           /* 同一采样重复读出：丢弃。 */
         if (have_last) {
+            /* 传感器计数是 24 位循环值：按无符号差判断中间漏掉了多少帧。 */
             uint32_t delta = (row.counter - last) & 0xffffff;
             if (delta > 1) missed += delta - 1;
         }
@@ -186,18 +208,21 @@ static bool capture(void)
         bool clip = false;
         for (unsigned j = 0; j < 6; ++j)
             if (row.raw[j] >= 32760 || row.raw[j] <= -32760) clip = true;
-        if (clip) ++clipped;
+        if (clip) ++clipped;                                     /* 接近满量程：可能已饱和，仅计数不改数据。 */
         s_samples[count++] = row;
         if (count == MAX_SAMPLES) { full = true; break; }
     }
     (void)esp_timer_stop(s_tick);
     (void)board_imu_set_enabled(false);
     stage("finished", "IMU: DONE");
+    /* 结束提示音放在记录区间之后，不占用采样时间。 */
     bool cue_ok = beep(2) == ESP_OK; /* Never part of the recorded interval. */
     ESP_LOGI(TAG, "record=%s samples=%u read_errors=%u missed=%u", s_id, count, errors, missed);
     return make_csv(count, errors, raced, missed, clipped, full, cue_ok);
 }
 
+/* 唯一的工作任务：串行处理命令队列。retry 命令只重传上次的 CSV；采集失败时保留 s_samples/s_csv
+ * 以便再次重试，且不会覆盖上一条可用记录之外的硬件状态。 */
 static void worker(void *arg)
 {
     (void)arg;
@@ -223,8 +248,8 @@ static esp_err_t status_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, text);
 }
 
-/* HTTPD uses an IPv6 listener when LWIP_IPV6 is enabled. IPv4 connections then
- * arrive as ::ffff:a.b.c.d; retain only the IPv4 part for our LAN upload URL. */
+/* LWIP 启用 IPv6 时 HTTPD 用 IPv6 监听，IPv4 连接会以 ::ffff:a.b.c.d 形式到达；
+ * 这里只保留 IPv4 部分，用于拼出同网段的上传 URL。 */
 static bool format_peer_ipv4(const struct sockaddr_storage *peer, char *ip, size_t size)
 {
     if (peer->ss_family == AF_INET) {

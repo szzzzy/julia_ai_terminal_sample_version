@@ -61,6 +61,7 @@ set(srcs
     "voice/uplink/voice_uplink_pump.c"
     "voice/uplink/voice_uplink_ring.c"
     "voice/voice_service.c"
+    "voice/voice_timing.c"
 
     # 板级外设与系统时间。
     "hardware/breathing_led.c"

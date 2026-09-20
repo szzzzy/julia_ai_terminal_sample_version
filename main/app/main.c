@@ -1,4 +1,16 @@
-/** 启动协调：基础准备后并行推进本地分支和 Wi-Fi；必要资源成功即握手，动画和判决完成才交出画面。 */
+/**
+ * @file main.c
+ * @brief 启动协调：基础准备后并行推进本地分支和 Wi-Fi，必要资源成功即握手，动画和判决完成才交出画面。
+ *
+ * 模块职责：按开机时序发起各模块准备，汇合三个本地分支与网络分支的结果，并请求 julia_fsm_runtime
+ * 启动行为状态机、开放云窗口和完成画面交接。
+ * 模块边界：不实现子模块的初始化细节，也不直接管理 Wi-Fi/MQTT/WSS 的连接状态；本文件只决定发起
+ * 顺序与失败后的降级路径。s_runtime_failed 与 s_cloud_allowed 只经由 s_boot_lock 访问。
+ * 关键依赖：boot_coordinator（分支并行与超时）、julia_fsm_runtime（状态与交接判决）、
+ * network_lifecycle、ota_boot_flow 以及 audio/display/avatar/电池分支的准备结果。
+ * 核心不变量：画面交接必须晚于动画结束，早到的 ONLINE 不得提前覆盖画面或放行业务；
+ * 各分支结果只由所属分支写入，coordinator 收到该分支结果后才能读取。
+ */
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -226,8 +238,8 @@ void app_main(void)
     esp_err_t network_err = module_result("wifi_start", network_lifecycle_start());
     const boot_branch_t branches[3] = {
         {"boot_display", display_branch, 6144, animation_branch},
-        {"boot_audio", audio_branch, 8192},
-        {"boot_resources", resources_branch, 4096},
+        {"boot_audio", audio_branch, 8192, NULL},
+        {"boot_resources", resources_branch, 4096, NULL},
     };
     boot_result_t results[3];
     err = boot_coordinator_run(branches, results, CONFIG_JULIA_LOCAL_INIT_TIMEOUT_MS, start_cloud_early);

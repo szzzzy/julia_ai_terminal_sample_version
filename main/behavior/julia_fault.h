@@ -24,7 +24,7 @@ typedef enum {
     JULIA_FAULT_NVS_UNRECOVERABLE,        /**< NVS 初始化或修复失败。 */
     JULIA_FAULT_FLASH_IO,                 /**< Flash/启动分区访问失败。 */
     JULIA_FAULT_OTA_ROLLBACK_UNAVAILABLE, /**< OTA 启动验收失败且无法安全回滚。 */
-    JULIA_FAULT_CORE_TASK_STALLED,        /**< 预留给后续核心任务心跳检测。 */
+    JULIA_FAULT_CORE_TASK_STALLED,        /**< 独立 WSS/FSM 进展检测确认长期停滞。 */
 } julia_fault_reason_t;
 
 /**
@@ -58,7 +58,8 @@ typedef struct {
  *
  * 原因越界，或 main_state/s2_sub_state 不是 julia_fsm_state_is_valid() 认可的合法组合时
  * 返回 ESP_ERR_INVALID_ARG 且不写盘。写入失败只返回 NVS/ESP-IDF 错误：快照是诊断手段
- * 而不是恢复前提，调用方仍可继续故障呈现和复位，但也就失去了重复故障的判据。
+ * 而不是一般启动故障的恢复前提。独立停滞恢复例外：必须成功读取计数、保存并核对记录
+ * 才能复位；CORE_TASK_STALLED 的同版本同类计数不因长 uptime 清零，避免重启循环。
  */
 esp_err_t julia_fault_record(julia_fault_reason_t reason, esp_err_t error,
                              julia_main_state_t main_state,

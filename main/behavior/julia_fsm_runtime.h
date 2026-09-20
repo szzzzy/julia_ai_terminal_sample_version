@@ -69,14 +69,21 @@ esp_err_t julia_fsm_runtime_post(fsm_event_t event);
 /**
  * 等待 owner 消费事件并完成呈现；ESP_OK 表示事件已应用，INVALID_STATE 表示拒绝。
  * 只供语音/OTA 任务的顺序控制使用；不得持有 owner 所需的锁，也不得从 ISR、
- * timer callback 或状态 observer 调用。入队后一直等待消费，保证确认对象生命周期。
+ * timer callback 或状态 observer 调用。发送最多 100ms，总预算 3s（OTA 收尾 15s）。
+ * 超时取消未提交操作；已提交操作不重放，由断线清理收敛。确认槽由双方释放。
  */
 esp_err_t julia_fsm_runtime_post_sync(fsm_event_t event);
+/** 持久邮箱式投递（非阻塞）；由 WSS owner 在会话清理完成后调用。 */
+void julia_fsm_runtime_wss_disconnected(uint32_t generation);
+/** owner 循环最近一次进展的时刻（µs，单调时钟）；未激活前为 0。本函数不等待 FSM。 */
+int64_t julia_fsm_runtime_progress_us(void);
 /**
  * 仅当云端仍指向当前 revision 时才执行 require_wake。revision 已经变化说明设备在云端
  * 读取快照之后又迁移过，此时返回 ESP_ERR_INVALID_STATE 且不改变状态。
  */
 esp_err_t julia_fsm_runtime_require_wake(uint32_t expected_revision);
+/* 由采集 owner 非阻塞通知；已过期的监听窗口会被忽略。 */
+esp_err_t julia_fsm_runtime_listen_idle_timeout(uint32_t expected_revision);
 /**
  * 优先报告严重故障。设备会保存故障记录、显示故障状态并按配置尝试复位；
  * 同类故障短时间重复超过上限后停止自动复位，等待人工处理。

@@ -33,8 +33,9 @@ bool julia_motion_ready(void) { return atomic_load(&s_motion_ready); }
 #define MOTION_TASK_STACK_SIZE 3072
 #define MOTION_TASK_PRIORITY   3
 /* 门限来自 Kconfig：CONFIG_JULIA_IMU_ACCEL_DELTA_MG 是相邻样本三轴加速度变化绝对值之和
- * （单位 mg，当前 750 即 0.75 g），CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS 是角速度模长
- * （单位 dps）。仓库内没有标定记录，具体取值需要上板确认。 */
+ * （单位 mg，换算见下方 MOTION_ACCEL_DELTA_G），CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS 是
+ * 角速度模长（单位 dps）。取值以生效的 sdkconfig 为准，本注释不写死具体数字；
+ * 仓库内没有标定记录，具体取值需要上板确认。 */
 #define MOTION_ACCEL_DELTA_G \
     ((float)CONFIG_JULIA_IMU_ACCEL_DELTA_MG / 1000.0f)
 

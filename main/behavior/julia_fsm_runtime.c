@@ -10,6 +10,7 @@
 
 #include <string.h>
 #include <stdatomic.h>
+#include "julia_sync_request.h"
 
 #include "esp_log.h"
 #include "esp_system.h"
@@ -50,8 +51,7 @@ typedef struct {
     fsm_event_t event;
     julia_fault_reason_t fault_reason;
     esp_err_t error;
-    SemaphoreHandle_t completed;
-    bool *applied;
+    julia_sync_request_t *request;
     bool check_revision;
     uint32_t expected_revision;
 } fsm_runtime_message_t;
@@ -72,6 +72,67 @@ static const char *TAG = "JULIA_FSM_RT";
 static QueueHandle_t s_event_queue;
 static TaskHandle_t s_task;
 static atomic_bool s_active;
+static portMUX_TYPE s_request_lock = portMUX_INITIALIZER_UNLOCKED;
+static julia_sync_request_t s_requests[FSM_EVENT_QUEUE_DEPTH + 2];
+/* 仅 FSM owner 读写；消息处理完成后必须置回 NULL，不得跨消息继续持有。 */
+static julia_sync_request_t *s_current_request;
+static int64_t s_progress_us;
+static int64_t s_last_sync_error_us;
+static uint32_t s_disconnect_generation;
+
+int64_t julia_fsm_runtime_progress_us(void)
+{
+    portENTER_CRITICAL(&s_request_lock);
+    int64_t value = s_progress_us;
+    portEXIT_CRITICAL(&s_request_lock);
+    return atomic_load(&s_active) ? value : 0;
+}
+
+void julia_fsm_runtime_wss_disconnected(uint32_t generation)
+{
+    /* 这里是独立于队列容量的持久信箱：队列拥塞也丢不掉这次断联记录。只有 WSS owner 写入。
+     * 较新的会话 RESET 会在接受数据之前取代更早的断联记录。 */
+    portENTER_CRITICAL(&s_request_lock);
+    s_disconnect_generation = generation;
+    portEXIT_CRITICAL(&s_request_lock);
+}
+
+static bool runtime_request_live(julia_sync_request_t *r)
+{
+    if (r == NULL) return true;
+    portENTER_CRITICAL(&s_request_lock);
+    bool live = julia_sync_request_live(r, esp_timer_get_time());
+    uint32_t generation = r->generation;
+    portEXIT_CRITICAL(&s_request_lock);
+    return live && (!generation || generation == wss_transport_generation());
+}
+
+/* 在 exit hook 之后、纯 FSM 状态变更之前调用。
+ * 超出截止时间的 exit hook 无法再提交迟到的唤醒。 */
+static bool runtime_commit_allowed(julia_fsm_t *fsm)
+{
+    (void)fsm;
+    if (!runtime_request_live(s_current_request)) return false;
+    if (s_current_request) {
+        portENTER_CRITICAL(&s_request_lock);
+        bool live = julia_sync_request_live(s_current_request, esp_timer_get_time());
+        if (live) s_current_request->committed = true;
+        portEXIT_CRITICAL(&s_request_lock);
+        return live;
+    }
+    return true;
+}
+
+static void runtime_complete(fsm_runtime_message_t *message, bool applied)
+{
+    if (message->request) {
+        portENTER_CRITICAL(&s_request_lock);
+        julia_sync_request_complete(message->request, applied);
+        portEXIT_CRITICAL(&s_request_lock);
+    }
+    s_current_request = NULL;
+}
+
 static bool s_cloud_started;
 static bool s_boot_waiting;
 static bool s_boot_visual_ready;
@@ -286,6 +347,18 @@ static bool service_state_apply_event(fsm_event_t event)
  */
 static bool runtime_process_event(fsm_event_t event);
 static bool s_quiet_recovery;
+
+static void runtime_drain_wss_disconnect(void)
+{
+    portENTER_CRITICAL(&s_request_lock);
+    uint32_t generation = s_disconnect_generation;
+    s_disconnect_generation = 0;
+    portEXIT_CRITICAL(&s_request_lock);
+    /* 只有最新连接能影响链路状态。新会话在接受数据前仍必须同步 RESET，
+     * 因此这里合并多次断联不会丢掉任何清理动作。 */
+    if (generation && generation == wss_transport_generation())
+        (void)runtime_process_event(EVT_WSS_DISCONNECTED);
+}
 
 /**
  * 只由 FSM Task 调用的周期巡检：用 transport 的就绪快照补齐可能丢失的连接事件，
@@ -567,6 +640,13 @@ static void local_prompt_poll(void)
 static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
                              julia_s2_sub_state_t s2_sub_state, fsm_event_t event)
 {
+    s_companion_deadline_us = 0;
+    s_standby_deadline_us = 0;
+    s_silent_deadline_us = 0;
+    s_disconnect_deadline_us = 0;
+    if (s_standby_timer) (void)esp_timer_stop(s_standby_timer);
+    if (s_silent_timer) (void)esp_timer_stop(s_silent_timer);
+    if (s_disconnect_timer) (void)esp_timer_stop(s_disconnect_timer);
     (void)fsm;
 #if !CONFIG_JULIA_LOCAL_CAPTURE_ENABLE
     if (julia_fsm_is_quiet(main_state)) {
@@ -594,16 +674,22 @@ static void runtime_on_enter(julia_fsm_t *fsm, julia_main_state_t main_state,
     s_committed_reason = event;
     portEXIT_CRITICAL(&s_state_lock);
     /* 先让新状态正式生效，再通知语音服务回报服务器，避免服务器过早发送回答。 */
-    if (s_state_observer != NULL) {
+    if (runtime_request_live(s_current_request) && s_state_observer != NULL) {
         s_state_observer(main_state, s2_sub_state, event, s_state_observer_ctx);
     }
     ESP_LOGI(TAG, "enter %s/%s/%s by %s", julia_fsm_main_state_name(main_state),
              julia_fsm_s2_sub_state_name(s2_sub_state),
              julia_fsm_s7_sub_state_name(fsm->s7_sub_state),
              julia_fsm_event_name(event));
-    julia_avatar_set_status_text(
-        state_status_text(main_state, s2_sub_state, fsm->s7_sub_state));
-    apply_presentation(main_state, s2_sub_state, fsm->s7_sub_state);
+    /* 已提交的迁移不会因超时而重放或回滚。
+     * observer 延迟返回后不得再启动已经过期的呈现；
+     * 会话清理会在下一次会话 RESET 成功之前把 committed 状态收敛到一致。 */
+    if (runtime_request_live(s_current_request)) {
+        julia_avatar_set_status_text(
+            state_status_text(main_state, s2_sub_state, fsm->s7_sub_state));
+        if (runtime_request_live(s_current_request))
+            apply_presentation(main_state, s2_sub_state, fsm->s7_sub_state);
+    }
     if (main_state == JULIA_MAIN_STATE_S8_OTA) {
         play_ota_prompt(upgrade_start_wav_start, upgrade_start_wav_end, "OTA start");
     }
@@ -676,21 +762,9 @@ static void runtime_on_exit(julia_fsm_t *fsm, julia_main_state_t main_state,
         s_local_prompt_generation = 0;
         if (stopped || !voice_playback_is_active()) julia_avatar_talking_stop();
     }
-    if (main_state == JULIA_MAIN_STATE_S1_COMPANION) s_companion_deadline_us = 0;
-    if (main_state == JULIA_MAIN_STATE_S3_STANDBY) s_standby_deadline_us = 0;
-    if (main_state == JULIA_MAIN_STATE_S5_SILENT) s_silent_deadline_us = 0;
-    if (main_state == JULIA_MAIN_STATE_S7_FAULT) s_disconnect_deadline_us = 0;
-    if (main_state == JULIA_MAIN_STATE_S3_STANDBY && s_standby_timer != NULL) {
-        (void)esp_timer_stop(s_standby_timer);
-    }
-    if (main_state == JULIA_MAIN_STATE_S5_SILENT && s_silent_timer != NULL) {
-        (void)esp_timer_stop(s_silent_timer);
-    }
-    if (main_state == JULIA_MAIN_STATE_S7_FAULT &&
-        fsm->s7_sub_state == JULIA_S7_SUB_STATE_S7_1_DISCONNECTED) {
-        if (s_disconnect_timer != NULL) (void)esp_timer_stop(s_disconnect_timer);
-        julia_avatar_talking_stop();
-    }
+    /* 截止时间的归属只在 runtime_on_enter 提交之后才改变。
+     * 超时的 exit hook 必须让旧状态的截止时间保持武装。 */
+    (void)main_state;
 }
 
 /* 把事件映射到 owner 缓存的截止时间；返回 NULL 表示该事件不受时间门控。
@@ -802,12 +876,13 @@ static void runtime_check_deadlines(void)
     }
 }
 
-/* check_revision 只对 require_wake 打开：云端持有的 revision 已经不是当前值，
+/* check_revision 用于 require_wake 和本地未起音退出：revision 已经不是当前值，
  * 说明设备在云端读取快照之后又迁移过，整条消息直接丢弃。 */
 static bool runtime_process_message_event(const fsm_runtime_message_t *message)
 {
     if (message->check_revision && message->expected_revision != s_committed_revision)
         return false;
+    if (!runtime_request_live(message->request)) return false;
     return runtime_process_event(message->event);
 }
 
@@ -899,6 +974,10 @@ static void fsm_task(void *argument)
     bool ota_terminal_pending = false;
     bool ota_result_started = false;
     for (;;) {
+        portENTER_CRITICAL(&s_request_lock);
+        s_progress_us = esp_timer_get_time();
+        portEXIT_CRITICAL(&s_request_lock);
+        runtime_drain_wss_disconnect();
         /* 即使事件持续到达也要先巡检一次：队列不空闲时同样需要补齐连接状态与超时。 */
         if (atomic_load(&s_active)) {
             service_state_reconcile();
@@ -908,6 +987,10 @@ static void fsm_task(void *argument)
         /* 两种提示播放期间继续处理队列；S8 的同步收尾确认要保留到声音排空，
          * 否则 OTA 会提前复位。下载成功或失败过快时同样要先等开场提示播完。 */
         bool terminal_ready = false;
+        if (ota_terminal_pending && !runtime_request_live(ota_terminal.request)) {
+            runtime_complete(&ota_terminal, false);
+            ota_terminal_pending = false;
+        }
         if (ota_terminal_pending && ota_terminal_poll(&ota_terminal, &ota_result_started)) {
             message = ota_terminal;
             ota_terminal_pending = false;
@@ -919,11 +1002,16 @@ static void fsm_task(void *argument)
             local_prompt_poll();
             continue;
         }
+        if (!runtime_request_live(message.request)) {
+            runtime_complete(&message, false);
+            continue;
+        }
+        s_current_request = message.request;
         if (message.type == FSM_RUNTIME_MESSAGE_START ||
             message.type == FSM_RUNTIME_MESSAGE_CLOUD_START ||
             message.type == FSM_RUNTIME_MESSAGE_ANIMATION_DONE) {
-            *message.applied = runtime_process_control(&message);
-            xSemaphoreGive(message.completed);
+            bool applied = runtime_process_control(&message);
+            runtime_complete(&message, applied);
             continue;
         }
         /* S8 期间先扣住升级结果与故障消息，交给 ota_terminal_poll 决定何时处理，
@@ -935,6 +1023,7 @@ static void fsm_task(void *argument)
             ota_terminal = message;
             ota_terminal_pending = true;
             ota_result_started = false;
+            s_current_request = NULL;
             continue;
         }
         if (message.type == FSM_RUNTIME_MESSAGE_FAULT) {
@@ -992,31 +1081,76 @@ static void fsm_task(void *argument)
             continue;
         }
         bool applied = runtime_process_message_event(&message);
-        if (message.completed != NULL) {
-            *message.applied = applied;
-            xSemaphoreGive(message.completed);
-        }
+        runtime_complete(&message, applied);
         local_prompt_poll();
     }
     vTaskDelete(NULL);
 }
 
+static esp_err_t runtime_send_sync(fsm_runtime_message_t *message, uint32_t timeout_ms)
+{
+    julia_sync_request_t *request = NULL;
+    uint32_t generation = wss_transport_is_owner() ? wss_transport_generation() : 0;
+    portENTER_CRITICAL(&s_request_lock);
+    for (unsigned i = 0; i < FSM_EVENT_QUEUE_DEPTH + 2; ++i) {
+        if (s_requests[i].refs == 0) {
+            request = &s_requests[i];
+            *request = (julia_sync_request_t){.refs = 2, .generation = generation,
+                .deadline_us = esp_timer_get_time() + (int64_t)timeout_ms * 1000};
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_request_lock);
+    if (!request) {
+        if (generation) wss_transport_fail_session();
+        return ESP_ERR_NO_MEM;
+    }
+    message->request = request;
+    wss_transport_fsm_wait(true);
+    esp_err_t result = ESP_ERR_TIMEOUT;
+    bool committed = false;
+    if (xQueueSend(s_event_queue, message, pdMS_TO_TICKS(100)) != pdTRUE) {
+        portENTER_CRITICAL(&s_request_lock);
+        request->refs = 0; /* Queue has no reference. */
+        portEXIT_CRITICAL(&s_request_lock);
+        result = ESP_ERR_NO_MEM;
+    } else {
+        for (;;) {
+            portENTER_CRITICAL(&s_request_lock);
+            bool done = request->done;
+            bool expired = !julia_sync_request_live(request, esp_timer_get_time());
+            if (done || expired) {
+                committed = request->committed;
+                result = done && !expired ? (request->applied ? ESP_OK : ESP_ERR_INVALID_STATE)
+                                          : ESP_ERR_TIMEOUT;
+                if (expired) request->cancelled = true;
+                --request->refs;
+            }
+            portEXIT_CRITICAL(&s_request_lock);
+            if (done || expired) break;
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+    wss_transport_fsm_wait(false);
+    if (result == ESP_ERR_TIMEOUT || result == ESP_ERR_NO_MEM) {
+        int64_t now = esp_timer_get_time();
+        portENTER_CRITICAL(&s_request_lock);
+        bool log = !s_last_sync_error_us || now - s_last_sync_error_us >= 60000000LL;
+        if (log) s_last_sync_error_us = now;
+        portEXIT_CRITICAL(&s_request_lock);
+        if (log) ESP_LOGW(TAG, "sync request failed event=%s generation=%lu committed=%d error=%s",
+                         julia_fsm_event_name(message->event), (unsigned long)generation,
+                         committed, esp_err_to_name(result));
+        if (generation) wss_transport_fail_session();
+    }
+    return result;
+}
+
 static esp_err_t runtime_control_sync(fsm_runtime_message_type_t type)
 {
     if (s_task == NULL || xTaskGetCurrentTaskHandle() == s_task) return ESP_ERR_INVALID_STATE;
-    StaticSemaphore_t storage;
-    SemaphoreHandle_t done = xSemaphoreCreateBinaryStatic(&storage);
-    if (done == NULL) return ESP_ERR_NO_MEM;
-    bool applied = false;
-    fsm_runtime_message_t message = {.type = type, .completed = done, .applied = &applied};
-    if (xQueueSend(s_event_queue, &message, portMAX_DELAY) != pdTRUE) {
-        vSemaphoreDelete(done);
-        return ESP_ERR_NO_MEM;
-    }
-    /* owner 消费后才释放确认对象，不能因调用者超时留下悬空指针。 */
-    (void)xSemaphoreTake(done, portMAX_DELAY);
-    vSemaphoreDelete(done);
-    return applied ? ESP_OK : ESP_ERR_INVALID_STATE;
+    fsm_runtime_message_t message = {.type = type};
+    return runtime_send_sync(&message, 5000);
 }
 
 esp_err_t julia_fsm_runtime_start(void)
@@ -1065,6 +1199,7 @@ esp_err_t julia_fsm_runtime_prepare(void)
     julia_fsm_init(&s_fsm);
     s_fsm.on_enter = runtime_on_enter;
     s_fsm.on_exit = runtime_on_exit;
+    s_fsm.commit_allowed = runtime_commit_allowed;
     if (s_standby_timer == NULL) {
         const esp_timer_create_args_t timer_args = {
             .callback = standby_timer_callback,
@@ -1177,6 +1312,18 @@ esp_err_t julia_fsm_runtime_post(fsm_event_t event)
     return xQueueSend(s_event_queue, &message, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
+esp_err_t julia_fsm_runtime_listen_idle_timeout(uint32_t expected_revision)
+{
+    if (!atomic_load(&s_active) || !expected_revision) return ESP_ERR_INVALID_STATE;
+    fsm_runtime_message_t message = {
+        .type = FSM_RUNTIME_MESSAGE_EVENT,
+        .event = EVT_LISTEN_IDLE_TIMEOUT,
+        .check_revision = true,
+        .expected_revision = expected_revision,
+    };
+    return xQueueSend(s_event_queue, &message, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
 static esp_err_t runtime_post_sync_checked(fsm_event_t event, bool check_revision,
                                          uint32_t expected_revision)
 {
@@ -1185,24 +1332,13 @@ static esp_err_t runtime_post_sync_checked(fsm_event_t event, bool check_revisio
     if (!atomic_load(&s_active) || !interaction_event_allowed(event) ||
         s_event_queue == NULL || s_task == NULL || xTaskGetCurrentTaskHandle() == s_task)
         return ESP_ERR_INVALID_STATE;
-    /* 调用方一直阻塞到 FSM 释放这块存储；不用堆分配，因为即使 OTA 任务创建失败
-     * 也必须还能发出离开 S8 的事件。 */
-    StaticSemaphore_t completed_storage;
-    SemaphoreHandle_t completed = xSemaphoreCreateBinaryStatic(&completed_storage);
-    if (completed == NULL) return ESP_ERR_NO_MEM;
-    bool applied = false;
     fsm_runtime_message_t message = {
         .type = FSM_RUNTIME_MESSAGE_EVENT, .event = event,
-        .completed = completed, .applied = &applied,
         .check_revision = check_revision, .expected_revision = expected_revision,
     };
-    if (xQueueSend(s_event_queue, &message, portMAX_DELAY) != pdTRUE) {
-        vSemaphoreDelete(completed);
-        return ESP_ERR_NO_MEM;
-    }
-    (void)xSemaphoreTake(completed, portMAX_DELAY);
-    vSemaphoreDelete(completed);
-    return applied ? ESP_OK : ESP_ERR_INVALID_STATE;
+    /* OTA 事件含本地提示播放这一有界等待，WSS 必须及时让出 owner，故超时放宽到 15 s。 */
+    return runtime_send_sync(&message,
+        event == EVT_OTA_SUCCEEDED || event == EVT_OTA_TASK_FAILED ? 15000 : 3000);
 }
 
 esp_err_t julia_fsm_runtime_post_sync(fsm_event_t event)

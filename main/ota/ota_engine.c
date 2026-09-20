@@ -719,7 +719,7 @@ static void ota_engine_task(void *pvParameter)
 
     /* 最多允许一次“服务器忽略 Range 后从零重试”：避免把完整镜像追加到旧偏移，也避免
      * 无限循环消耗网络与 Flash。第二次仍拿不到合法 206 时按失败退出本任务。 */
-    /* Map only the transport URL; retain NVS artifact identity and validation. */
+    /* 只映射传输层 URL，NVS 中的镜像身份与校验信息保持不变。 */
     char server_url[NATIVE_OTA_URL_SIZE + 1U];
 #ifdef CONFIG_JULIA_LEGACY_SERVER_PORTS
     const bool legacy_server = true;

@@ -2,8 +2,8 @@
  * @file voice_playback.c
  * @brief 用固定容量缓冲吸收网络抖动，并由单一后台任务连续驱动扬声器。
  *
- * 收到开始命令后先积累约 1 秒声音，观察较大预缓冲对网络抖动和播放连贯性的改善；
- * 输入短暂停顿时重新积累，连续 15 秒没有可播放数据才判定超时。服务器声明结束后，
+ * 收到首批声音即开始输出，不等待预缓冲；输入短暂停顿后有数据即继续输出，
+ * 连续 15 秒没有可播放数据才判定超时。服务器声明结束后，
  * 设备会播放所有已接受声音并补足扬声器硬件尾音，再报告“实际播放完成”。
  * 用户插话或新一轮播放会使旧编号失效，旧任务不能覆盖新一轮状态。固件内嵌
  * PCM 由同一 Task 直接分块读取，避免固定提示被网络缓冲容量限制。
@@ -23,8 +23,6 @@
 
 #define PLAYBACK_CAPACITY_BYTES (128U * 1024U)
 #define PLAYBACK_CHUNK_SAMPLES 160U
-#define PLAYBACK_PREBUFFER_MS 1000U
-#define PLAYBACK_PREBUFFER_WAIT_MS 1500U
 #define PLAYBACK_STARVE_MS 15000U
 /* 结束输入后再写入略多于扬声器硬件队列容量的静音，确保已接受的尾音真正离开硬件。
  * 板级 DMA 队列为 4×160 帧（components/julia_board_audio/board_audio.c 的
@@ -50,6 +48,8 @@ static esp_err_t s_completion_result;
 static voice_playback_timing_t s_timing;
 static size_t s_high_water;
 static uint32_t s_overflows;
+static int64_t s_last_output_us;
+static voice_playback_buffer_status_t s_flow;
 static audio_pcm_sink_t s_pcm_sink;
 static void *s_pcm_ctx;
 
@@ -77,8 +77,6 @@ static void playback_task(void *arg)
     bool device_started = false;
     bool resources_kept = false;
     int64_t last_write_us = 0;
-    bool buffering = true;
-    int64_t buffering_since = 0;
     size_t drain_samples = 0;
     size_t test_sample = 0;
     int16_t pcm[PLAYBACK_CHUNK_SAMPLES];
@@ -106,8 +104,6 @@ static void playback_task(void *arg)
             if (device_started) (void)board_audio_speaker_stop();
             device_started = false;
             owned_generation = generation;
-            buffering = true;
-            buffering_since = 0;
             drain_samples = 0;
             test_sample = 0;
         }
@@ -118,7 +114,7 @@ static void playback_task(void *arg)
         int64_t now = esp_timer_get_time();
         /* 距上次成功写入 60ms（毫秒）后仍没有待播数据，就释放硬件时钟；
          * 无待播输入时不持续输出空时钟。 */
-        if (device_started && (buffering || !queued) && !local && !test && !ended &&
+        if (device_started && !queued && !local && !test && !ended &&
             now - last_write_us >= 60000) {
             (void)board_audio_speaker_stop();
             device_started = false;
@@ -152,25 +148,16 @@ static void playback_task(void *arg)
             }
             unlock();
         } else if (queued > 0) {
-            if (buffering_since == 0) buffering_since = now;
-            /* 预缓冲目标为 1000ms 音频量，从首个缓冲数据起最多等 1500ms；
-             * ended 表示服务器已声明发完，短尾段直接放行，不再凑目标（PROTOCOL.md §4）。 */
-            if (buffering && !ended && queued < rate * 2U * PLAYBACK_PREBUFFER_MS / 1000U &&
-                now - buffering_since < PLAYBACK_PREBUFFER_WAIT_MS * 1000LL) {
-                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
-                continue;
-            }
-            buffering = false;
+            /* 首包和断流后的数据都立即输出，不额外等待积累音频。 */
             lock();
             if (s_active && generation == s_generation) {
                 bytes = pcm_buffer_read(&s_buffer, pcm, sizeof(pcm));
+                s_flow.dequeued_bytes += bytes;
             }
             unlock();
         } else if (!ended) {
-            /* 输入短暂停顿不立即判失败：重新积累预缓冲继续等；只有距最近一次输入／
+            /* 输入短暂停顿不立即判失败：等待新数据唤醒；只有距最近一次输入／
              * 开播达到 15 秒仍无可播数据才以 ESP_ERR_TIMEOUT 结束本轮。 */
-            buffering = true;
-            buffering_since = 0;
             if (now - last_input >= PLAYBACK_STARVE_MS * 1000LL) {
                 ESP_LOGW(TAG, "generation=%lu starved for %ums", (unsigned long)generation,
                          PLAYBACK_STARVE_MS);
@@ -200,6 +187,9 @@ static void playback_task(void *arg)
         if (!device_started) {
             /* 播放任务是唯一 I2S 写入者；board_audio_speaker_start() 在已有播放源时
              * 会先停掉旧源（后开优先），所以不能再引入第二个写入者接管同一通道。 */
+            lock();
+            if (generation == s_generation) s_flow.i2s_request_us = esp_timer_get_time();
+            unlock();
             esp_err_t start_err = board_audio_speaker_start(rate);
             if (start_err != ESP_OK) {
                 (void)board_audio_speaker_stop();
@@ -207,6 +197,12 @@ static void playback_task(void *arg)
                 continue;
             }
             device_started = true;
+            lock();
+            if (generation == s_generation) {
+                s_flow.i2s_started_us = esp_timer_get_time();
+                s_flow.configured_rate = rate;
+            }
+            unlock();
         }
 
         esp_err_t err = board_audio_speaker_write((const uint8_t *)pcm, bytes);
@@ -223,6 +219,10 @@ static void playback_task(void *arg)
         current = s_active && s_generation == generation;
         if (audio && current && s_timing.first_output_us == 0)
             s_timing.first_output_us = esp_timer_get_time();
+        if (audio && current) {
+            s_last_output_us = esp_timer_get_time();
+            s_flow.output_bytes += bytes;
+        }
         unlock();
         if (audio && current && s_pcm_sink != NULL) {
             s_pcm_sink(pcm, bytes / sizeof(int16_t), s_pcm_ctx);
@@ -254,8 +254,8 @@ esp_err_t voice_playback_init(audio_pcm_sink_t pcm_sink, void *ctx)
         s_lock = NULL;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "ready buffer=%uB prebuffer=%ums starvation=%ums",
-             PLAYBACK_CAPACITY_BYTES, PLAYBACK_PREBUFFER_MS, PLAYBACK_STARVE_MS);
+    ESP_LOGI(TAG, "ready buffer=%uB immediate_output starvation=%ums",
+             PLAYBACK_CAPACITY_BYTES, PLAYBACK_STARVE_MS);
     return ESP_OK;
 }
 
@@ -280,6 +280,8 @@ esp_err_t voice_playback_start(uint32_t rate, bool self_test, uint32_t *generati
     if (++s_generation == 0) ++s_generation;
     *generation = s_generation;
     s_timing = (voice_playback_timing_t){.generation = s_generation};
+    s_last_output_us = 0;
+    s_flow = (voice_playback_buffer_status_t){.started_us = esp_timer_get_time()};
     pcm_buffer_reset(&s_buffer);
     s_rate = rate;
     s_test = self_test;
@@ -313,6 +315,8 @@ static esp_err_t start_local(uint32_t rate, const uint8_t *pcm, size_t bytes,
     if (++s_generation == 0) ++s_generation;
     *generation = s_generation;
     s_timing = (voice_playback_timing_t){.generation = s_generation};
+    s_last_output_us = 0;
+    s_flow = (voice_playback_buffer_status_t){.started_us = esp_timer_get_time()};
     pcm_buffer_reset(&s_buffer);
     s_rate = rate;
     s_test = false;
@@ -374,6 +378,15 @@ esp_err_t voice_playback_write(const uint8_t *pcm, size_t bytes)
     if (pcm == NULL || bytes == 0 || (bytes & 1U) || bytes > 1200U) return ESP_ERR_INVALID_ARG;
     lock();
     esp_err_t result = ESP_OK;
+    size_t queued = s_buffer.size;
+    uint32_t generation = s_generation, rate = s_rate;
+    int64_t first_output = s_timing.first_output_us, last_output = s_last_output_us;
+    bool receiving = s_active && !s_test && s_local_pcm == NULL && !s_buffer.ended;
+    if (receiving) {
+        s_flow.received_bytes += bytes;
+        if (!s_flow.first_input_us) s_flow.first_input_us = esp_timer_get_time();
+        s_flow.last_input_us = esp_timer_get_time();
+    }
     if (!s_active || s_test || s_local_pcm != NULL || s_buffer.ended) {
         result = ESP_ERR_INVALID_STATE;
     } else if (!pcm_buffer_write(&s_buffer, pcm, bytes)) {
@@ -388,12 +401,45 @@ esp_err_t voice_playback_write(const uint8_t *pcm, size_t bytes)
         pcm_buffer_reset(&s_buffer);
         result = ESP_ERR_NO_MEM;
     } else {
+        s_flow.accepted_bytes += bytes;
         s_last_input_us = esp_timer_get_time();
         if (s_buffer.size > s_high_water) s_high_water = s_buffer.size;
     }
+    voice_playback_buffer_status_t flow = s_flow;
     unlock();
+    if (result == ESP_ERR_NO_MEM) {
+        int64_t now = esp_timer_get_time();
+        ESP_LOGW(TAG, "overflow generation=%lu queued=%u capacity=%u incoming=%u rate=%lu "
+                      "rx=%llu accepted=%llu dequeued=%llu i2s_bytes=%llu "
+                      "configured_rate=%lu first_rx_us=%lld last_rx_us=%lld "
+                      "i2s_request_us=%lld i2s_started_us=%lld first_output_us=%lld output_age_ms=%lld",
+                 (unsigned long)generation, (unsigned)queued, PLAYBACK_CAPACITY_BYTES,
+                 (unsigned)bytes, (unsigned long)rate,
+                 (unsigned long long)flow.received_bytes, (unsigned long long)flow.accepted_bytes,
+                 (unsigned long long)flow.dequeued_bytes, (unsigned long long)flow.output_bytes,
+                 (unsigned long)flow.configured_rate, (long long)flow.first_input_us,
+                 (long long)flow.last_input_us, (long long)flow.i2s_request_us,
+                 (long long)flow.i2s_started_us, (long long)first_output,
+                 (long long)(last_output ? (now-last_output)/1000 : -1));
+    }
     xTaskNotifyGive(s_task);
     return result;
+}
+
+bool voice_playback_get_buffer_status(voice_playback_buffer_status_t *out)
+{
+    if (!s_task || !out) return false;
+    lock();
+    *out = s_flow;
+    out->generation = s_generation;
+    out->rate = s_rate;
+    out->queued = s_buffer.size;
+    out->capacity = s_buffer.capacity;
+    out->first_output_us = s_timing.first_output_us;
+    out->last_output_us = s_last_output_us;
+    bool receiving = s_active && !s_test && !s_local_pcm && !s_buffer.ended;
+    unlock();
+    return receiving;
 }
 
 void voice_playback_finish(void)
@@ -473,10 +519,17 @@ bool voice_playback_take_completion(uint32_t *generation, esp_err_t *result)
     *result = s_completion_result;
     size_t high_water = s_high_water;
     uint32_t overflows = s_overflows;
+    voice_playback_buffer_status_t flow = s_flow;
     s_completion_generation = 0;
     unlock();
-    if (ready) ESP_LOGI(TAG, "done generation=%lu result=%s high_water=%u overflow_total=%lu",
+    if (ready) ESP_LOGI(TAG, "done generation=%lu result=%s high_water=%u overflow_total=%lu "
+                       "rx=%llu accepted=%llu dequeued=%llu i2s_bytes=%llu configured_rate=%lu "
+                       "i2s_request_us=%lld i2s_started_us=%lld",
                        (unsigned long)*generation, esp_err_to_name(*result),
-                       (unsigned)high_water, (unsigned long)overflows);
+                       (unsigned)high_water, (unsigned long)overflows,
+                       (unsigned long long)flow.received_bytes, (unsigned long long)flow.accepted_bytes,
+                       (unsigned long long)flow.dequeued_bytes, (unsigned long long)flow.output_bytes,
+                       (unsigned long)flow.configured_rate, (long long)flow.i2s_request_us,
+                       (long long)flow.i2s_started_us);
     return ready;
 }
