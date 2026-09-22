@@ -13,6 +13,11 @@
  */
 esp_err_t julia_power_hold_enable(void);
 
+/** app_main 在供电保持成功后调用一次。PWR 低有效，消抖 50ms；首次松手后
+ * 才接受新长按，达到配置门限并松手后切断电池保持。USB 供电不会被切断。
+ * 这是电源键断电，不执行业务保存或 OTA 等待；禁用配置时为空操作。 */
+esp_err_t julia_power_key_start(void);
+
 /**
  * @brief 应用启动阶段的低峰值 CPU 配置，并保持自动 Light-sleep 关闭。
  *

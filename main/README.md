@@ -1,5 +1,7 @@
 # main 源码组织与运行架构
 
+PWR 已接入长按 3 秒、松手关闭电池供电，包含开机首次松手保护和按键消抖；USB 供电不会被切断。详见 [PWR 按键](../docs/PWR_BUTTON.md)。
+
 > 当前默认开发配置已启用 capture-v1：板级输出完整 320 样本 PCM1 给 `voice_local_capture`，由采音任务维护底噪、预录和段编号，再通过同一 FIFO 上传 start / PCM2 / end。普通段结束由本地事件进入 Think；云端不再下发 MIC 起止。S3/S5/S6 保持连接。详见 [当前链路](../docs/LOCAL_CAPTURE.md)。以下有关“连续 PCM1 上传、云端 MIC_START/MIC_STOP”的描述属于 `CONFIG_JULIA_LOCAL_CAPTURE_ENABLE=n` 的兼容路径，不能套用到新路径。
 >
 > 同一条链路上还有两个需要区分的开关：FFT 门控与 WebRTC VAD 属正常链路（`sdkconfig.defaults` 已打开）；实验性的键盘频谱历史门控（`CONFIG_JULIA_CAPTURE_NOISE_WINDOW` / `..._TAIL`）Kconfig 默认为关，但本机生效的 `sdkconfig` 已打开，取值是文档里的实验组合而非产品定值，见 [键盘门控复核](../docs/KEYBOARD_GATE_REVIEW_20260918.md) 与 [噪声尾段](../docs/NOISE_TAIL.md)。

@@ -267,6 +267,30 @@ menu "Example Configuration"
             GPIO6 为 Key_BAT、GPIO8 为 BAT_ADC，后两者不可改作保持脚。换板后必须改成本板实测过的
             保持脚：填错可能导致电池供电无法保持，或把已占用引脚配成输出而干扰按键/ADC 采样。
 
+    config JULIA_PWR_KEY_ENABLE
+        bool "PWR 长按松手关闭电池供电"
+        default y
+        help
+            GPIO 检测 PWR 低有效按键；启动先等待稳定松手，防止开机按压触发关机。
+            运行中长按达到门限并松手后拉低 BAT_Control。消抖固定 50ms，轮询 10ms。
+            仅切断电池保持，USB 接入仍供电；这是直接断电，不等待 OTA 或保存业务状态。
+
+    config JULIA_PWR_KEY_GPIO
+        int "PWR 检测 GPIO（低有效）"
+        depends on JULIA_PWR_KEY_ENABLE
+        range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+        default 6
+        help
+            当前板卡 Key_BAT 为 GPIO6。不得与 BAT_Control 或其它外设引脚共用。
+
+    config JULIA_PWR_OFF_HOLD_MS
+        int "PWR 关机长按时长（ms）"
+        depends on JULIA_PWR_KEY_ENABLE
+        range 1000 10000
+        default 3000
+        help
+            软件策略默认 3000ms，非硬件固定时长；达到门限后松手才断电。
+
     choice JULIA_BOOT_CPU_MAX_FREQ
         prompt "硬件启动阶段的 CPU 上限"
         default JULIA_BOOT_CPU_MAX_FREQ_80

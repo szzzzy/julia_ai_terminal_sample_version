@@ -214,6 +214,8 @@ void app_main(void)
     esp_err_t hold_error = julia_power_hold_enable();
     ESP_LOGI(TAG, "app_main t=%lldms", (long long)(entered/1000));
     (void)module_result("power_hold", hold_error);
+    if (hold_error == ESP_OK)
+        (void)module_result("power_key", julia_power_key_start());
     (void)module_result("power_management", julia_power_management_init());
     (void)module_result("battery_diagnostics", julia_battery_diagnostics_init());
     /* 唯一启动采样点；之后 ADC 由电池监测任务独占。 */

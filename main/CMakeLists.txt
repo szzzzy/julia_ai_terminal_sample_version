@@ -10,8 +10,6 @@ set(embed_binary_files
     "ui/generated/clips/LISTEN.bin"
     "ui/generated/clips/THINK.bin"
     "ui/generated/clips/SPEAK.bin"
-    ${project_dir}/network_disconnected_16k_mono_16bit.wav
-    ${project_dir}/low_battery_16k_mono_16bit.wav
     ${project_dir}/bye_no_bother_16k_mono_16bit.wav
     ${project_dir}/goodnight_16k_mono_16bit.wav
     ${project_dir}/wake_prompt_16k_mono_16bit.wav

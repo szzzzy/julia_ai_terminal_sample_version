@@ -7,171 +7,347 @@
 # 陀螺仪 400 dps）、呼吸周期 4000 ms、S5 静默驻留 300 s 已在本文件、Kconfig 默认值
 # 与生效 `sdkconfig` 三处统一。唯一仍不一致的是 AUDIO_MAX_FILE_SIZE：Kconfig 默认
 # 3145728，本文件与生效配置均为 1048576（受 audio_data 分区 1 MiB 限制）。
+#
+# ---------------------------------------------------------------------------
+# 参数分类索引（下文按此顺序成块给出；块头说明该类的共同约束，逐项说明取值含义）
+#   [1] Wi-Fi 省电与射频活动窗口          [2] Flash 容量与分区表
+#   [3] PSRAM 与 CPU                      [4] 电池保持、诊断与低电量
+#   [5] 本地初始化超时与启动亮度          [6] LVGL 显示色彩格式
+#   [7] 本地 WakeNet 回退                 [8] 音频素材与分区
+#   [9] OTA 回滚与镜像标识               [10] OTA 检查/下载重试与冷却
+#   [11] MQTT 控制面可靠性与认证         [12] WSS 语音流保活与端点
+#   [13] 麦克风/扬声器固定增益音量       [14] Wi-Fi 认证与重连退避
+#   [15] 设备主动推送演示（默认关）      [16] SD 卡遗留引脚（未编入固件）
+#   [17] 显示空闲策略与 RTC/SNTP 墙钟    [18] 夜间睡眠计划
+#   [19] IMU 运动唤醒                    [20] 本地分段采音（capture-v1）
+# ---------------------------------------------------------------------------
 
+# ===========================================================================
+# [1] Wi-Fi 省电与射频活动窗口
 # 全局 Wi-Fi 省电由 network_lifecycle.c 选为 MIN_MODEM；下面两个定时器控制的是
 # 射频活动窗口与 AP 空闲保活，不是 MQTT/WSS 心跳间隔。单位：毫秒。
+# ===========================================================================
+# MIN_MODEM 省电下来回切换 active/doze，这是进入 active 后的最短驻留时长：
+# 期间收发任一数据包都会顺延，保证一次突发收完再回落，避免频繁切换。
 CONFIG_ESP_WIFI_SLP_DEFAULT_MIN_ACTIVE_TIME=20
 CONFIG_ESP_WIFI_SLP_DEFAULT_MAX_ACTIVE_TIME=60
+# 注意 IDF 5.5 对此项的单位标注为秒（Kconfig 标题为 "Maximum keep alive time"）：
+# 它是"射频保持 active 的上限"，超时后发空帧（或 BSS max idle 字段）向 AP 保活，
+# 与上面 20 ms 那一项配合决定省电占空比；本文件顶部注释按 ms 描述，改值前先核对单位。
+
+# ===========================================================================
+# [2] Flash 容量与分区表
 # 目标 Flash 为 16 MiB，分区表在官方双 OTA 布局基础上扩展，填满可用容量。
+# ===========================================================================
+# 与物理 Flash 容量绑定；写小了会浪费 8 MiB，写大了会导致烧写/启动失败。
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# 使用工程自带的 partitions_16mb.csv，而不是 IDF 内置布局：
+# nvs 64 KiB / otadata 8 KiB / phy_init 4 KiB / ota_0 7 MiB / ota_1 7 MiB /
+# model 512 KiB(SPIFFS) / audio_data 1 MiB(FAT)。改容量必须同步下方 AUDIO_MAX_FILE_SIZE。
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_16mb.csv"
 
+# ===========================================================================
+# [3] PSRAM 与 CPU
 # PSRAM 与 CPU：本板为 8 MiB Octal/OPI、80 MHz，CLK=IO30 / CS=IO26。
 # 240 MHz 为 UI、TLS 流式音频以及可选的本地 WakeNet 回退留出余量；
 # 应用启动后会先降到 BOOT 档，再由 julia_power_runtime_profile_enable() 切到 RUNTIME 档。
+# ===========================================================================
+# 打开外部 SPI RAM；立绘帧缓冲、LVGL 堆与 TLS 缓冲都依赖它，关掉会直接分配失败。
 CONFIG_SPIRAM=y
+# 8 MiB OPI/OCT 封装必须选 Octal，选 Quad 会在启动阶段探测不到 PSRAM。
 CONFIG_SPIRAM_MODE_OCT=y
+# 由驱动自动识别 PSRAM 型号容量，避免把容量写死后换料失败。
 CONFIG_SPIRAM_TYPE_AUTO=y
+# PSRAM 时钟 80 MHz：本项目实测可稳定的档位，降频只影响带宽不影响功能。
 CONFIG_SPIRAM_SPEED_80M=y
+# 与上一项同义，供运行时/日志读取的数值形式（80 表示 MHz）。
 CONFIG_SPIRAM_SPEED=80
+# OCT PSRAM 的时钟与片选引脚，由本板硬件连线决定，写错会导致 PSRAM 初始化失败。
 CONFIG_SPIRAM_CLK_IO=30
 CONFIG_SPIRAM_CS_IO=26
+# 在 bootloader 阶段就初始化 PSRAM 硬件，使早期分配的缓冲也能落在 PSRAM。
 CONFIG_SPIRAM_BOOT_HW_INIT=y
+# 动态调频（DFS）总开关：julia_power.c 的 esp_pm_configure() 依赖它，关掉后
+# BOOT/RUNTIME 两档 CPU 上限都不再生效。
 CONFIG_PM_ENABLE=y
+# 启动期间初始化 PSRAM 并将其加入堆分配器，否则启动早期只能拿到内部 RAM。
 CONFIG_SPIRAM_BOOT_INIT=y
+# 为 PSRAM 预配置内存保护（结合 heap 区域），保持开启才能与 esp_psram_init() 不冲突。
 CONFIG_SPIRAM_PRE_CONFIGURE_MEMORY_PROTECTION=y
+# 允许 malloc() 从 PSRAM 分配（不只是显式 heap_caps_malloc(..., SPIRAM)）。
 CONFIG_SPIRAM_USE_MALLOC=y
+# 启动时做一次 PSRAM 内存自检：失败即中止，用来尽早暴露坏片/虚焊，代价是启动略慢。
 CONFIG_SPIRAM_MEMTEST=y
+# 0 表示"任何大小的 malloc 都优先用 PSRAM"（不设内部 RAM 优先阈值），
+# 把内部 RAM 尽量留给 DMA 与中断上下文。
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
+# 保留 32 KiB 内部 RAM 专供必须落在内部 RAM 的分配（DMA 描述符、任务栈等），
+# 普通 malloc 不得占用；调小会在高负载时出现内部 RAM 分配失败。
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+# 允许任务栈放在外部 RAM：本项目任务数较多，不开会因内部 RAM 不足创建失败；
+# 代价是栈访问要多走 cache，且 cache 关闭期间（如 flash 写）不能访问外部栈。
 CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
 # WSS 与 OTA 的 TLS 会同时存在，因此把 TLS 缓冲放在 8 MiB PSRAM 中。
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+# 默认 CPU 主频 240 MHz 是 bootloader 与 IDF 启动代码使用的主频，
+# 也是 DFS 的上界来源；应用层随后按 BOOT/RUNTIME 档收窄。
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 # 电池锁存引脚（BAT_Control）与启动/运行两档 CPU 上限，单位为 MHz。
+# GPIO7 是本板 BAT_Control；同板 GPIO6=Key_BAT、GPIO8=BAT_ADC，不可改作保持脚。
+# 该脚在 app_main 早期先置高再配成输出，一旦配错可能导致电池供电被切断。
 CONFIG_JULIA_BAT_CONTROL_GPIO=7
+# 启动阶段 DFS 上限 80 MHz：显示/音频/Wi-Fi 依次上电时压低电流峰值，代价是启动稍慢。
 CONFIG_JULIA_BOOT_CPU_MAX_FREQ_80=y
+# 运行阶段 DFS 上限 160 MHz：语音 + TLS + UI 并发下的省电取值（240 MHz 档为备选）。
 CONFIG_JULIA_RUNTIME_CPU_MAX_FREQ_160=y
 # 本地服务（显示/音频/语音/RTC）初始化的等待上限，单位毫秒。
+# 依据是启动动画 3300 ms 加各分支初始化余量；超时会判定启动故障并走故障处理。
 CONFIG_JULIA_LOCAL_INIT_TIMEOUT_MS=20000
 # 开机眨眼序列使用的最高背光亮度，单位百分比 0–100。
+# 动画期间由 0 线性升到该值；调高更醒目但背光瞬时电流更大。
 CONFIG_JULIA_BOOT_BRIGHTNESS_PERCENT=50
+
+# ===========================================================================
+# [4] 电池保持、诊断与低电量
 # 电池诊断与运行期监测：采样次数为单轮 ADC 平均次数；监测周期单位秒；
 # PRESENT 区间是"电压合理"判据，不是插头检测；15%/25% 为低电量提示的进入/退出滞回。
+# ===========================================================================
+# 诊断总开关：关掉后 julia_battery_*_init() 直接返回不支持，UI 不再有电量提示。
 CONFIG_JULIA_BATTERY_DIAGNOSTICS=y
+# 每个检查点连续采样 16 次（样本间 vTaskDelay(1)）后取平均，再乘 3 还原电池端电压；
+# 调大更稳但更慢，调小更快但抖动更大。
 CONFIG_JULIA_BATTERY_SAMPLE_COUNT=16
+# 运行期电池监测任务的固定节拍，单位秒；调大更省电、低电量提示更滞后。
 CONFIG_JULIA_BATTERY_MONITOR_INTERVAL_SECONDS=10
+# present 判据的下界（mV）：低于此值视为"无电池/读数不可信"，percent 归零。
 CONFIG_JULIA_BATTERY_PRESENT_MIN_MV=2500
+# present 判据的上界（mV）：高于此值同样视为不可信（例如分压或 ADC 异常）。
 CONFIG_JULIA_BATTERY_PRESENT_MAX_MV=4350
+# 低电量进入/退出门限（percent）：两者分开是为了避免电量在阈值附近抖动时反复切换。
 CONFIG_JULIA_BATTERY_LOW_ENTER_PERCENT=15
 CONFIG_JULIA_BATTERY_LOW_EXIT_PERCENT=25
+
+# ===========================================================================
+# [6] LVGL 显示色彩格式
 # LVGL 8.3 显示格式：生成的立绘 RGB565 资源按 ST77916 SPI 字节序做过交换，
 # 与 LV_COLOR_16_SWAP 绑定，改这两项必须同时重新生成资源。
+# ===========================================================================
+# 跳过组件内 lv_conf.h，改用工程的显示配置（Kconfig 决定），避免两份配置打架。
 CONFIG_LV_CONF_SKIP=y
+# 每像素 16 位 RGB565：立绘资源与 ST77916 数据格式都是 565，改深色会重写整套资源。
 CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_COLOR_DEPTH=16
+# SPI 屏按 16 位字发送，565 的两个字节需要交换；与生成的资源字节序绑定。
 CONFIG_LV_COLOR_16_SWAP=y
+# LVGL 改用标准 malloc/free（即走 heap_caps，可落到 PSRAM），不使用 LVGL 内建堆。
 CONFIG_LV_MEM_CUSTOM=y
 CONFIG_LV_MEM_CUSTOM_INCLUDE="stdlib.h"
 
+# ===========================================================================
+# [7] 本地 WakeNet 回退
 # 本地 WakeNet 回退配置。CONFIG_JULIA_SERVER_WAKE_ENABLE=y 时组件注册为空，
 # 这些选项不参与当前固件；关闭服务器唤醒开关即可恢复并打包该模型。
+# ===========================================================================
+# 三项都在 ESP-SR 组件侧生效，只有 JULIA_SERVER_WAKE_ENABLE=n 时才会真正编入固件。
 CONFIG_USE_AFE=y
 CONFIG_AFE_INTERFACE_V1=y
 CONFIG_USE_WAKENET=y
+# 选用"你好小智"中文唤醒词模型；换词表需同时确认模型分区（model，512 KiB）容量。
 CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y
 
+# ===========================================================================
+# [8] 音频素材与分区
 # 分区表保留 512 KiB 模型槽位（供后续自定义唤醒模型）与 1 MiB FAT 音频素材分区。
 # 音频素材下载上限不得大于 FAT 分区容量，单位字节。
+# ===========================================================================
+# 1 MiB = audio_data 分区容量，同时是 partitions_16mb.csv 与 Kconfig 默认 3 MiB 的差异点；
+# 调大必须同步放大 audio_data 分区，否则校验通过的文件仍会写不下。
 CONFIG_AUDIO_MAX_FILE_SIZE=1048576
 
+# ===========================================================================
+# [9] OTA 回滚与镜像标识
+# ===========================================================================
 # 交给 bootloader 做首启校验与回滚。
+# 新镜像首次启动处于 PENDING_VERIFY，只有应用确认健康后才标记为有效，否则自动回滚。
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
-
 # OTA 镜像标识必须与 CMakeLists.txt 的 project(julia_fused_base) 一致。
+# 该字段在下载校验阶段比对 esp_app_desc.project_name，不匹配即判终端失败。
 CONFIG_OTA_IMAGE_PROJECT_NAME="julia_fused_base"
 
+# ===========================================================================
+# [10] 通信可靠性与 OTA 检查/下载重试
 # 通信可靠性默认值。WSS 集成令牌在下方配置；生产凭证应通过受控注入流程下发，
 # 不得写入本文件。单位：秒。
+# ===========================================================================
+# OTA/audio 检查请求里的 product 字段，服务端必须回显同值，写错会表现为"永不升级"。
 CONFIG_OTA_PRODUCT_ID="julia-ai-device"
+# MQTT keepalive：空闲时按此间隔发 PINGREQ，broker 约 1.5 倍未收到报文即断链。
 CONFIG_COMM_HEARTBEAT_INTERVAL_SECONDS=60
+# MQTT 断线后的固定重连等待（无指数退避），也决定主动重建连接的节拍。
 CONFIG_COMM_RECONNECT_INTERVAL_SECONDS=10
+# 占位空串：真实 token 只存在于本机 sdkconfig，严禁把生产凭证写进本文件。
 CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE=""
+# ota_check 发出后等待合法响应的窗口；超时转短重试，重试耗尽进恢复模式。
 CONFIG_OTA_CHECK_RESPONSE_TIMEOUT_SECONDS=15
+# 响应超时/非法后的短重试次数；0 表示直接进入恢复模式。
 CONFIG_OTA_CHECK_RESPONSE_RETRY_COUNT=2
+# 短重试延时：第 1 次用 2 s，之后逐次翻倍，并被下一项钳制。
 CONFIG_OTA_CHECK_RESPONSE_RETRY_BASE_SECONDS=2
 CONFIG_OTA_CHECK_RESPONSE_RETRY_MAX_SECONDS=10
+# 恢复模式的等待：第 1 次 30 s，之后翻倍至 300 s 后固定，直到收到合法响应。
 CONFIG_OTA_CHECK_RECOVERY_INITIAL_SECONDS=30
 CONFIG_OTA_CHECK_RECOVERY_MAX_SECONDS=300
+# critical 订阅（OTA 响应/通知、严格模式下含语音命令）的 SUBACK 等待上限；
+# 到期仍未确认即判连接不完整并重建，避免"连着但收不到指令"。
 CONFIG_COMM_MQTT_SUBACK_TIMEOUT_SECONDS=15
 
+# ===========================================================================
+# [12a] WSS 语音流保活与端点
 # WSS 语音流保活：空闲链路本身是健康的，用客户端 PING 探活，
 # 只有收不到 PONG 才结束连接。单位：秒（CLOSE_WAIT_MS 为毫秒）。
+# ===========================================================================
+# 空闲多久后用 WebSocket PING 探活；PONG 或任一业务下行帧都算链路存活。
 CONFIG_WSS_KEEPALIVE_INTERVAL_SECONDS=15
+# 发出 PING 后等待下行帧的最长时间，超时即主动断开重连；应小于上面的间隔。
 CONFIG_WSS_PONG_TIMEOUT_SECONDS=10
+# CLOSE 握手的最长等待：对端不关 TLS/TCP 就强制清理传输层，避免卡在收尾。
 CONFIG_WSS_CLOSE_WAIT_MS=500
+# 兜底 token：严格多设备模式下 WSS 只认 CONFIG_COMM_DEVICE_AUTH_TOKEN_VALUE，
+# 因此这里留空；非严格模式且通用 token 为空时才会用到本项。
 CONFIG_WSS_TOKEN=""
+# 本机开发用的 WSS 主机（例如 Windows 热点网关），下方同名项才是产品服务器地址；
+# 同名项重复出现时生效的是文件中最后一个，改地址请两处一起改。
 CONFIG_WSS_SERVER_HOST="192.168.137.1"
+# 唤醒判定放在服务器侧：认证后持续上传 MIC 音频，由服务器下发 MIC_START；
+# 打开时本地 WakeNet 探测器完全不参与编译与初始化（功耗与隐私影响更大）。
 CONFIG_JULIA_SERVER_WAKE_ENABLE=y
+# 单个 WSS 帧（帧头+载荷）的写入重试预算；实际上界会略大于本值，
+# 因为已进入的 TLS 写还可能再超时一次 socket write。
 CONFIG_WSS_FRAME_WRITE_BUDGET_MS=3500
 # 麦克风数字增益与扬声器固定音量，单位百分比 0–100。
+# 增益在 I2S 原始数据转 PCM16 时施加一次（上层不得再加，否则门限失真）；
+# 音量是编译期常量，运行时 SPKV 命令被忽略。
 CONFIG_JULIA_MIC_GAIN_PERCENT=70
 CONFIG_JULIA_SPEAKER_VOLUME_PERCENT=50
 
+# ===========================================================================
+# [14a] Wi-Fi 认证方式
 # 配置的热点为 WPA2-PSK，不是开放认证。单位：无。
+# ===========================================================================
+# 优先按 WPA2-PSK 关联，兼容绝大多数家用/手机热点。
 CONFIG_EXAMPLE_WIFI_AUTH_WPA2_PSK=y
 # Windows 移动热点会广播 WPA2/WPA3 过渡模式；因 SAE 认证反复超时，
 # 这里强制站点走 WPA2 路径。
 CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
 
+# ===========================================================================
+# [15] 设备主动推送演示（默认关）
 # 设备主动推送演示默认关闭：WSS 会话由云端驱动（服务器发 FILE_SEND，设备推文件）。
 # 置 CONFIG_VOICE_PUSH_DEMO_ENABLE=y 才会额外测试设备主动推送（见 voice_push_demo.c）。
+# ===========================================================================
+# 本文件只留说明不留配置行；打开前需确认 SD 卡可用（当前 SD 驱动未编入固件）。
 
+# ===========================================================================
+# [16] SD 卡遗留引脚（未编入固件）
 # SD 卡（SDMMC 1-bit，Waveshare ESP32-S3-LCD-1.85）：CLK=IO14、CMD=IO17、D0=IO16；
 # D3/CS 走板载 TCA9554 的 P2（Extend_IO3，I2C SCL=IO10/SDA=IO11，地址 0x20）。
 # 这些是遗留设置：SD 驱动与挂载未编入当前固件；不挂载不等于切断卡供电。
+# ===========================================================================
 # CONFIG_SD_CARD_ENABLE is not set
+# 以下引脚/频率只在 SD_CARD_ENABLE=y 时参与初始化，当前仅为将来恢复功能保留。
 CONFIG_SD_CARD_PIN_CLK=14
 CONFIG_SD_CARD_PIN_CMD=17
 CONFIG_SD_CARD_PIN_D0=16
+# 注意这两项当前不生效：真实 I2C 引脚由 tca9554.c 固定为 GPIO10/GPIO11。
 CONFIG_SD_CARD_I2C_SCL=10
 CONFIG_SD_CARD_I2C_SDA=11
+# 20 MHz 是板上验证过的 SDMMC 时钟，不稳定时先降到 10000 排查。
 CONFIG_SD_CARD_FREQ_KHZ=20000
 
+# ===========================================================================
+# [10b] OTA 下载失败重试与冷却
 # OTA 传输失败可重试；超过阈值后使用有界且持久化的冷却，
 # 而不是把制品永久隔离。单位：次数/秒。
+# ===========================================================================
+# 连续网络类失败达到 3 次即进入冷却（镜像头/摘要/写入类失败才永久隔离）。
 CONFIG_OTA_DOWNLOAD_RETRY_THRESHOLD=3
+# 冷却时长按 2 的幂递增：60 s → 上限 3600 s；冷却记录落盘，掉电重启后继续。
 CONFIG_OTA_DOWNLOAD_COOLDOWN_BASE_SECONDS=60
 CONFIG_OTA_DOWNLOAD_COOLDOWN_MAX_SECONDS=3600
 
+# ===========================================================================
+# [14b] Wi-Fi 传输方式与重连退避
 # TCP WebSocket 传输不属于本应用。
+# ===========================================================================
+# 语音走 WSS(TLS)，不使用明文 ws:// 传输。
 # CONFIG_WS_TRANSPORT is not set
 # Wi-Fi 作为后台服务长期运行；重试节奏由应用侧 network_lifecycle 管理，
 # 不依赖示例组件那个有限的同步重试循环。单位：毫秒，抖动为百分比。
+# 退避从 1 s 起逐次翻倍，封顶 60 s，并减去最多 20% 的随机抖动以错峰多设备重连。
 CONFIG_NETWORK_WIFI_RETRY_BASE_MS=1000
 CONFIG_NETWORK_WIFI_RETRY_MAX_MS=60000
 CONFIG_NETWORK_WIFI_RETRY_JITTER_PERCENT=20
+# 单次 esp_wifi_connect() 的看门狗：到期未见断连/拿到 IP 事件即判卡死，
+# 取消本次尝试、轮换 profile 并按退避重排。
 CONFIG_NETWORK_WIFI_CONNECT_TIMEOUT_MS=20000
+# 发射功率上限 14 dBm（驱动内部按 0.25 dBm 单位换算）：限制射频电流，属省电手段。
 CONFIG_NETWORK_WIFI_MAX_TX_POWER_DBM=14
+# 首次连接前额外做一次阻塞式 AP 扫描：诊断用，会拖慢联网并抬高电流峰值。
 CONFIG_NETWORK_WIFI_INITIAL_DIAGNOSTIC_SCAN=n
+# -1 表示不做同步重试上限，交给应用侧 network_lifecycle 的无限退避管理。
 CONFIG_EXAMPLE_WIFI_CONN_MAX_RETRY=-1
+# 多网络（Multinet）与 ESP-SR 的多网络模型一律关闭：本项目单连接即可。
 CONFIG_USE_MULTINET=n
 CONFIG_SR_MN_CN_NONE=y
 CONFIG_SR_MN_EN_NONE=y
 
+# ===========================================================================
+# [17] 显示空闲策略与 RTC/SNTP 墙钟
 # 显示空闲策略与 RTC/SNTP 墙钟。时间单位见各项名称（秒/毫秒）；
 # 亮度为百分比；故障复位延迟为毫秒；自动复位上限为次数。
+# ===========================================================================
+# 连续空闲 10 s 后立绘闭眼、背光呼吸并进入 S3 远待机。
 CONFIG_JULIA_DISPLAY_SLEEP_TIMEOUT_SECONDS=10
+# S3 驻留上限 300 s（5 min）后进入 S6 睡眠；夜间计划是独立的、可能更早的触发源。
 CONFIG_JULIA_STANDBY_SLEEP_TIMEOUT_SECONDS=300
+# S5 静默态驻留上限；S3/S5 都不开麦，运动事件把设备恢复到 S3。
 CONFIG_JULIA_SILENT_STANDBY_TIMEOUT_SECONDS=300
+# 启动后等待云端服务（MQTT 关键订阅 + 已认证 WSS）就绪的时长，超时只提示不中断重连。
 CONFIG_JULIA_SERVICE_INIT_TIMEOUT_SECONDS=30
+# S1 陪伴态固定背光 50%（不参与呼吸）；S2 用 70%、S4 用 100%，见呈现表。
 CONFIG_JULIA_COMPANION_BRIGHTNESS_PERCENT=50
+# S5 静默态固定背光 30%：刻意低于活跃态，使静默在视觉上可区分。
 CONFIG_JULIA_SILENT_BRIGHTNESS_PERCENT=30
+# S7 故障呈现保持 3000 ms 后才允许自动复位；0 表示不做呈现等待。
 CONFIG_JULIA_FAULT_RESET_DELAY_MS=3000
+# 运行时长小于 60 s 时再次记录同一故障原因即视为"快速反复故障"，用于递增重复计数。
 CONFIG_JULIA_FAULT_QUICK_UPTIME_SECONDS=60
+# 同一快速反复故障最多自动复位 3 次；重复计数从 1 起算，置 0 会让首次严重故障就停在 S7。
 CONFIG_JULIA_FAULT_AUTO_RESET_LIMIT=3
+# 空闲策略任务的兜底轮询周期（仅在剩余时间已耗尽、状态尚未提交时决定重试间隔）。
 CONFIG_JULIA_DISPLAY_ACTIVITY_POLL_MS=500
+# S3 背光呼吸的亮度区间 0–30% 与完整周期 4000 ms；MIN 必须小于 MAX，否则呼吸启动失败。
 CONFIG_JULIA_DISPLAY_BREATHE_MIN_PERCENT=0
 CONFIG_JULIA_DISPLAY_BREATHE_MAX_PERCENT=30
 CONFIG_JULIA_DISPLAY_BREATHE_PERIOD_MS=4000
+# 板载 PCF85063 RTC：开机恢复墙钟、SNTP 同步后回写；不可用时只告警不阻塞启动。
 CONFIG_JULIA_RTC_ENABLE=y
+# 夜间睡眠计划依赖 RTC 墙钟；窗口内且空闲宽限到期才进 S6，正在对话不打断。
 CONFIG_JULIA_NIGHT_SLEEP_ENABLE=y
+# 本地时间 23:00–07:00 为夜间窗口（含起点不含终点，起始>结束表示跨午夜），
+# 时区由下方 JULIA_TIMEZONE 决定；结束不会自动唤醒，仍由唤醒词驱动。
 CONFIG_JULIA_NIGHT_SLEEP_START_HOUR=23
 CONFIG_JULIA_NIGHT_SLEEP_END_HOUR=7
+# 进入窗口后需连续空闲 300 s 才投递夜间睡眠事件；只在 S1/S3/S5 计时。
 CONFIG_JULIA_NIGHT_SLEEP_GRACE_SECONDS=300
+# 注意本项当前不参与调度：实际等待由"下一个整点/宽限截止/提前唤醒"决定，
+# 该值只出现在启动日志的 poll 字段里。
 CONFIG_JULIA_NIGHT_SCHEDULE_POLL_MS=5000
+
+# ===========================================================================
+# [19] IMU 运动唤醒
 # 运动唤醒输入：扫描周期/冷却为毫秒，确认帧数为帧，加速度门限为毫 g（三轴变化量之和），
 # 角速度门限为 dps。取值来自 tools/imu_logger/tune_motion.py 对 imu_records/latest 的 11 段
 # 典型场景回放（tuning/replay.json，误报 0／漏报 0），属同数据拟合，未上板确认。
@@ -181,23 +357,41 @@ CONFIG_JULIA_NIGHT_SCHEDULE_POLL_MS=5000
 # 因此 20 ms 会重复读到同一批样本。重复采样会让加速度差分 delta 归零并清零连续计数，目前靠
 # 角速度支路兜住（它按当前样本模长判定，不怕重复读）；一旦角速度支路被关闭或量程被收窄，
 # 就必须把轮询周期放慢到不短于 ODR，否则连续确认帧无法累加、运动唤醒不再触发。
+# ===========================================================================
+# S5/S6 期间（本地采音打开时 S3 也监测）检测到运动即投递事件恢复到 S3。
 CONFIG_JULIA_IMU_MOTION_ENABLE=y
 CONFIG_JULIA_IMU_MOTION_SAMPLE_MS=20
+# 需连续 10 帧都超门限才确认（20 ms 周期约合 200 ms 持续运动），单帧尖峰不触发。
 CONFIG_JULIA_IMU_MOTION_CONFIRM_FRAMES=10
+# 0 表示事件投递成功后无冷却，可立即再次判定，只受确认帧数过滤。
 CONFIG_JULIA_IMU_MOTION_COOLDOWN_MS=0
+# 相邻样本三轴加速度变化绝对值之和 ≥450 mg（不是模长差、不是单轴门限）。
 CONFIG_JULIA_IMU_ACCEL_DELTA_MG=450
+# 三轴角速度模长 ≥400 dps；按当前样本模长判定，因此不受轮询快于 ODR 的重复采样影响。
 CONFIG_JULIA_IMU_GYRO_THRESHOLD_DPS=400
+# POSIX TZ 字符串（CST-8 = 东八区），不能用 IANA 名字（如 Asia/Shanghai）；
+# 写错不会报错，只会让本地时间偏移，进而影响夜间睡眠窗口判断。
 CONFIG_JULIA_TIMEZONE="CST-8"
+# SNTP 校时服务器：拿到 IPv4 后启动一次，同步成功回写 RTC；失败则沿用 RTC 时间。
 CONFIG_JULIA_SNTP_SERVER="pool.ntp.org"
+# ===========================================================================
+# [11] 多设备/云状态同步与 MQTT 认证
+# ===========================================================================
+# 严格多设备模式：只用 voice/<device_id>/vcmd 主题、强制显式设备凭证、不做旧字段回退。
 CONFIG_JULIA_MULTI_DEVICE_ENABLE=y
+# 要求先完成云端状态同步协议 v2（session_sync_ack）才允许音频上行，需配套云端服务。
 CONFIG_JULIA_CLOUD_STATE_SYNC_ENABLE=y
 # 设备认证方式：当前使用用户名/密码（严格模式），其余三种未启用。
+# 严格模式下用户名/密码为空会让 MQTT 启动直接失败（不是静默降级）。
 CONFIG_COMM_DEVICE_AUTH_USERNAME_PASSWORD=y
 # CONFIG_COMM_DEVICE_AUTH_NONE is not set
 # CONFIG_COMM_DEVICE_AUTH_TOKEN is not set
 # CONFIG_COMM_DEVICE_AUTH_CERTIFICATE is not set
+# MQTT broker 端点（新端口 11883）；URI 写错表现为反复连接失败而非离线告警。
 CONFIG_COMM_MQTT_BROKER_URI="mqtts://8.133.215.254:11883"
 
+# ===========================================================================
+# [20] 本地分段采音（capture-v1）
 # 本地分段采音（capture-v1）能力协商：开启 FFT 门控与 WebRTC VAD。
 # VAD_MODE 为 0–3 的激进程度；两个 TAIL 是"静音尾"时长，单位毫秒（按 20 ms 帧向上取整）。
 # 注意：本文件只列出"与 Kconfig 默认不同"的项，因此不含降噪历史门控
@@ -205,15 +399,28 @@ CONFIG_COMM_MQTT_BROKER_URI="mqtts://8.133.215.254:11883"
 # 打开，取值与 docs/NOISE_TAIL.md 的参考组合一致（R=200‰、C=800 Hz、W=15 帧、最少 5
 # 个能量帧、60%、确认 1 帧、尾段恢复 R=200‰/C=700 Hz、结束保护 500 ms），也就是说
 # 这些参数当前是生效的；需要关闭降噪时在 sdkconfig 里置 n，本文件不负责开关它。
+# ===========================================================================
+# 设备侧做起音/收尾判定；开始收音前必须与云端完成 capture_hello/capture_ready 协商，
+# 对端不支持 capture-v1 时会结束会话并向旧服务器退避。
 CONFIG_JULIA_LOCAL_CAPTURE_ENABLE=y
+# 频谱平坦度/熵门限作为候选证据；门限为候选值，真实降噪效果与 S3 时序仍待上板验证。
 CONFIG_JULIA_CAPTURE_FFT_GATE=y
+# WebRTC VAD 只补充证据：起音与收尾仍需同时满足能量门限等条件；初始化失败回退能量路径。
 CONFIG_JULIA_CAPTURE_VAD_ENABLE=y
+# 激进程度 0（最宽松）–3（最严格）；调高不易因噪声起音，但更易漏掉轻声说话。
 CONFIG_JULIA_CAPTURE_VAD_MODE=1
+# 唤醒段/对话段的静音尾时长：调大更耐句中停顿，代价是段更长、上行流量与延迟增加。
 CONFIG_JULIA_CAPTURE_VAD_WAKE_TAIL_MS=500
 CONFIG_JULIA_CAPTURE_VAD_DIALOG_TAIL_MS=700
 
+# ===========================================================================
+# [12b] 服务器端点
 # 开发用服务器端点（凭证仍只存在于本机 sdkconfig）。
+# ===========================================================================
+# 关闭后使用新端口（18443/19443/11883）；打开会回到旧服务器，新服务器上可能连不上。
 # CONFIG_JULIA_LEGACY_SERVER_PORTS is not set
+# 上面那处 CONFIG_WSS_SERVER_HOST="192.168.137.1" 会被此处覆盖（同名项以最后一个为准）。
 CONFIG_WSS_SERVER_HOST="8.133.215.254"
 CONFIG_WSS_SERVER_PORT=19443
+# WebSocket 升级路径，必须以 "/" 开头并与服务端路由一致；空串会被服务器直接拒绝。
 CONFIG_WSS_PATH="/voice"

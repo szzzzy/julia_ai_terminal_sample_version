@@ -3,7 +3,7 @@
  * @brief 建立板级电源保持，并配置当前固件采用的 CPU 频率范围。
  *
  * BAT_Control 必须在其它外设初始化前保持高电平；短暂低脉冲可能切断电池供电。
- * 本模块配置启动与运行期 CPU 上限，不负责关机时序、电量检测或外设级休眠。
+ * 本模块配置 CPU 上限并检测 PWR 长按松手以切断电池保持；不负责电量检测或外设级休眠。
  */
 #include "julia_power.h"
 
@@ -11,9 +11,63 @@
 #include "esp_log.h"
 #include "esp_pm.h"
 #include "sdkconfig.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "julia_power_key.h"
 
 static const char *TAG = "JULIA_POWER";
 static esp_pm_lock_handle_t s_cpu_boost;
+static bool s_hold_ready;
+
+#if CONFIG_JULIA_PWR_KEY_ENABLE
+static TaskHandle_t s_key_task;
+static void power_key_task(void *arg)
+{
+    (void)arg;
+    julia_power_key_t key = {0};
+    for (;;) {
+        bool pressed = gpio_get_level(CONFIG_JULIA_PWR_KEY_GPIO) == 0;
+        if (julia_power_key_update(&key, pressed, esp_timer_get_time() / 1000,
+                                   CONFIG_JULIA_PWR_OFF_HOLD_MS)) {
+            ESP_LOGW(TAG, "PWR long press released: disabling battery power hold");
+            esp_err_t err = gpio_set_level(CONFIG_JULIA_BAT_CONTROL_GPIO, 0);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "battery power off failed: %s", esp_err_to_name(err));
+            } else {
+                /* USB 直供无法由 BAT_Control 切断；不假装已关机，也不自动复位。 */
+                vTaskDelay(pdMS_TO_TICKS(250));
+                ESP_LOGW(TAG, "still powered (USB/external supply); battery hold remains disabled");
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10) ? pdMS_TO_TICKS(10) : 1);
+    }
+}
+#endif
+
+esp_err_t julia_power_key_start(void)
+{
+#if CONFIG_JULIA_PWR_KEY_ENABLE
+    /* 仅由 app_main 调用；保持配置失败时不能重新配置同一电源路径。 */
+    if (!s_hold_ready) return ESP_ERR_INVALID_STATE;
+    if (s_key_task) return ESP_OK;
+    if (CONFIG_JULIA_PWR_KEY_GPIO == CONFIG_JULIA_BAT_CONTROL_GPIO ||
+        !GPIO_IS_VALID_GPIO(CONFIG_JULIA_PWR_KEY_GPIO)) return ESP_ERR_INVALID_ARG;
+    const gpio_config_t config = {
+        .pin_bit_mask = 1ULL << CONFIG_JULIA_PWR_KEY_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t err = gpio_config(&config);
+    if (err != ESP_OK) return err;
+    return xTaskCreate(power_key_task, "pwr_key", 3072, NULL, 3, &s_key_task) == pdPASS
+        ? ESP_OK : ESP_ERR_NO_MEM;
+#else
+    return ESP_OK;
+#endif
+}
 
 /* ESP-PM 计数锁（ESP_PM_CPU_FREQ_MAX）：持有期间只要求 CPU 运行在"已配置的最高频率"
  * 上，即当前 boot／runtime 档位给出的 DFS 上限，并不会超过该上限；最后一个持有者释放后
@@ -67,6 +121,7 @@ esp_err_t julia_power_hold_enable(void)
     if (err != ESP_OK) return err;
     err = gpio_set_level(hold_gpio, 1);
     if (err == ESP_OK) {
+        s_hold_ready = true;
         ESP_LOGI(TAG, "battery power hold enabled gpio=%d",
                  (int)hold_gpio);
     }
